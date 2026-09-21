@@ -22,4 +22,3 @@ fn main() {
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");
 }
-round 6 fixes
