@@ -25,6 +25,43 @@ const SCREENSHOT_MAX_MS = 15 * 60 * 1000; // averages ~10 minutes
 const ACTIVITY_FLUSH_MS = 5 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
+// Idle detector force-pause (2026-09-21) - separate from, but built on the
+// same idea as, the force-kill/abandoned-session detection above: someone
+// who's clocked in but has walked away shouldn't keep racking up billed
+// hours (or keep getting screenshotted) just because the app is still open.
+// Uses timelog_seconds_idle() (src-tauri/src/timelog.rs), which reads off
+// the SAME global keyboard/mouse hook already running for activity capture -
+// so this correctly notices idle time even while some OTHER window has
+// focus, not just idle-inside-this-app.
+//
+// There's no separate "paused" state in the data model (timeEntries only
+// has clockInAt/clockOutAt) - inventing one would mean auditing every place
+// that already computes worked hours as a straight clockOutAt-clockInAt
+// span, which is real surface area to get subtly wrong. Instead, an idle
+// force-pause IS a clock-out - same shape as the existing abandoned-session
+// close-out just above, timestamped at the moment activity actually stopped
+// (not "now"), so idle time is correctly excluded from worked hours, and
+// the person just clocks back in via the normal "Ready to start your day?"
+// prompt whenever they're back.
+const IDLE_WARNING_SEC = 10 * 60; // idle this long -> show the warning
+const IDLE_GRACE_SEC = 60;        // ...then this much longer with no response -> auto clock-out
+const IDLE_POLL_MS = 15 * 1000;
+
+let onIdleWarning = null, onIdleCleared = null, onIdleForcePaused = null;
+// fn(secondsRemaining) - called repeatedly (every poll) while idle has passed
+// IDLE_WARNING_SEC but not yet the auto-clock-out point, so main.js can show
+// a live countdown instead of a single static message.
+export function setIdleWarningHandler(fn) { onIdleWarning = fn; }
+// fn() - called once if activity resumes while the warning is showing, so
+// main.js can dismiss its countdown modal.
+export function setIdleClearedHandler(fn) { onIdleCleared = fn; }
+// fn(lastActiveAtIso) - called once timelog.js has ALREADY clocked out due
+// to idle - distinct from setSessionAutoClosedHandler (force-kill/uninstall
+// of a PREVIOUS session, discovered on next launch) since this fires mid-
+// session and deserves its own, clearer message.
+export function setIdleForcePausedHandler(fn) { onIdleForcePaused = fn; }
+
+// ---------------------------------------------------------------------------
 // Force-kill / uninstall detection.
 //
 // There is no code that can run "on force-kill" - the process is simply
@@ -105,9 +142,11 @@ export async function clockIn(uid) {
   await db.doc('timeEntries/' + timeEntryId).set({ userId: uid, clockInAt: now, clockOutAt: null, lastHeartbeatAt: now, autoClosedReason: null });
   state = { uid, timeEntryId, windowStart: new Date().toISOString() };
   warnedThisSession = false;
+  idleWarningActive = false;
   scheduleScreenshot();
   scheduleActivityFlush();
   scheduleHeartbeat();
+  scheduleIdlePoll();
   try {
     await tauriInvoke('timelog_start');
     checkListenerError();
@@ -159,9 +198,11 @@ export async function resumeIfClockedIn(uid) {
 
   state = { uid, timeEntryId: open.id, windowStart: new Date().toISOString() };
   warnedThisSession = false;
+  idleWarningActive = false;
   scheduleScreenshot();
   scheduleActivityFlush();
   scheduleHeartbeat();
+  scheduleIdlePoll();
   try {
     // Safe to call again even if the native hook is already running -
     // timelog_start() only resets the activity buffer the first time
@@ -182,6 +223,8 @@ export async function clockOut() {
   if (s.screenshotTimer) clearTimeout(s.screenshotTimer);
   if (s.activityTimer) clearTimeout(s.activityTimer);
   if (s.heartbeatTimer) clearTimeout(s.heartbeatTimer);
+  if (s.idleTimer) clearTimeout(s.idleTimer);
+  idleWarningActive = false;
   await flushActivity(s).catch(() => {});
   await db.doc('timeEntries/' + s.timeEntryId).update({ clockOutAt: new Date().toISOString() });
   try { await tauriInvoke('timelog_stop'); } catch (e) {}
@@ -201,6 +244,35 @@ function scheduleHeartbeat() {
     await db.doc('timeEntries/' + s.timeEntryId).update({ lastHeartbeatAt: new Date().toISOString() }).catch(() => {});
     scheduleHeartbeat();
   }, HEARTBEAT_MS);
+}
+
+let idleWarningActive = false;
+function scheduleIdlePoll() {
+  if (!state) return;
+  const s = state;
+  s.idleTimer = setTimeout(async () => {
+    if (state !== s) return;
+    let idleSec = 0;
+    try { idleSec = await tauriInvoke('timelog_seconds_idle'); }
+    catch (e) { scheduleIdlePoll(); return; } // no native hook available (plain browser) - idle detection just doesn't apply
+
+    if (idleSec >= IDLE_WARNING_SEC + IDLE_GRACE_SEC) {
+      idleWarningActive = false;
+      const lastActiveAt = new Date(Date.now() - idleSec * 1000).toISOString();
+      await clockOut().catch(() => {});
+      if (onIdleForcePaused) { try { onIdleForcePaused(lastActiveAt); } catch (e) {} }
+      return; // clockOut() already cleared state and every one of its timers
+    }
+    if (idleSec >= IDLE_WARNING_SEC) {
+      idleWarningActive = true;
+      const remaining = Math.max(0, IDLE_WARNING_SEC + IDLE_GRACE_SEC - idleSec);
+      if (onIdleWarning) { try { onIdleWarning(remaining); } catch (e) {} }
+    } else if (idleWarningActive) {
+      idleWarningActive = false;
+      if (onIdleCleared) { try { onIdleCleared(); } catch (e) {} }
+    }
+    scheduleIdlePoll();
+  }, IDLE_POLL_MS);
 }
 
 function scheduleScreenshot() {
@@ -287,3 +359,4 @@ export async function listActivityForEntry(timeEntryId) {
   const snap = await db.collection('activitySamples').where('timeEntryId', '==', timeEntryId).orderBy('windowStart', 'asc').get();
   return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
 }
+round 6 fixes
