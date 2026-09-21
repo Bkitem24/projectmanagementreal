@@ -35,6 +35,8 @@ src/               the web app (vanilla JS, no framework — same code style
     timelog.js       clock-in orchestration (screenshots + activity)
     r2.js            Cloudflare R2 upload/download helper
 supabase/          schema.sql (run first) + schema_v2.sql (run second) +
+                    schema_v3.sql (Teams backfill) + schema_v4.sql (episode
+                    discussion + email-change sync) — run all four, in order +
                     seed.sql (optional example client data) + seed_services.sql
                     (optional — Blue Kite's real service vocabulary)
 src-tauri/         the Windows desktop wrapper (Tauri), incl. src/timelog.rs

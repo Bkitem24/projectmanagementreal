@@ -26,6 +26,21 @@ export async function signOut() {
   if (error) throw error;
 }
 
+// Changing your own email/password, for the "Edit profile" modal in
+// main.js. Email changes go through Supabase Auth's own confirmation flow
+// (it emails both the old and new address before the change actually takes
+// effect) — that's Supabase's behavior, not something this app controls, so
+// the UI just tells the person to check their inbox.
+export async function updateEmail(newEmail) {
+  const { error } = await supabase.auth.updateUser({ email: newEmail });
+  if (error) throw error;
+}
+
+export async function updatePassword(newPassword) {
+  const { error } = await supabase.auth.updateUser({ password: newPassword });
+  if (error) throw error;
+}
+
 export async function getSession() {
   const { data, error } = await supabase.auth.getSession();
   if (error) throw error;

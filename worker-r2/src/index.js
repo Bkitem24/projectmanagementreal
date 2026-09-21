@@ -101,6 +101,9 @@ async function runRetention(env) {
   const results = await Promise.allSettled([
     purgeTable(env, 'screenshots', 'takenAt', cutoff, 'r2Key'),
     purgeTable(env, 'taskAttachments', 'createdAt', cutoff, 'r2Key'),
+    // Added alongside the new per-episode discussion thread (schema_v4.sql,
+    // "Additional Fixes Phase 1") — same retention rule as task attachments.
+    purgeTable(env, 'episodeAttachments', 'createdAt', cutoff, 'r2Key'),
     purgeTable(env, 'activitySamples', 'windowStart', cutoff, null),
   ]);
   results.forEach((r, i) => {

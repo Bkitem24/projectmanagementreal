@@ -148,3 +148,11 @@ export async function listTimeEntries(userId, limitN) {
   const snap = await db.collection('timeEntries').where('userId', '==', userId).orderBy('clockInAt', 'desc').limit(limitN || 30).get();
   return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
 }
+
+// All activity windows recorded during one clock-in — used to find which
+// window (if any) overlaps a given screenshot's takenAt, for the "click a
+// screenshot, see the activity around it" view in main.js.
+export async function listActivityForEntry(timeEntryId) {
+  const snap = await db.collection('activitySamples').where('timeEntryId', '==', timeEntryId).orderBy('windowStart', 'asc').get();
+  return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
+}

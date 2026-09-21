@@ -1,6 +1,6 @@
 import { supabase, supabaseConfigured } from './lib/supabaseClient.js';
 import { db, randomId } from './lib/db.js';
-import { signUp, signIn, signOut, getSession, onAuthStateChange, fetchProfiles } from './lib/auth.js';
+import { signUp, signIn, signOut, getSession, onAuthStateChange, fetchProfiles, updateEmail, updatePassword } from './lib/auth.js';
 import { listTeams, createTeam, assignTeamManager, createInvite, listInvites, listServices, createService, deleteService } from './lib/teams.js';
 import { startPresence, stopPresence, isOnline, onPresenceChange } from './lib/presence.js';
 import { compressImage } from './lib/imageCompress.js';
@@ -22,6 +22,11 @@ var ROLES = [
   {key:'admin', label:'Admin', color:'var(--r-admin)'}
 ];
 var INVITABLE_ROLES = ROLES.filter(function(r){ return r.key!=='manager' && r.key!=='admin'; });
+// Everything an Admin can hand out to an existing employee or a fresh
+// invite, short of the (single, effectively-permanent) Admin role itself —
+// this is what lets multiple people share 'manager' on the same team, since
+// it's just a per-person role+team assignment, not a one-slot field.
+var ASSIGNABLE_ROLES = ROLES.filter(function(r){ return r.key!=='admin'; });
 var CLIENT_COLORS = ['#2f8fd1','#3f6b8a','#7a5ea8','#4f8f6b','#b8567a','#a15c2f'];
 var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
@@ -113,6 +118,18 @@ async function refreshServicesCache(){
   try{ servicesCache = await listServices(); }catch(e){ servicesCache = []; }
 }
 function teamName(id){ return (teamsCache[id] && teamsCache[id].name) || '—'; }
+// Every team <select> in the app used to list teams in creation order
+// (teamsCache/listTeams() is ordered by createdAt) — alphabetical is what
+// people actually expect once there's more than a couple of teams. This is
+// the one place that builds team <option> lists now.
+function sortedTeamList(){
+  return Object.keys(teamsCache).map(function(id){ return teamsCache[id]; }).sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+}
+function teamOptionsHtml(selectedId, includeBlank){
+  var opts = (includeBlank ? '<option value="">— no team —</option>' : '') +
+    sortedTeamList().map(function(t){ return '<option value="'+t.id+'"'+(t.id===selectedId?' selected':'')+'>'+escapeHtml(t.name)+'</option>'; }).join('');
+  return opts;
+}
 function servicesForMyScope(){
   return servicesCache.filter(function(s){ return s.scope==='global' || s.teamId===myTeamId || isAdmin(); });
 }
@@ -128,7 +145,65 @@ function renderIdentityCard(){
   box.innerHTML =
     '<div style="display:flex;align-items:center;gap:9px;">'+avatar+
     '<div style="min-width:0;flex:1;"><div class="role-current-label" style="line-height:1.15;">'+escapeHtml((myProfile&&myProfile.displayName)||'')+'</div>'+
-    '<div class="team-current-label"><span class="role-dot" style="background:'+(r?r.color:'#888')+';display:inline-block;margin-right:5px;"></span>'+escapeHtml(r?r.label:myRole)+(myTeamId?' · '+escapeHtml(teamName(myTeamId)):'')+'</div></div></div>';
+    '<div class="team-current-label"><span class="role-dot" style="background:'+(r?r.color:'#888')+';display:inline-block;margin-right:5px;"></span>'+escapeHtml(r?r.label:myRole)+(myTeamId?' · '+escapeHtml(teamName(myTeamId)):'')+'</div></div>'+
+    '<button type="button" id="editProfileBtn" title="Edit your profile" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:4px;flex:none;">✎</button></div>';
+  var editBtn = document.getElementById('editProfileBtn');
+  if(editBtn) editBtn.addEventListener('click', openEditProfileModal);
+}
+
+// Every logged-in account could see their own photo/name/role at the top of
+// the sidebar, but there was no way to actually change any of it once
+// signed up (aside from an Admin editing role/team, which is a different
+// thing). This covers the rest: display name, photo, email, password.
+var pendingProfileAvatarBlob = null;
+function openEditProfileModal(){
+  pendingProfileAvatarBlob = null;
+  var currentAvatar = myProfile && myProfile.avatarUrl;
+  openModal('Edit your profile',
+    '<div class="field"><label>Profile photo</label><div class="avatar-drop" id="profileAvatarDrop">'+
+      (currentAvatar ? '<img src="'+escapeHtml(currentAvatar)+'">' : '<div class="avatar-drop-hint">Click to choose a photo</div>')+
+      '<input type="file" accept="image/*" id="profileAvatarInput" style="display:none;"></div></div>'+
+    '<div class="field"><label>Your name</label><input name="displayName" type="text" value="'+escapeHtml((myProfile&&myProfile.displayName)||'')+'" required></div>'+
+    '<div class="field"><label>Email</label><input name="email" type="email" value="'+escapeHtml((myProfile&&myProfile.email)||'')+'"><div class="field-hint">Changing this sends a confirmation link to your new address — the change only takes effect once you click it.</div></div>'+
+    '<div class="field"><label>New password (leave blank to keep your current one)</label><input name="password" type="password" minlength="6" placeholder="••••••••"></div>',
+    function(fd){
+      var displayName = (fd.get('displayName')||'').trim();
+      if(!displayName){ showModalError('Enter your name.'); return; }
+      var newEmail = (fd.get('email')||'').trim();
+      var newPassword = fd.get('password')||'';
+      setModalBusy(true);
+      var work = [];
+      var avatarWork = pendingProfileAvatarBlob
+        ? uploadFile(new File([pendingProfileAvatarBlob],'photo.jpg',{type:'image/jpeg'}), 'avatars/'+myUid+'/photo.jpg').then(function(){
+            return db.doc('profiles/'+myUid).update({ avatarUrl: fileUrl('avatars/'+myUid+'/photo.jpg') });
+          })
+        : Promise.resolve();
+      work.push(avatarWork);
+      work.push(db.doc('profiles/'+myUid).update({ displayName: displayName }));
+      if(newEmail && myProfile && newEmail !== myProfile.email) work.push(updateEmail(newEmail));
+      if(newPassword) work.push(updatePassword(newPassword));
+      Promise.all(work).then(function(){
+        closeModal();
+        showToast('success','Profile updated'+(newEmail && myProfile && newEmail!==myProfile.email ? ' — check your inbox to confirm the new email' : ''));
+      }).catch(function(err){ showModalError(errMsg(err)); });
+    }, 'Save changes');
+
+  var drop = document.getElementById('profileAvatarDrop');
+  var input = document.getElementById('profileAvatarInput');
+  drop.addEventListener('click', function(){ input.click(); });
+  input.addEventListener('change', function(){
+    var file = input.files[0]; if(!file) return;
+    drop.innerHTML = '<div class="avatar-drop-hint">Checking for a face…</div>';
+    imageHasFace(file).then(function(ok){
+      if(!ok){ drop.innerHTML = '<div class="avatar-drop-hint">No face detected — click to try another photo.</div>'; drop.appendChild(input); pendingProfileAvatarBlob=null; return; }
+      return compressImage(file, {maxWidth:400,maxHeight:400,quality:.85}).then(function(blob){
+        pendingProfileAvatarBlob = blob;
+        var url = URL.createObjectURL(blob);
+        drop.innerHTML = '<img src="'+url+'">';
+        drop.appendChild(input);
+      });
+    }).catch(function(){ drop.innerHTML = '<div class="avatar-drop-hint">Could not check this photo — click to try another.</div>'; drop.appendChild(input); });
+  });
 }
 
 // ---------- profile hydration ----------
@@ -380,7 +455,7 @@ function renderHome(){
         '<div class="client-card-name">'+escapeHtml(c.name)+'</div>'+
         '<div class="client-card-host">Hosted by '+escapeHtml(c.hostName||'—')+'</div>'+
         '<div class="client-card-tagline">'+escapeHtml(c.tagline||'')+'</div>'+
-        '<div class="client-card-foot"><span>'+(c.services?c.services.length:0)+' services</span>'+(c.example?'<span class="badge badge-upcoming">Example</span>':'<span>View board →</span>')+'</div>'+
+        '<div class="client-card-foot"><span>'+(c.services?c.services.length:0)+' services</span>'+(isAdmin()?'<span class="badge badge-team">'+escapeHtml(teamName(c.teamId))+'</span>':'')+(c.example?'<span class="badge badge-upcoming">Example</span>':'<span>View board →</span>')+'</div>'+
         '</div></a>';
     }).join('');
     if(canManage()) cards += '<button type="button" class="add-client-card" id="addClientCard">+ Add a client</button>';
@@ -393,7 +468,7 @@ function renderHome(){
 
 function openAddClientModal(){
   var teamFieldHtml = isAdmin()
-    ? '<div class="field"><label>Team</label><select name="teamId" required>'+Object.keys(teamsCache).map(function(id){ return '<option value="'+id+'">'+escapeHtml(teamsCache[id].name)+'</option>'; }).join('')+'</select></div>'
+    ? '<div class="field"><label>Team</label><select name="teamId" required>'+teamOptionsHtml()+'</select></div>'
     : '';
   openModal('Add a client', '<div class="field"><label>Client / project name</label><input required name="name" type="text" placeholder="e.g. Fan Club Setlist"></div>'+
     '<div class="field"><label>Host name(s)</label><input name="hostName" type="text" placeholder="e.g. Erica Bonser &amp; Steph Eggar"></div>'+
@@ -508,7 +583,7 @@ function renderClient(clientId){
     var editTeamBtn = document.getElementById('editTeamBtn');
     if(editTeamBtn) editTeamBtn.addEventListener('click', function(){
       var row = document.getElementById('clientTeamRow');
-      var teamOpts = Object.keys(teamsCache).map(function(id){ return '<option value="'+id+'"'+(id===c.teamId?' selected':'')+'>'+escapeHtml(teamsCache[id].name)+'</option>'; }).join('');
+      var teamOpts = teamOptionsHtml(c.teamId);
       row.innerHTML = '<select id="teamReassignSelect" style="font-size:12px;padding:2px 4px;">'+teamOpts+'</select> '+
         '<button type="button" class="btn btn-sm" id="saveTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;">Save</button> '+
         '<button type="button" class="btn btn-sm" id="cancelTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;">Cancel</button>';
@@ -675,7 +750,7 @@ function openCreateServiceTypeModal(clientIdToAttach){
     ? '<option value="team">A specific Team</option><option value="global">Every Team (global)</option>'
     : '<option value="team">Just my Team</option>';
   var teamPickerHtml = isAdmin()
-    ? '<div class="field" id="teamPickerField"><label>Team</label><select name="teamId">'+Object.keys(teamsCache).map(function(id){ return '<option value="'+id+'">'+escapeHtml(teamsCache[id].name)+'</option>'; }).join('')+'</select></div>'
+    ? '<div class="field" id="teamPickerField"><label>Team</label><select name="teamId">'+teamOptionsHtml()+'</select></div>'
     : '';
   openModal('New service type', '<div class="field"><label>Service name</label><input required name="name" type="text" placeholder="e.g. Full Production"></div>'+
     '<div class="field"><label>Scope</label><select name="scope" id="scopeSelect">'+scopeOptions+'</select></div>'+
@@ -819,10 +894,14 @@ function renderEpisode(episodeId){
       '<div id="epStatusBadge"></div></div>'+
       '<div class="progress-bar"><div class="progress-fill" id="epProgressFill" style="width:0%"></div></div>'+
       (canManage()?'<div style="margin-top:14px;"><button type="button" class="btn btn-sm" id="addCustomTaskBtn">+ Add custom task</button></div>':'')+
-      '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>';
+      '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>'+
+      '<div class="section"><div class="section-head"><h2 class="section-title">Discussion</h2></div>'+
+      '<div class="page-sub" style="margin:-6px 0 12px;">General chat about this episode as a whole — for a specific subtask, use "Comments, links & files" on that task instead.</div>'+
+      '<div id="epCollab"></div></div>';
 
     var addCustomBtn = document.getElementById('addCustomTaskBtn');
     if(addCustomBtn) addCustomBtn.addEventListener('click', function(){ openAddCustomTaskModal(episodeId, e); });
+    loadCollab('episode', episodeId, document.getElementById('epCollab'));
 
     var unsubTasks = db.collection('tasks').where('episodeId','==',episodeId).orderBy('orderNum','asc').onSnapshot(function(ts){
       var box = document.getElementById('taskGroups');
@@ -913,44 +992,110 @@ function openAddCustomTaskModal(episodeId, episode){
     }, 'Add task');
 }
 
-function loadTaskCollab(taskId, panel){
+// ---------- comments/links/attachments (shared by per-subtask AND
+// per-episode discussion threads) ----------
+function isImageAttachment(a){
+  return ((a&&a.fileType)||'').indexOf('image/')===0 || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test((a&&a.fileName)||'');
+}
+function attachmentIcon(a){
+  var type = ((a&&a.fileType)||'').toLowerCase();
+  var name = ((a&&a.fileName)||'').toLowerCase();
+  if(type.indexOf('pdf')>-1 || /\.pdf$/.test(name)) return '📕';
+  if(type.indexOf('zip')>-1 || /\.(zip|rar|7z)$/.test(name)) return '🗜️';
+  if(type.indexOf('video')>-1 || /\.(mp4|mov|avi|mkv|webm)$/.test(name)) return '🎞️';
+  if(type.indexOf('audio')>-1 || /\.(mp3|wav|m4a|aac)$/.test(name)) return '🎵';
+  if(/\.(doc|docx)$/.test(name)) return '📄';
+  if(/\.(xls|xlsx|csv)$/.test(name)) return '📊';
+  if(/\.(ppt|pptx)$/.test(name)) return '📽️';
+  return '📎';
+}
+// A simple full-screen preview for image attachments — clicking a thumbnail
+// used to just be a download link with no way to actually look at the
+// picture without saving it to disk first.
+function showImageLightbox(url, title){
+  var root = document.getElementById('modalRoot');
+  root.innerHTML = '<div class="modal-backdrop" id="modalBackdrop"><div class="lightbox-frame">'+
+    '<button type="button" class="modal-close lightbox-close" id="modalClose">✕</button>'+
+    '<img src="'+escapeHtml(url)+'" alt="'+escapeHtml(title||'')+'"></div></div>';
+  root.classList.add('open');
+  document.getElementById('modalClose').onclick = closeModal;
+  document.getElementById('modalBackdrop').addEventListener('click', function(e){ if(e.target.id==='modalBackdrop') closeModal(); });
+}
+
+// kind is 'task' or 'episode' — same comments/links/attachments UI, just
+// pointed at a different set of tables (see supabase/schema_v2.sql for
+// taskComments/taskLinks/taskAttachments and schema_v4.sql for the episode-
+// level equivalents added for the general per-episode discussion thread).
+var COLLAB_TABLES = {
+  // Both prefixes start with 'attachments/' on purpose — worker-r2 only
+  // requires an authenticated GET for keys under 'screenshots/' or
+  // 'attachments/' (see worker-r2/src/index.js's isSensitiveKey()); a
+  // different prefix here would have made episode-level files readable by
+  // anyone with the URL, no login required.
+  task: { idField:'taskId', comments:'taskComments', links:'taskLinks', attachments:'taskAttachments', keyPrefix:'attachments/' },
+  episode: { idField:'episodeId', comments:'episodeComments', links:'episodeLinks', attachments:'episodeAttachments', keyPrefix:'attachments/episode/' }
+};
+function loadTaskCollab(taskId, panel){ return loadCollab('task', taskId, panel); }
+function loadCollab(kind, id, panel){
+  var cfg = COLLAB_TABLES[kind];
   panel.innerHTML = '<div class="skeleton" style="height:40px;"></div>';
   Promise.all([
-    supabase.from('taskComments').select('*').eq('taskId', taskId).order('createdAt', { ascending: true }),
-    supabase.from('taskLinks').select('*').eq('taskId', taskId).order('createdAt', { ascending: true }),
-    supabase.from('taskAttachments').select('*').eq('taskId', taskId).order('createdAt', { ascending: true }),
+    supabase.from(cfg.comments).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
+    supabase.from(cfg.links).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
+    supabase.from(cfg.attachments).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
   ]).then(function(res){
     var comments = res[0].data||[], links = res[1].data||[], attachments = res[2].data||[];
     var ids = comments.map(function(c){return c.authorId;}).concat(links.map(function(l){return l.addedBy;})).concat(attachments.map(function(a){return a.uploadedBy;})).filter(Boolean);
     return fetchProfiles(ids).then(function(ps){
-      function who(id){ return (ps[id]&&ps[id].name)||'Someone'; }
+      function who(uid){ return (ps[uid]&&ps[uid].name)||'Someone'; }
+      function authorHead(uid, when){
+        var p = ps[uid]||{};
+        var av = p.avatarUrl ? '<span class="avatar" style="background-image:url(\''+escapeHtml(p.avatarUrl)+'\')"></span>' : '<span class="avatar" style="background:'+(p.color||'#888')+'">'+escapeHtml(p.initial||'?')+'</span>';
+        return '<div class="comment-row-head">'+av+'<span class="comment-author">'+escapeHtml(who(uid))+'</span><span class="comment-time">'+fmtDateTime(when)+'</span></div>';
+      }
       panel.innerHTML =
-        '<div class="collab-list">'+comments.map(function(c){
-          return '<div class="comment-row"><span class="comment-author">'+escapeHtml(who(c.authorId))+'</span>'+escapeHtml(c.body)+' <span class="comment-time">'+fmtDateTime(c.createdAt)+'</span></div>';
-        }).join('')+'</div>'+
+        (comments.length?'<div class="collab-list">'+comments.map(function(c){
+          return '<div class="comment-row">'+authorHead(c.authorId, c.createdAt)+'<div class="comment-body">'+escapeHtml(c.body)+'</div></div>';
+        }).join('')+'</div>':'')+
         (links.length?'<div class="collab-list">'+links.map(function(l){ return '<div class="link-row">🔗 <a href="'+escapeHtml(l.url)+'" target="_blank" rel="noopener">'+escapeHtml(l.label||l.url)+'</a></div>'; }).join('')+'</div>':'')+
-        (attachments.length?'<div class="collab-list">'+attachments.map(function(a){ return '<div class="attachment-row">📎 <a href="#" data-download-key="'+escapeHtml(a.r2Key)+'" data-download-name="'+escapeHtml(a.fileName)+'">'+escapeHtml(a.fileName)+'</a></div>'; }).join('')+'</div>':'')+
-        '<div class="collab-input-row"><input type="text" id="commentInput_'+taskId+'" placeholder="Add a comment…"><button type="button" class="btn btn-sm" id="commentSend_'+taskId+'">Send</button></div>'+
-        '<div class="collab-input-row"><input type="url" id="linkInput_'+taskId+'" placeholder="Paste a link…"><button type="button" class="btn btn-sm" id="linkSend_'+taskId+'">Add</button></div>'+
-        '<div class="collab-input-row"><label class="btn btn-sm" style="cursor:pointer;">Attach file<input type="file" id="fileInput_'+taskId+'" style="display:none;"></label><span id="fileStatus_'+taskId+'" style="font-size:11.5px;color:var(--muted);"></span></div>';
+        (attachments.length?'<div class="attachment-grid">'+attachments.map(function(a){
+          if(isImageAttachment(a)) return '<div class="attachment-thumb" data-img-key="'+escapeHtml(a.r2Key)+'" data-img-name="'+escapeHtml(a.fileName)+'"><img loading="lazy"><span class="attachment-name">'+escapeHtml(a.fileName)+'</span></div>';
+          return '<div class="attachment-file"><a href="#" data-download-key="'+escapeHtml(a.r2Key)+'" data-download-name="'+escapeHtml(a.fileName)+'"><span class="attachment-file-icon">'+attachmentIcon(a)+'</span>'+escapeHtml(a.fileName)+'</a></div>';
+        }).join('')+'</div>':'')+
+        '<div class="collab-input-row"><input type="text" id="commentInput_'+id+'" placeholder="Add a comment…"><button type="button" class="btn btn-sm" id="commentSend_'+id+'">Send</button></div>'+
+        '<div class="collab-input-row"><input type="url" id="linkInput_'+id+'" placeholder="Paste a link…"><button type="button" class="btn btn-sm" id="linkSend_'+id+'">Add</button></div>'+
+        '<div class="collab-input-row"><label class="btn btn-sm" style="cursor:pointer;">Attach file<input type="file" id="fileInput_'+id+'" style="display:none;"></label><span id="fileStatus_'+id+'" style="font-size:11.5px;color:var(--muted);"></span></div>';
 
-      document.getElementById('commentSend_'+taskId).addEventListener('click', function(){
-        var input = document.getElementById('commentInput_'+taskId);
+      document.getElementById('commentSend_'+id).addEventListener('click', function(){
+        var input = document.getElementById('commentInput_'+id);
         var body = input.value.trim();
         if(!body) return;
-        supabase.from('taskComments').insert({ id:'cm_'+uid8(), taskId:taskId, authorId: myUid, body: body }).then(function(res2){
+        var row = { id:'cm_'+uid8(), authorId: myUid, body: body };
+        row[cfg.idField] = id;
+        supabase.from(cfg.comments).insert(row).then(function(res2){
           if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-          input.value=''; loadTaskCollab(taskId, panel);
+          input.value=''; loadCollab(kind, id, panel);
         });
       });
-      document.getElementById('linkSend_'+taskId).addEventListener('click', function(){
-        var input = document.getElementById('linkInput_'+taskId);
+      document.getElementById('linkSend_'+id).addEventListener('click', function(){
+        var input = document.getElementById('linkInput_'+id);
         var url = input.value.trim();
         if(!url) return;
-        supabase.from('taskLinks').insert({ id:'lk_'+uid8(), taskId:taskId, addedBy: myUid, url: url }).then(function(res2){
+        var row = { id:'lk_'+uid8(), addedBy: myUid, url: url };
+        row[cfg.idField] = id;
+        supabase.from(cfg.links).insert(row).then(function(res2){
           if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-          input.value=''; loadTaskCollab(taskId, panel);
+          input.value=''; loadCollab(kind, id, panel);
         });
+      });
+      Array.prototype.forEach.call(panel.querySelectorAll('[data-img-key]'), function(thumb){
+        var key = thumb.getAttribute('data-img-key');
+        var name = thumb.getAttribute('data-img-name');
+        var img = thumb.querySelector('img');
+        fetchProtectedUrl(key).then(function(url){
+          img.src = url;
+          thumb.addEventListener('click', function(){ showImageLightbox(url, name); });
+        }).catch(function(){ thumb.style.opacity='.4'; });
       });
       Array.prototype.forEach.call(panel.querySelectorAll('[data-download-key]'), function(a){
         a.addEventListener('click', function(ev){
@@ -972,16 +1117,18 @@ function loadTaskCollab(taskId, panel){
             });
         });
       });
-      document.getElementById('fileInput_'+taskId).addEventListener('change', function(ev){
+      document.getElementById('fileInput_'+id).addEventListener('change', function(ev){
         var file = ev.target.files[0]; if(!file) return;
-        var statusEl = document.getElementById('fileStatus_'+taskId);
+        var statusEl = document.getElementById('fileStatus_'+id);
         statusEl.textContent = 'Uploading…';
-        var key = 'attachments/'+taskId+'/'+Date.now()+'_'+file.name;
+        var key = cfg.keyPrefix+id+'/'+Date.now()+'_'+file.name;
         uploadFile(file, key).then(function(){
-          return supabase.from('taskAttachments').insert({ id:'att_'+uid8(), taskId:taskId, uploadedBy: myUid, r2Key:key, fileName:file.name, fileType:file.type, fileSize:file.size });
+          var row = { id:'att_'+uid8(), uploadedBy: myUid, r2Key:key, fileName:file.name, fileType:file.type, fileSize:file.size };
+          row[cfg.idField] = id;
+          return supabase.from(cfg.attachments).insert(row);
         }).then(function(res2){
           if(res2 && res2.error) throw res2.error;
-          loadTaskCollab(taskId, panel);
+          loadCollab(kind, id, panel);
         }).catch(function(err){ statusEl.textContent=''; showToast('error', errMsg(err)); });
       });
     });
@@ -1042,6 +1189,48 @@ function renderBoard(){
 }
 
 // ---------- TIMELOG ----------
+// Full-size screenshot + whatever activity (keys/mouse) was recorded in the
+// window overlapping when it was taken — activity is flushed every 5
+// minutes while screenshots land every 5-15, so this looks for the window
+// that actually contains the screenshot's timestamp, falling back to the
+// closest one if none lines up exactly (e.g. right at clock-in/out).
+function showScreenshotDetail(s, imgUrl){
+  var root = document.getElementById('modalRoot');
+  root.innerHTML = '<div class="modal-backdrop" id="modalBackdrop"><div class="modal modal-lg">'+
+    '<div class="modal-head"><h3>Screenshot — '+escapeHtml(fmtDateTime(s.takenAt))+'</h3><button type="button" class="modal-close" id="modalClose">✕</button></div>'+
+    '<div style="padding:17px 19px;display:flex;flex-direction:column;gap:14px;max-height:78vh;overflow-y:auto;">'+
+    '<img src="'+escapeHtml(imgUrl)+'" style="width:100%;border-radius:10px;border:1px solid var(--line);display:block;">'+
+    '<div id="shotActivityBox"><div class="skeleton" style="height:50px;"></div></div>'+
+    '</div></div></div>';
+  root.classList.add('open');
+  document.getElementById('modalClose').onclick = closeModal;
+  document.getElementById('modalBackdrop').addEventListener('click', function(e){ if(e.target.id==='modalBackdrop') closeModal(); });
+
+  var box = document.getElementById('shotActivityBox');
+  if(!s.timeEntryId){ box.innerHTML = '<div class="empty-state">No activity data linked to this screenshot.</div>'; return; }
+  timelog.listActivityForEntry(s.timeEntryId).then(function(samples){
+    var taken = new Date(s.takenAt).getTime();
+    var match = samples.filter(function(a){ return new Date(a.windowStart).getTime() <= taken && taken <= new Date(a.windowEnd).getTime(); })[0];
+    var approximate = false;
+    if(!match && samples.length){
+      approximate = true;
+      match = samples.reduce(function(best,a){
+        var d = Math.min(Math.abs(new Date(a.windowStart).getTime()-taken), Math.abs(new Date(a.windowEnd).getTime()-taken));
+        return (!best || d<best._d) ? {row:a, _d:d} : best;
+      }, null).row;
+    }
+    if(!match){ box.innerHTML = '<div class="empty-state">No activity recorded around this time.</div>'; return; }
+    box.innerHTML =
+      '<h3 style="font-size:14px;margin-bottom:2px;">Activity '+(approximate?'near ':'')+escapeHtml(fmtDateTime(match.windowStart))+' – '+escapeHtml(fmtDateTime(match.windowEnd))+'</h3>'+
+      (approximate?'<div class="field-hint" style="margin-bottom:8px;">No activity window lined up exactly with this screenshot — showing the closest one recorded.</div>':'')+
+      '<div class="field-row" style="margin:8px 0;">'+
+      '<div class="panel" style="flex:1;text-align:center;padding:12px;"><div style="font-size:22px;font-weight:700;">'+(match.keyCount||0)+'</div><div style="font-size:11.5px;color:var(--muted);">Keys pressed</div></div>'+
+      '<div class="panel" style="flex:1;text-align:center;padding:12px;"><div style="font-size:22px;font-weight:700;">'+(match.mouseDistance||0)+'</div><div style="font-size:11.5px;color:var(--muted);">Mouse distance (px)</div></div>'+
+      '</div>'+
+      (match.keyLog?'<div class="field-hint" style="margin-bottom:4px;">What was typed in this window</div><div style="font-family:var(--font-mono);font-size:11.5px;background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:8px 10px;max-height:120px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;">'+escapeHtml(match.keyLog)+'</div>':'');
+  }).catch(function(){ box.innerHTML = '<div class="empty-state">Could not load activity for this window.</div>'; });
+}
+
 function renderTimeLog(){
   paint(
     '<div class="page-head"><div><div class="eyebrow">TimeLog</div><h1 class="page-title">Your time & activity</h1>'+
@@ -1062,16 +1251,23 @@ function renderTimeLog(){
     grid.innerHTML = '<div class="skeleton" style="height:100px;"></div>';
     timelog.listScreenshots(uid, 60).then(function(shots){
       if(!shots.length){ grid.innerHTML = '<div class="empty-state">No screenshots recorded yet.</div>'; return; }
-      grid.innerHTML = shots.map(function(s){
-        return '<div class="shot-thumb" data-shot-key="'+escapeHtml(s.r2Key)+'"><img loading="lazy"><span class="shot-time">'+fmtDateTime(s.takenAt)+'</span></div>';
+      grid.innerHTML = shots.map(function(s,i){
+        return '<div class="shot-thumb" data-shot-key="'+escapeHtml(s.r2Key)+'" data-shot-i="'+i+'"><img loading="lazy"><span class="shot-time">'+fmtDateTime(s.takenAt)+'</span></div>';
       }).join('');
       // Screenshots require an authenticated fetch (see r2.js), so each
       // thumbnail's real image loads in after the fact rather than via a
-      // plain src= URL.
+      // plain src= URL. Clicking a thumbnail used to do nothing at all —
+      // no click handler was ever attached — this is what actually fixes
+      // that, opening the full-size image plus whatever activity was
+      // recorded in the window around when it was taken.
       Array.prototype.forEach.call(grid.querySelectorAll('[data-shot-key]'), function(thumb){
         var key = thumb.getAttribute('data-shot-key');
+        var idx = +thumb.getAttribute('data-shot-i');
         var img = thumb.querySelector('img');
-        fetchProtectedUrl(key).then(function(url){ img.src = url; }).catch(function(){ thumb.style.opacity='.4'; });
+        fetchProtectedUrl(key).then(function(url){
+          img.src = url;
+          thumb.addEventListener('click', function(){ showScreenshotDetail(shots[idx], url); });
+        }).catch(function(){ thumb.style.opacity='.4'; });
       });
     }).catch(function(err){ grid.innerHTML = '<div class="empty-state">Could not load screenshots.</div>'; });
   }
@@ -1331,6 +1527,26 @@ function openInviteModal(){
     }, 'Create invite');
 }
 
+// Admin-only: same idea as openInviteModal above, but Admin isn't scoped to
+// one Team, so this one also asks which Team and allows Manager as a role
+// (a Manager, per RLS, can never invite someone in as 'manager' — only
+// Admin can, which is exactly what this modal is for).
+function openAdminInviteModal(){
+  openModal('Invite someone', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
+    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ASSIGNABLE_ROLES.map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+    '<div class="field"><label>Team</label><select name="teamId" required>'+teamOptionsHtml()+'</select></div></div>',
+    function(fd){
+      var email = (fd.get('email')||'').trim();
+      if(!email){ showModalError('Enter their email.'); return; }
+      setModalBusy(true);
+      var roleLabel = (ASSIGNABLE_ROLES.filter(function(r){ return r.key===fd.get('role'); })[0]||{}).label;
+      createInvite(email, fd.get('role'), fd.get('teamId'), myUid).then(function(invite){
+        showInviteCodeModal(email, roleLabel, invite.id);
+        route();
+      }).catch(function(err){ showModalError(errMsg(err)); });
+    }, 'Create invite');
+}
+
 // ---------- ADMIN ----------
 function renderAdmin(){
   paint(
@@ -1338,6 +1554,9 @@ function renderAdmin(){
     '<div class="page-sub">Only visible to you.</div></div>'+
     '<button type="button" class="btn btn-primary btn-sm" id="newTeamBtn" style="width:auto;">+ New Team</button></div>'+
     '<div id="teamsBox"><div class="skeleton" style="height:80px;"></div></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">All employees</h2><button type="button" class="btn btn-sm" id="adminInviteBtn">+ Invite someone</button></div>'+
+    '<div class="page-sub" style="margin:-6px 0 12px;">Change anyone\'s role or team here — this is also how you move someone off a team they\'re stuck on, or make more than one person a Manager on the same team.</div>'+
+    '<div id="employeesBox"><div class="skeleton" style="height:80px;"></div></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'
   );
   document.getElementById('newTeamBtn').addEventListener('click', function(){
@@ -1350,16 +1569,28 @@ function renderAdmin(){
       }, 'Create');
   });
   document.getElementById('newGlobalServiceBtn').addEventListener('click', function(){ openCreateServiceTypeModal(null); });
+  document.getElementById('adminInviteBtn').addEventListener('click', openAdminInviteModal);
 
   Promise.all([listTeams(), db.collection('profiles').get()]).then(function(res){
-    var teams = res[0], profiles = res[1].docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+    var teams = res[0].slice().sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
+    var profiles = res[1].docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
     var box = document.getElementById('teamsBox');
+    // Anyone (including Admin) who's picked here as a team's Manager/point
+    // of contact — but an Admin picked here keeps their Admin role as-is
+    // (they already have full access everywhere; this just labels them as
+    // this team's contact). A non-admin picked here is actually promoted:
+    // role becomes 'manager' with this teamId, same as before. Multiple
+    // people can hold 'manager' on the same team at once — RLS only ever
+    // checks role+teamId, never this single managerId field, so this was
+    // already technically possible; "Managers" below just makes it visible.
     box.innerHTML = teams.map(function(t){
       var manager = profiles.filter(function(p){ return p.id===t.managerId; })[0];
-      var memberOpts = profiles.filter(function(p){ return p.role!=='admin'; }).map(function(p){ return '<option value="'+p.id+'"'+(p.id===t.managerId?' selected':'')+'>'+escapeHtml(p.displayName||p.email)+(p.teamId?' ('+escapeHtml(teamName(p.teamId))+')':'')+'</option>'; }).join('');
+      var actualManagers = profiles.filter(function(p){ return p.role==='manager' && p.teamId===t.id; });
+      var memberOpts = profiles.map(function(p){ return '<option value="'+p.id+'"'+(p.id===t.managerId?' selected':'')+'>'+escapeHtml(p.displayName||p.email)+(p.role==='admin'?' (Admin)':(p.teamId?' ('+escapeHtml(teamName(p.teamId))+')':''))+'</option>'; }).join('');
       return '<div class="panel" style="margin-bottom:12px;"><h3>'+escapeHtml(t.name)+'</h3>'+
-        '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Manager: '+(manager?escapeHtml(manager.displayName||manager.email):'— none assigned —')+'</div>'+
-        '<div class="field-row"><div class="field"><label>Assign/change Manager (promotes an existing profile)</label><select data-assign-mgr="'+t.id+'"><option value="">— choose —</option>'+memberOpts+'</select></div>'+
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:4px;">Point of contact: '+(manager?escapeHtml(manager.displayName||manager.email):'— none assigned —')+'</div>'+
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Managers on this team: '+(actualManagers.length?actualManagers.map(function(m){return escapeHtml(m.displayName||m.email);}).join(', '):'— none yet —')+'</div>'+
+        '<div class="field-row"><div class="field"><label>Assign/change point of contact (promotes a non-admin to Manager)</label><select data-assign-mgr="'+t.id+'"><option value="">— choose —</option>'+memberOpts+'</select></div>'+
         '<div class="field"><label>Or invite a new Manager by email</label><input type="email" placeholder="name@bluekitemedia.com" data-invite-mgr="'+t.id+'"></div></div>'+
         '</div>';
     }).join('') || '<div class="empty-state">No teams yet — create your first one.</div>';
@@ -1367,7 +1598,14 @@ function renderAdmin(){
     Array.prototype.forEach.call(box.querySelectorAll('[data-assign-mgr]'), function(sel){
       sel.addEventListener('change', function(){
         if(!sel.value) return;
-        assignTeamManager(sel.getAttribute('data-assign-mgr'), sel.value).then(function(){ showToast('success','Manager assigned'); route(); }).catch(function(err){ showToast('error', errMsg(err)); });
+        var teamId = sel.getAttribute('data-assign-mgr');
+        var picked = profiles.filter(function(p){ return p.id===sel.value; })[0];
+        var task = (picked && picked.role==='admin')
+          // Admin picked: just point teams.managerId at them for display —
+          // never touch an Admin's own role/team.
+          ? db.doc('teams/'+teamId).update({managerId: sel.value})
+          : assignTeamManager(teamId, sel.value);
+        task.then(function(){ showToast('success', picked&&picked.role==='admin' ? 'Set as point of contact' : 'Manager assigned'); refreshTeamsCache().then(route); }).catch(function(err){ showToast('error', errMsg(err)); });
       });
     });
     Array.prototype.forEach.call(box.querySelectorAll('[data-invite-mgr]'), function(input){
@@ -1382,6 +1620,29 @@ function renderAdmin(){
           route();
         }).catch(function(err){ showToast('error', errMsg(err)); });
       });
+    });
+
+    // ---- All employees: change anyone's role and/or team ----
+    var empBox = document.getElementById('employeesBox');
+    var employees = profiles.filter(function(p){ return p.role!=='admin'; }).sort(function(a,b){ return (a.displayName||a.email||'').localeCompare(b.displayName||b.email||''); });
+    empBox.innerHTML = employees.length ? '<div class="roster-table">'+employees.map(function(p){
+      var roleOpts = ASSIGNABLE_ROLES.map(function(r){ return '<option value="'+r.key+'"'+(r.key===p.role?' selected':'')+'>'+escapeHtml(r.label)+'</option>'; }).join('');
+      return '<div class="roster-row" style="justify-content:space-between;">'+
+        '<div style="min-width:0;flex:1;"><div class="roster-name">'+escapeHtml(p.displayName||p.email)+'</div><div class="roster-role">'+escapeHtml(p.email)+'</div></div>'+
+        '<div class="field-row" style="flex:none;gap:8px;">'+
+        '<select data-emp-role="'+p.id+'" style="width:auto;">'+roleOpts+'</select>'+
+        '<select data-emp-team="'+p.id+'" style="width:auto;">'+teamOptionsHtml(p.teamId, true)+'</select>'+
+        '</div></div>';
+    }).join('')+'</div>' : '<div class="empty-state">No employees yet — invite your first one.</div>';
+
+    function saveEmployeeField(uid, patch){
+      db.doc('profiles/'+uid).update(patch).then(function(){ showToast('success','Updated'); }).catch(function(err){ showToast('error', errMsg(err)); });
+    }
+    Array.prototype.forEach.call(empBox.querySelectorAll('[data-emp-role]'), function(sel){
+      sel.addEventListener('change', function(){ saveEmployeeField(sel.getAttribute('data-emp-role'), {role: sel.value}); });
+    });
+    Array.prototype.forEach.call(empBox.querySelectorAll('[data-emp-team]'), function(sel){
+      sel.addEventListener('change', function(){ saveEmployeeField(sel.getAttribute('data-emp-team'), {teamId: sel.value||null}); });
     });
   });
 
@@ -1561,6 +1822,14 @@ function showClockInOverlay(){
 
   var themeToggle = document.getElementById('themeToggle');
   if(themeToggle) themeToggle.addEventListener('click', toggleTheme);
+  // A plain full reload — the simplest fix for the case where something
+  // changed in a table Realtime doesn't push (e.g. an Admin moves a client
+  // or an employee to a different Team: that's a write to `clients`/
+  // `profiles`, not to `tasks`, so a task list already subscribed elsewhere
+  // has no live signal to refetch against). Everyone re-subscribes fresh on
+  // reload, so this always picks up permission/team changes immediately.
+  var reloadBtn = document.getElementById('reloadBtn');
+  if(reloadBtn) reloadBtn.addEventListener('click', function(){ location.reload(); });
 
   var boundOnce = false;
   var lastUid = null;
