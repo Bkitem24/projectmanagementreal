@@ -61,8 +61,33 @@ export async function uploadFile(file, key) {
     body: file,
   });
   if (!res.ok) throw new Error('Upload failed (' + res.status + ')');
-  const body = await res.json();
-  return body.key;
+  // 2026-09-21 - found while chasing "image previews are blank again" in
+  // comments/chat: this used to `return body.key` (the worker's own PUT
+  // response echoing back whatever it parsed out of the request path). That
+  // looks like it should just be `key` again, but it ISN'T, whenever `key`
+  // contains a `/` (which every real key here does - "attachments/<id>/...",
+  // "clients/<id>/...", etc.): the browser's URL parser does NOT decode a
+  // %2F back into a real slash when reading url.pathname (confirmed against
+  // the actual WHATWG URL behavior both this worker and every browser use -
+  // it's kept encoded on purpose, so a path segment can never smuggle in an
+  // extra "/"). So the worker's own `match[1]` - and therefore the `key` it
+  // echoes back in its response - is still the PERCENT-ENCODED string this
+  // function already built for the PUT URL, not the clean original. Callers
+  // that stored that echoed value (as an attachment's r2Key, or straight
+  // into fileUrl()) were unknowingly saving an already-encoded key; the next
+  // read then ran it through encodeURIComponent() a SECOND time, turned its
+  // literal "%" into "%25", and asked the worker for a key that was never
+  // actually stored - a silent 404, which is exactly what a blank, non-
+  // clickable image preview looks like (see the .catch() on every
+  // fetchProtectedUrl() call site). TimeLog's screenshot upload never hit
+  // this because it already ignored uploadFile()'s return value and reused
+  // its own original `key` variable instead - that's the safe pattern, so
+  // this just makes it the ONLY pattern: the caller's own `key` argument is
+  // always correct and is genuinely all the worker's PUT ever accepts as the
+  // storage key (it never renames/sanitizes it - see worker-r2/src/index.js),
+  // so there's no reason to trust a round-tripped copy of it at all.
+  await res.json();
+  return key;
 }
 
 // Removes the underlying object from the bucket - called after a
@@ -154,3 +179,4 @@ export async function downloadProtectedFile(key, suggestedName) {
   setTimeout(() => URL.revokeObjectURL(url), 4000);
   return true;
 }
+round 6 fixes
