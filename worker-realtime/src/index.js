@@ -67,6 +67,24 @@ function json(body, status) {
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return cors(new Response(null, { status: 204 }));
+
+    // GET /health - added 2026-09-21 while chasing the "failed to fetch"
+    // then "Could not start Connect session (404)" report. Deliberately
+    // ahead of every other check below (no auth, no CF-creds requirement,
+    // works for GET) so it answers ONE question on its own: is
+    // VITE_REALTIME_WORKER_URL actually pointing at this deployed worker at
+    // all? Visit "<that URL>/health" directly in a browser - "reachable"
+    // rules out a wrong/stale URL or a worker that was never (re)deployed;
+    // "configured": false narrows it further to the CF_REALTIME_APP_ID/
+    // CF_REALTIME_APP_TOKEN secrets not being set yet. Neither of those is
+    // something code here can fix - but telling them apart from a real code
+    // bug (which would show up as a 500/502 from the actual call, not a
+    // 404) is most of the diagnosis.
+    const url = new URL(request.url);
+    if (url.pathname === '/health') {
+      return cors(json({ ok: true, reachable: true, configured: !!(env.CF_REALTIME_APP_ID && env.CF_REALTIME_APP_TOKEN) }));
+    }
+
     if (request.method !== 'POST') return cors(new Response('Method not allowed', { status: 405 }));
 
     if (!env.CF_REALTIME_APP_ID || !env.CF_REALTIME_APP_TOKEN) {
@@ -75,8 +93,6 @@ export default {
 
     const ok = await verifySession(request, env);
     if (!ok) return cors(new Response('Unauthorized', { status: 401 }));
-
-    const url = new URL(request.url);
 
     // --- POST /session/new -------------------------------------------------
     // Creates a new Realtime session, then immediately pushes the caller's
@@ -171,3 +187,4 @@ export default {
     return cors(new Response('Not found', { status: 404 }));
   },
 };
+round 6 fixes
