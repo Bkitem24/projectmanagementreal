@@ -309,6 +309,7 @@ function hydrateProfiles(container){
 // ---------- modal ----------
 function openModal(title, innerHtml, onSubmit, submitLabel, opts){
   opts = opts || {};
+  if(activeLightboxKeydown){ document.removeEventListener('keydown', activeLightboxKeydown); activeLightboxKeydown = null; }
   var root = document.getElementById('modalRoot');
   root.innerHTML = '<div class="modal-backdrop" id="modalBackdrop"><div class="modal'+(opts.large?' modal-lg':'')+'">'+
     '<div class="modal-head"><h3>'+escapeHtml(title)+'</h3><button type="button" class="modal-close" id="modalClose">✕</button></div>'+
@@ -329,7 +330,17 @@ function openModal(title, innerHtml, onSubmit, submitLabel, opts){
   });
   if(opts.afterRender) opts.afterRender(document.getElementById('modalForm'));
 }
-function closeModal(){ var root=document.getElementById('modalRoot'); root.classList.remove('open'); root.innerHTML=''; }
+// Set only while the image lightbox's own Ctrl+/Ctrl-/Ctrl0/Escape zoom
+// listener is attached (see showImageLightbox) - cleared defensively here
+// AND at the top of openModal, so that listener can never outlive
+// #modalRoot's content changing out from under it (e.g. some other modal
+// opening on top of, or instead of, an open lightbox) and keep hijacking
+// zoom/Escape keystrokes for a lightbox that isn't showing anymore.
+var activeLightboxKeydown = null;
+function closeModal(){
+  var root=document.getElementById('modalRoot'); root.classList.remove('open'); root.innerHTML='';
+  if(activeLightboxKeydown){ document.removeEventListener('keydown', activeLightboxKeydown); activeLightboxKeydown = null; }
+}
 function setModalBusy(busy, busyLabel){
   var btn = document.getElementById('modalSubmit');
   if(!btn) return;
@@ -394,7 +405,7 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
             return db.doc('tasks/'+taskId).set({
               episodeId: epId, episodeTitle: rule.label, clientId: rule.clientId, clientName: clientMeta.name,
               role: s.role, label: s.label, group: s.group||'', orderNum: s.order||0,
-              dependsOnLabel: s.dependsOnLabel||'', dueDate: iso, done:false, doneByUserId:null, doneAt:null,
+              dependsOnStepId: s.dependsOnStepId||null, dueDate: iso, done:false, doneByUserId:null, doneAt:null,
               createdAt: new Date().toISOString()
             });
           }));
@@ -423,6 +434,7 @@ function route(){
   else if(hash==='/connect') renderConnect();
   else if(hash==='/team') renderTeamSettings();
   else if(hash==='/admin') renderAdmin();
+  else if(hash==='/workflows') renderWorkflows();
   else if(mClient) renderClient(mClient[1]);
   else if(mEpisode) renderEpisode(mEpisode[1]);
   else renderHome();
@@ -433,6 +445,62 @@ window.addEventListener('hashchange', route);
 document.getElementById('navToggle').addEventListener('click', function(){
   document.getElementById('sidebar').classList.toggle('open');
 });
+
+// ---------- APP-WIDE ZOOM (Ctrl/Cmd +/-/0) ----------
+// Same hotkeys as any browser's own page zoom, applied here via the CSS
+// `zoom` property (supported by the Chromium engine Tauri uses for its
+// Windows webview - WebView2 - which is the only target this ships to
+// today; see build.rs/windows-app-manifest.xml). Kept as a plain in-memory
+// variable rather than something persisted to disk - it resets to 100% on
+// each launch, which is the same "always starts predictable" choice as not
+// remembering window position.
+var APP_ZOOM_MIN = 0.6, APP_ZOOM_MAX = 2, APP_ZOOM_STEP = 0.1;
+var appZoomLevel = 1;
+function applyAppZoom(){ document.body.style.zoom = appZoomLevel; }
+document.addEventListener('keydown', function(e){
+  // The image lightbox (showImageLightbox) has its own Ctrl+/-/0 handling
+  // for zooming just the enlarged image while it's open - don't also zoom
+  // the whole app underneath it for the same keystroke.
+  if(activeLightboxKeydown) return;
+  if(!(e.ctrlKey||e.metaKey)) return;
+  if(e.key==='='||e.key==='+'){ e.preventDefault(); appZoomLevel = Math.min(APP_ZOOM_MAX, appZoomLevel+APP_ZOOM_STEP); applyAppZoom(); }
+  else if(e.key==='-'){ e.preventDefault(); appZoomLevel = Math.max(APP_ZOOM_MIN, appZoomLevel-APP_ZOOM_STEP); applyAppZoom(); }
+  else if(e.key==='0'){ e.preventDefault(); appZoomLevel = 1; applyAppZoom(); }
+});
+
+// ---------- EXIT CONFIRMATION + CLOCK-OUT ON CLOSE ----------
+// Added 2026-09-21: clicking the window's own close ("X") button used to
+// just end the process outright - no confirmation, and (worse, while
+// clocked in) no chance to ever run clockOut(), so the timeEntries row was
+// left open until the 10-minute heartbeat-staleness sweep eventually closed
+// it out on its own. This intercepts that close, confirms it, and - if
+// clocked in - clocks out for real (server-write, not just the local UI)
+// before actually letting the window close, exactly like the explicit
+// "Sign out" button already does (see signOutBtn.onclick below).
+(async function wireCloseConfirmation(){
+  var appWindow;
+  try {
+    var mod = await import('@tauri-apps/api/window');
+    appWindow = mod.getCurrentWindow();
+  } catch (e) { return; } // not running inside the Tauri shell (e.g. `npm run dev` in a plain browser) - nothing to wire up
+  appWindow.onCloseRequested(async function(event){
+    event.preventDefault();
+    var clockedIn = timelog.isClockedIn();
+    var message = clockedIn
+      ? 'You\'re currently clocked in - exiting will clock you out. Exit Blue Kite Ops?'
+      : 'Exit Blue Kite Ops?';
+    if(!confirm(message)) return;
+    if(clockedIn){
+      // Race against a short timeout rather than awaiting the network write
+      // unconditionally - someone who just confirmed "Exit" while offline
+      // should still see the app actually close promptly; the heartbeat-
+      // staleness sweep is exactly the existing safety net for a clock-out
+      // that couldn't reach the server in time.
+      try { await Promise.race([timelog.clockOut(), new Promise(function(r){ setTimeout(r, 5000); })]); } catch (e) {}
+    }
+    try { appWindow.destroy(); } catch (e) { console.error('[blue-kite-ops] could not close the window:', e); }
+  });
+})();
 
 // ---------- SPOTLIGHT (Employee of the Month) ----------
 function renderSpotlight(container){
@@ -734,49 +802,113 @@ function renderClient(clientId){
     activeUnsubs.push(unsubEp);
 
     if(mgr){
-      var unsubTpl = db.collection('templates').where('clientId','==',clientId).onSnapshot(function(ts){
-        var box = document.getElementById('templateBox');
-        if(!box) return;
-        if(ts.empty){ box.innerHTML = '<div class="empty-state"><strong>No templates yet</strong>Templates define the checklist each episode type generates.</div>'; return; }
-        box.innerHTML = ts.docs.map(function(d){
-          var t = d.data();
-          var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
-          return '<div class="panel" style="margin-bottom:12px;" data-tpl-panel="'+d.id+'"><h3>'+escapeHtml(t.name)+'</h3>'+
-            '<div class="step-list" data-tpl-steps="'+d.id+'">'+steps.map(function(s,i){
-              var r = roleOf(s.role);
-              return '<div class="step-edit-row" draggable="true" data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" data-idx="'+i+'">'+
-                '<span class="step-drag-handle" title="Drag to reorder">⋮⋮</span>'+
-                '<span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):s.role)+'</span>'+
-                '<span>'+escapeHtml(s.label)+'</span>'+
-                '<button type="button" class="step-edit-remove" data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'">remove</button></div>';
-            }).join('')+'</div>'+
-            '<div class="manager-only"><button type="button" class="btn btn-sm" data-add-step="'+d.id+'">+ Add step</button></div>'+
-            '</div>';
-        }).join('');
-        ts.docs.forEach(function(d){
-          var t = d.data();
-          var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
-          var stepBox = box.querySelector('[data-tpl-steps="'+d.id+'"]');
-          if(stepBox) wireStepDrag(stepBox, d.id, steps);
-        });
-        Array.prototype.forEach.call(box.querySelectorAll('[data-add-step]'), function(btn){
-          btn.addEventListener('click', function(){ openAddStepModal(btn.getAttribute('data-add-step')); });
-        });
-        Array.prototype.forEach.call(box.querySelectorAll('.step-edit-remove'), function(btn){
-          btn.addEventListener('click', function(){
-            var tplId = btn.getAttribute('data-tpl'), stepId = btn.getAttribute('data-step');
-            db.doc('templates/'+tplId).get().then(function(snap2){
-              var t2 = snap2.data();
-              var steps2 = (t2.steps||[]).filter(function(s){ return s.stepId!==stepId; });
-              return db.doc('templates/'+tplId).update({steps:steps2});
-            }).catch(function(err){ showToast('error', errMsg(err)); });
-          });
-        });
-      }, function(){});
-      activeUnsubs.push(unsubTpl);
+      var tplBox = document.getElementById('templateBox');
+      if(tplBox) activeUnsubs.push(mountTemplatesBox(clientId, tplBox));
     }
   }, function(){ app.innerHTML='<div class="empty-state">Could not load this client.</div>'; });
   activeUnsubs.push(unsub);
+}
+
+// Renders a client's workflow templates + steps into `box`, and keeps it
+// live. Shared by the Client Detail page's own "Workflow templates" section
+// and the centralized Workflows nav page (renderWorkflows) below - added
+// 2026-09-21 so admin/manager have ONE place to define step-to-step
+// dependencies instead of typing a free-text "waiting on" label onto every
+// generated task by hand (see openSetStepDependencyModal).
+function mountTemplatesBox(clientId, box){
+  var unsub = db.collection('templates').where('clientId','==',clientId).onSnapshot(function(ts){
+    if(ts.empty){ box.innerHTML = '<div class="empty-state"><strong>No templates yet</strong>Templates define the checklist each episode type generates, and the "waits for" links between their steps.</div>'; return; }
+    var stepById = {};
+    ts.docs.forEach(function(d){ (d.data().steps||[]).forEach(function(s){ stepById[s.stepId] = s; }); });
+    box.innerHTML = ts.docs.map(function(d){
+      var t = d.data();
+      var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
+      return '<div class="panel" style="margin-bottom:12px;" data-tpl-panel="'+d.id+'"><h3>'+escapeHtml(t.name)+'</h3>'+
+        '<div class="step-list" data-tpl-steps="'+d.id+'">'+steps.map(function(s,i){
+          var r = roleOf(s.role);
+          var dep = s.dependsOnStepId ? stepById[s.dependsOnStepId] : null;
+          return '<div class="step-edit-row" draggable="true" data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" data-idx="'+i+'">'+
+            '<span class="step-drag-handle" title="Drag to reorder">⋮⋮</span>'+
+            '<span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):s.role)+'</span>'+
+            '<span style="flex:1;">'+escapeHtml(s.label)+(dep?' <span class="task-waiting">⛔ waits for: '+escapeHtml(dep.label)+'</span>':'')+'</span>'+
+            '<button type="button" class="step-edit-remove" data-set-dep data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" title="Choose which step this waits on">'+(dep?'Change dependency':'+ Depends on')+'</button>'+
+            '<button type="button" class="step-edit-remove" data-remove-step data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'">remove</button></div>';
+        }).join('')+'</div>'+
+        '<div class="manager-only"><button type="button" class="btn btn-sm" data-add-step="'+d.id+'">+ Add step</button></div>'+
+        '</div>';
+    }).join('');
+    ts.docs.forEach(function(d){
+      var t = d.data();
+      var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
+      var stepBox = box.querySelector('[data-tpl-steps="'+d.id+'"]');
+      if(stepBox) wireStepDrag(stepBox, d.id, steps);
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-add-step]'), function(btn){
+      btn.addEventListener('click', function(){ openAddStepModal(btn.getAttribute('data-add-step')); });
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-set-dep]'), function(btn){
+      btn.addEventListener('click', function(){ openSetStepDependencyModal(btn.getAttribute('data-tpl'), btn.getAttribute('data-step')); });
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-remove-step]'), function(btn){
+      btn.addEventListener('click', function(){
+        var tplId = btn.getAttribute('data-tpl'), stepId = btn.getAttribute('data-step');
+        db.doc('templates/'+tplId).get().then(function(snap2){
+          var t2 = snap2.data();
+          var steps2 = (t2.steps||[]).filter(function(s){ return s.stepId!==stepId; });
+          // A step that depended on the one being removed would otherwise
+          // stay permanently blocked on a dependency that no longer exists -
+          // clear it instead of leaving a dangling reference.
+          steps2.forEach(function(s){ if(s.dependsOnStepId===stepId) s.dependsOnStepId=null; });
+          return db.doc('templates/'+tplId).update({steps:steps2});
+        }).catch(function(err){ showToast('error', errMsg(err)); });
+      });
+    });
+  }, function(){});
+  return unsub;
+}
+
+// "Depends on" is set ONCE per template step (not per generated task/
+// episode) - every task generated from this step, for every future
+// episode, inherits the block automatically. See renderEpisode's task
+// checklist for where this is enforced (checkbox disabled + "Waiting on:"
+// shown, computed live from the sibling task's done state - never a
+// hand-typed label that can drift out of sync).
+function openSetStepDependencyModal(tplId, stepId){
+  db.doc('templates/'+tplId).get().then(function(snap){
+    var t = snap.data();
+    var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
+    var self = steps.filter(function(s){ return s.stepId===stepId; })[0];
+    if(!self){ showToast('error','That step no longer exists - try refreshing.'); return; }
+    var choices = steps.filter(function(s){ return s.stepId!==stepId; });
+    var opts = '<option value="">No dependency</option>'+choices.map(function(s){
+      return '<option value="'+escapeHtml(s.stepId)+'" '+(self.dependsOnStepId===s.stepId?'selected':'')+'>'+escapeHtml(s.label)+'</option>';
+    }).join('');
+    openModal('Set dependency for "'+escapeHtml(self.label)+'"',
+      '<div class="field"><label>This step can\'t be checked off until…</label><select name="dependsOnStepId">'+opts+'</select></div>'+
+      '<div class="field-hint">Applies to every future episode generated from this template. Episodes already generated keep whatever was set when they were created.</div>',
+      function(fd){
+        setModalBusy(true);
+        var val = fd.get('dependsOnStepId')||'';
+        // Guard against a dependency loop (A waits on B which waits on A,
+        // directly or through a longer chain) - that would leave every
+        // task in the cycle permanently unchecking, with no way out except
+        // editing the template again. Walk the chain from the chosen
+        // prerequisite and refuse if it ever leads back to this step.
+        var cur = val, seen = {}, loop = false;
+        while(cur){
+          if(cur===stepId){ loop = true; break; }
+          if(seen[cur]) break;
+          seen[cur] = true;
+          var next = steps.filter(function(s){ return s.stepId===cur; })[0];
+          cur = next ? next.dependsOnStepId : null;
+        }
+        if(loop){ showModalError('That would create a loop - two steps waiting on each other (directly or through other steps). Choose a different step.'); return; }
+        var updated = steps.map(function(s){ return s.stepId===stepId ? Object.assign({}, s, { dependsOnStepId: val||null }) : s; });
+        db.doc('templates/'+tplId).update({steps:updated}).then(function(){
+          closeModal(); showToast('success', val ? 'Dependency set' : 'Dependency cleared');
+        }).catch(function(err){ showModalError(errMsg(err)); });
+      }, 'Save');
+  }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 
 function wireStepDrag(box, tplId, steps){
@@ -902,6 +1034,60 @@ function openAddOneOffEpisodeModal(clientId, clientName){
     }, 'Add episode');
 }
 
+// ---------- WORKFLOWS (centralized template + dependency builder) ----------
+// Added 2026-09-21: the per-client "Workflow templates" section on the
+// Client Detail page (still there, unchanged, for convenience while
+// looking at one client) was easy to lose track of - it's what Humayun
+// meant by "the workflow builder is gone", even though the code was never
+// actually removed. This page puts every client's templates in one place,
+// reachable from its own nav item, which is also where admin/manager now
+// define step dependencies (see openSetStepDependencyModal) instead of
+// typing a "waiting on:" label onto every generated task by hand.
+var workflowsSelectedClientId = null;
+function renderWorkflows(){
+  if(!canManage()){ paint('<div class="empty-state"><strong>Not available</strong>Only managers and admins can define workflow templates.</div>'); return; }
+  paint(
+    '<div class="page-head"><div><div class="eyebrow">Workflows</div><h1 class="page-title">Templates &amp; dependencies</h1>'+
+    '<div class="page-sub">Build each client\'s checklist once, and link steps together so, say, editing can\'t start until booking is done - every episode generated from a template inherits it automatically.</div></div></div>'+
+    '<div class="workflows-layout"><div class="workflows-client-list" id="workflowsClientList"><div class="skeleton" style="height:32px;margin-bottom:6px;"></div></div>'+
+    '<div class="workflows-panel" id="workflowsPanel"><div class="empty-state">Pick a client on the left.</div></div></div>'
+  );
+  var unsub = db.collection('clients').orderBy('name','asc').onSnapshot(function(snap){
+    var list = document.getElementById('workflowsClientList');
+    if(!list) return;
+    if(snap.empty){ list.innerHTML = '<div class="empty-state" style="padding:12px;">No clients yet.</div>'; return; }
+    var clients = snap.docs.map(function(d){ var c=d.data(); c._id=d.id; return c; });
+    if(!workflowsSelectedClientId || !clients.some(function(c){ return c._id===workflowsSelectedClientId; })){
+      workflowsSelectedClientId = clients[0]._id;
+    }
+    list.innerHTML = clients.map(function(c){
+      return '<button type="button" class="workflows-client-item'+(c._id===workflowsSelectedClientId?' active':'')+'" data-wf-client="'+c._id+'">'+escapeHtml(c.name)+
+        (isAdmin()?'<span class="workflows-client-team">'+escapeHtml(teamName(c.teamId))+'</span>':'')+'</button>';
+    }).join('');
+    Array.prototype.forEach.call(list.querySelectorAll('[data-wf-client]'), function(btn){
+      btn.addEventListener('click', function(){
+        workflowsSelectedClientId = btn.getAttribute('data-wf-client');
+        Array.prototype.forEach.call(list.querySelectorAll('[data-wf-client]'), function(b){ b.classList.toggle('active', b===btn); });
+        mountWorkflowsPanel(clients.filter(function(c){ return c._id===workflowsSelectedClientId; })[0]);
+      });
+    });
+    mountWorkflowsPanel(clients.filter(function(c){ return c._id===workflowsSelectedClientId; })[0]);
+  }, function(){ var l=document.getElementById('workflowsClientList'); if(l) l.innerHTML='<div class="empty-state">Could not load clients.</div>'; });
+  activeUnsubs.push(unsub);
+}
+var workflowsPanelUnsub = null;
+function mountWorkflowsPanel(client){
+  if(workflowsPanelUnsub){ try{ workflowsPanelUnsub(); }catch(e){} workflowsPanelUnsub = null; }
+  var panel = document.getElementById('workflowsPanel');
+  if(!panel || !client) return;
+  panel.innerHTML = '<div class="section-head" style="margin-bottom:10px;"><h2 class="section-title">'+escapeHtml(client.name)+'</h2>'+
+    '<button type="button" class="btn btn-sm" id="wfAddTemplateBtn">+ New template</button></div>'+
+    '<div id="wfTemplateBox"></div>';
+  document.getElementById('wfAddTemplateBtn').addEventListener('click', function(){ openAddTemplateModal(client._id); });
+  workflowsPanelUnsub = mountTemplatesBox(client._id, document.getElementById('wfTemplateBox'));
+  activeUnsubs.push(workflowsPanelUnsub);
+}
+
 function openAddTemplateModal(clientId){
   openModal('New workflow template', '<div class="field"><label>Template name</label><input required name="name" type="text" placeholder="e.g. Guest Episode"></div>',
     function(fd){
@@ -942,24 +1128,33 @@ function openAddRuleModal(clientId){
 }
 
 function openAddStepModal(templateId){
-  openModal('Add workflow step', '<div class="field"><label>Step description</label><input required name="label" type="text" placeholder="e.g. Edit trailer"></div>'+
-    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
-    '<div class="field"><label>Group</label><input name="group" type="text" placeholder="e.g. Editing"></div></div>'+
-    '<div class="field"><label>Waiting on (optional)</label><input name="dependsOnLabel" type="text" placeholder="e.g. Trailer content extracted"></div>',
-    function(fd){
-      var label = (fd.get('label')||'').trim();
-      if(!label){ showModalError('Describe the step.'); return; }
-      setModalBusy(true);
-      db.doc('templates/'+templateId).get().then(function(snap){
-        var t = snap.data();
-        var steps = (t.steps||[]).slice();
-        var maxOrder = steps.reduce(function(m,s){return Math.max(m,s.order||0);},0);
-        steps.push({stepId:'s'+uid8(), order:maxOrder+1, role:fd.get('role'), group:(fd.get('group')||'').trim(), label:label, dependsOnLabel:(fd.get('dependsOnLabel')||'').trim()});
-        return db.doc('templates/'+templateId).update({steps:steps});
-      }).then(function(){
-        closeModal(); showToast('success', 'Added step');
-      }).catch(function(err){ showModalError(errMsg(err)); });
-    }, 'Add step');
+  db.doc('templates/'+templateId).get().then(function(snap){
+    var t = snap.data();
+    var existingSteps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
+    var opts = '<option value="">No dependency</option>'+existingSteps.map(function(s){
+      return '<option value="'+escapeHtml(s.stepId)+'">'+escapeHtml(s.label)+'</option>';
+    }).join('');
+    openModal('Add workflow step', '<div class="field"><label>Step description</label><input required name="label" type="text" placeholder="e.g. Edit trailer"></div>'+
+      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="field"><label>Group</label><input name="group" type="text" placeholder="e.g. Editing"></div></div>'+
+      '<div class="field"><label>Depends on (optional)</label><select name="dependsOnStepId">'+opts+'</select></div>'+
+      '<div class="field-hint">Every task generated from this step - in every future episode - is locked until the chosen step is checked off. You can change this later from the step\'s "Change dependency" button.</div>',
+      function(fd){
+        var label = (fd.get('label')||'').trim();
+        if(!label){ showModalError('Describe the step.'); return; }
+        setModalBusy(true);
+        var dependsOnStepId = fd.get('dependsOnStepId')||null;
+        db.doc('templates/'+templateId).get().then(function(freshSnap){
+          var ft = freshSnap.data();
+          var freshSteps = (ft.steps||[]).slice();
+          var maxOrder = freshSteps.reduce(function(m,s){return Math.max(m,s.order||0);},0);
+          freshSteps.push({stepId:'s'+uid8(), order:maxOrder+1, role:fd.get('role'), group:(fd.get('group')||'').trim(), label:label, dependsOnStepId: dependsOnStepId});
+          return db.doc('templates/'+templateId).update({steps:freshSteps});
+        }).then(function(){
+          closeModal(); showToast('success', 'Added step');
+        }).catch(function(err){ showModalError(errMsg(err)); });
+      }, 'Add step');
+  }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 
 // ---------- EPISODE DETAIL ----------
@@ -991,13 +1186,24 @@ function renderEpisode(episodeId){
       if(ts.empty){ box.innerHTML = '<div class="empty-state">No tasks on this episode.</div>'; return; }
       var groups = {}; var order = [];
       var doneCount = 0;
+      var taskById = {};
       ts.docs.forEach(function(d){
         var t = d.data(); t._id = d.id;
+        taskById[t._id] = t;
         if(t.done) doneCount++;
         var g = t.group||'Tasks';
         if(!groups[g]){ groups[g]=[]; order.push(g); }
         groups[g].push(t);
       });
+      // Dependencies are now defined ONCE on the template step
+      // (dependsOnStepId - see openSetStepDependencyModal) and inherited by
+      // every task generated from it, instead of a free-text label typed
+      // onto each task by hand. Every sibling task for this episode is
+      // already in `ts.docs` above (the query isn't filtered by done), so
+      // the prerequisite's live done-state is just a lookup here - no
+      // extra fetch, and it can never drift out of sync with reality the
+      // way the old hand-typed label could.
+      function depTaskFor(t){ return t.dependsOnStepId ? taskById[t.episodeId+'_'+t.dependsOnStepId] : null; }
       var pct = Math.round(100*doneCount/ts.size);
       var fill = document.getElementById('epProgressFill'); if(fill) fill.style.width = pct+'%';
       var badge = document.getElementById('epStatusBadge');
@@ -1009,13 +1215,18 @@ function renderEpisode(episodeId){
         return '<div class="checklist-group"><div class="checklist-group-head"><span class="checklist-group-title">'+escapeHtml(g)+'</span></div>'+
           groups[g].map(function(t){
             var r = roleOf(t.role);
-            var canCheck = myRole && (myRole===t.role || canManage());
-            return '<div class="task-row '+(t.done?'done':'')+'" style="--role-color:'+(r?r.color:'var(--line)')+'">'+
-              '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+'>'+
+            var depTask = depTaskFor(t);
+            // A missing prerequisite (its step was removed from the
+            // template after this episode was generated) fails OPEN rather
+            // than leaving the task permanently locked on something that
+            // no longer exists.
+            var isBlocked = !!(depTask && !depTask.done);
+            var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
+            return '<div class="task-row '+(t.done?'done':'')+(isBlocked?' task-blocked':'')+'" style="--role-color:'+(r?r.color:'var(--line)')+'">'+
+              '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(depTask.label)+'\' is done"':'')+'>'+
               '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+(t.custom?' <span class="task-custom-badge">custom</span>':'')+'</div>'+
               '<div class="task-meta"><span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):t.role)+'</span>'+
-              (t.dependsOnLabel?'<span class="task-waiting">Waiting on: '+escapeHtml(t.dependsOnLabel)+(canManage()?' <button type="button" class="dep-edit-btn" data-edit-dep="'+t._id+'" data-dep-label="'+escapeHtml(t.dependsOnLabel)+'" title="Edit dependency">'+ICON_PENCIL+'</button>':'')+'</span>'
-                :(canManage()?'<button type="button" class="dep-add-btn" data-edit-dep="'+t._id+'" data-dep-label="" title="Set a dependency">+ Waiting on</button>':''))+
+              (isBlocked?'<span class="task-waiting">⛔ Waiting on: '+escapeHtml(depTask.label)+'</span>':'')+
               (t.done && t.doneByUserId?profileChip(t.doneByUserId):'')+
               '</div>'+
               '<button type="button" class="task-expand-btn" data-collab="'+t._id+'">'+(expandedTasks[t._id]?'Hide discussion':'Comments, links & files')+'</button>'+
@@ -1034,22 +1245,6 @@ function renderEpisode(episodeId){
             doneByUserId: checked ? myUid : null,
             doneAt: checked ? new Date().toISOString() : null
           }).catch(function(err){ cb.checked=!checked; showToast('error', errMsg(err)); });
-        });
-      });
-      Array.prototype.forEach.call(box.querySelectorAll('[data-edit-dep]'), function(btn){
-        btn.addEventListener('click', function(){
-          var taskId = btn.getAttribute('data-edit-dep');
-          var current = btn.getAttribute('data-dep-label')||'';
-          openModal('Task dependency',
-            '<div class="field"><label>Waiting on</label><input name="dependsOnLabel" type="text" value="'+escapeHtml(current)+'" placeholder="e.g. Trailer content extracted"></div>'+
-            '<div class="field-hint">Leave this blank and save to clear it.</div>',
-            function(fd){
-              setModalBusy(true);
-              var val = (fd.get('dependsOnLabel')||'').trim();
-              db.doc('tasks/'+taskId).update({ dependsOnLabel: val }).then(function(){
-                closeModal(); showToast('success', val ? 'Dependency updated' : 'Dependency cleared');
-              }).catch(function(err){ showModalError(errMsg(err)); });
-            });
         });
       });
       Array.prototype.forEach.call(box.querySelectorAll('[data-collab]'), function(btn){
@@ -1083,7 +1278,7 @@ function openAddCustomTaskModal(episodeId, episode){
       var taskId = episodeId+'_custom_'+uid8();
       db.doc('tasks/'+taskId).set({
         episodeId: episodeId, episodeTitle: episode.title, clientId: episode.clientId, clientName: episode.clientName,
-        role: fd.get('role'), label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnLabel: '',
+        role: fd.get('role'), label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnStepId: null,
         dueDate: episode.dueDate, done:false, doneByUserId:null, doneAt:null, custom:true, createdAt: new Date().toISOString()
       }).then(function(){
         closeModal(); showToast('success','Custom task added');
@@ -1111,14 +1306,54 @@ function attachmentIcon(a){
 // A simple full-screen preview for image attachments - clicking a thumbnail
 // used to just be a download link with no way to actually look at the
 // picture without saving it to disk first.
+// Zoom in/out on the enlarged image - added 2026-09-21. Ctrl/Cmd +, Ctrl/Cmd
+// -, Ctrl/Cmd 0 (reset) match what every browser already does for page zoom,
+// so nothing new to learn; Ctrl/Cmd + scroll-wheel zooms too, and the on-
+// screen +/-/reset buttons make it discoverable for anyone who'd never try
+// the hotkey. The listener is added/removed with the lightbox itself so it
+// never lingers and steals +/-/0 keystrokes once the lightbox is closed.
+var LIGHTBOX_ZOOM_MIN = 1, LIGHTBOX_ZOOM_MAX = 5, LIGHTBOX_ZOOM_STEP = 0.25;
 function showImageLightbox(url, title){
   var root = document.getElementById('modalRoot');
   root.innerHTML = '<div class="modal-backdrop" id="modalBackdrop"><div class="lightbox-frame">'+
     '<button type="button" class="modal-close lightbox-close" id="modalClose">✕</button>'+
-    '<img src="'+escapeHtml(url)+'" alt="'+escapeHtml(title||'')+'"></div></div>';
+    '<div class="lightbox-zoom-controls">'+
+      '<button type="button" id="lightboxZoomOut" title="Zoom out (Ctrl -)">−</button>'+
+      '<span id="lightboxZoomLevel">100%</span>'+
+      '<button type="button" id="lightboxZoomIn" title="Zoom in (Ctrl +)">+</button>'+
+      '<button type="button" id="lightboxZoomReset" title="Reset zoom (Ctrl 0)">Reset</button>'+
+    '</div>'+
+    '<div class="lightbox-img-scroll"><img id="lightboxImg" src="'+escapeHtml(url)+'" alt="'+escapeHtml(title||'')+'"></div></div></div>';
   root.classList.add('open');
-  document.getElementById('modalClose').onclick = closeModal;
-  document.getElementById('modalBackdrop').addEventListener('click', function(e){ if(e.target.id==='modalBackdrop') closeModal(); });
+  var zoom = 1;
+  var img = document.getElementById('lightboxImg');
+  var levelEl = document.getElementById('lightboxZoomLevel');
+  function applyZoom(){
+    zoom = Math.max(LIGHTBOX_ZOOM_MIN, Math.min(LIGHTBOX_ZOOM_MAX, zoom));
+    img.style.transform = 'scale('+zoom+')';
+    levelEl.textContent = Math.round(zoom*100)+'%';
+  }
+  function zoomBy(delta){ zoom += delta; applyZoom(); }
+  function closeLightbox(){ closeModal(); } // closeModal() itself clears activeLightboxKeydown
+  function onKeydown(e){
+    if(e.key==='Escape'){ closeLightbox(); return; }
+    if(!(e.ctrlKey||e.metaKey)) return;
+    if(e.key==='='||e.key==='+'){ e.preventDefault(); e.stopImmediatePropagation(); zoomBy(LIGHTBOX_ZOOM_STEP); }
+    else if(e.key==='-'){ e.preventDefault(); e.stopImmediatePropagation(); zoomBy(-LIGHTBOX_ZOOM_STEP); }
+    else if(e.key==='0'){ e.preventDefault(); e.stopImmediatePropagation(); zoom=1; applyZoom(); }
+  }
+  activeLightboxKeydown = onKeydown;
+  document.addEventListener('keydown', onKeydown);
+  document.getElementById('lightboxImg').parentElement.addEventListener('wheel', function(e){
+    if(!(e.ctrlKey||e.metaKey)) return;
+    e.preventDefault();
+    zoomBy(e.deltaY<0 ? LIGHTBOX_ZOOM_STEP : -LIGHTBOX_ZOOM_STEP);
+  }, { passive:false });
+  document.getElementById('lightboxZoomIn').addEventListener('click', function(){ zoomBy(LIGHTBOX_ZOOM_STEP); });
+  document.getElementById('lightboxZoomOut').addEventListener('click', function(){ zoomBy(-LIGHTBOX_ZOOM_STEP); });
+  document.getElementById('lightboxZoomReset').addEventListener('click', function(){ zoom=1; applyZoom(); });
+  document.getElementById('modalClose').onclick = closeLightbox;
+  document.getElementById('modalBackdrop').addEventListener('click', function(e){ if(e.target.id==='modalBackdrop') closeLightbox(); });
 }
 
 // kind is 'task' or 'episode' - same comments/links/attachments UI, just
@@ -1485,35 +1720,57 @@ function renderBoard(){
     var box = document.getElementById('boardBody');
     if(!box) return;
     if(snap.empty){ box.innerHTML = '<div class="empty-state"><strong>Nothing open</strong>Every task for this view is checked off.</div>'; return; }
-    var groups = {overdue:[], 'due-soon':[], upcoming:[]};
-    snap.docs.forEach(function(d){
-      var t = d.data(); t._id = d.id;
-      var s = dueStatus(t.dueDate,false);
-      (groups[s]||groups.upcoming).push(t);
-    });
-    var order = [['overdue','Overdue'], ['due-soon','Due within 7 days'], ['upcoming','Upcoming']];
-    box.innerHTML = order.filter(function(o){ return groups[o[0]].length; }).map(function(o){
-      return '<div class="board-group"><div class="board-group-title">'+o[1]+'</div>'+
-        groups[o[0]].map(function(t){
-          var rr = roleOf(t.role);
-          return '<div class="board-task" style="border-left:3px solid '+(rr?rr.color:'var(--line)')+'">'+
-            '<input type="checkbox" class="task-check" data-task="'+t._id+'">'+
-            '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+'</div>'+
-            '<div class="board-task-client">'+escapeHtml(t.clientName)+(showingAll?' <span class="role-chip" style="background:'+(rr?rr.color:'#888')+'">'+(rr?escapeHtml(rr.label):t.role)+'</span>':'')+'</div>'+
-            '<div class="board-task-episode">'+escapeHtml(t.episodeTitle)+' · due '+fmtDate(t.dueDate)+'</div>'+
-            (t.dependsOnLabel?'<div class="task-meta"><span class="task-waiting">Waiting on: '+escapeHtml(t.dependsOnLabel)+'</span></div>':'')+
-            '</div></div>';
-        }).join('')+
-        '</div>';
-    }).join('');
-    Array.prototype.forEach.call(box.querySelectorAll('.task-check'), function(cb){
-      cb.addEventListener('change', function(){
-        var taskId = cb.getAttribute('data-task');
-        db.doc('tasks/'+taskId).update({done:true, doneByUserId:myUid, doneAt:new Date().toISOString()}).catch(function(err){ cb.checked=false; showToast('error', errMsg(err)); });
+    var tasks = snap.docs.map(function(d){ var t=d.data(); t._id=d.id; return t; });
+    // Unlike the episode page (which already has every sibling task,
+    // including done ones, in one query), this board's query excludes done
+    // tasks entirely - so a prerequisite that's ALREADY done (the normal
+    // case once someone finishes it) won't be in `tasks` at all. Fetch
+    // each referenced prerequisite by its deterministic id
+    // (episodeId + '_' + dependsOnStepId, same scheme generateEpisodesForRule
+    // uses) instead of assuming it's in this snapshot.
+    var depIds = [];
+    tasks.forEach(function(t){ if(t.dependsOnStepId) depIds.push(t.episodeId+'_'+t.dependsOnStepId); });
+    depIds = depIds.filter(function(id,i){ return depIds.indexOf(id)===i; });
+    Promise.all(depIds.map(function(id){ return db.doc('tasks/'+id).get().catch(function(){ return {exists:false}; }); }))
+      .then(function(depSnaps){
+        var depById = {};
+        depSnaps.forEach(function(s,i){ if(s.exists) depById[depIds[i]] = s.data(); });
+        renderBoardBody(box, tasks, depById, showingAll);
       });
-    });
   }, function(){ var b=document.getElementById('boardBody'); if(b) b.innerHTML='<div class="empty-state">Could not load your board.</div>'; });
   activeUnsubs.push(unsub);
+}
+
+function renderBoardBody(box, tasks, depById, showingAll){
+  var groups = {overdue:[], 'due-soon':[], upcoming:[]};
+  tasks.forEach(function(t){
+    var s = dueStatus(t.dueDate,false);
+    (groups[s]||groups.upcoming).push(t);
+  });
+  var order = [['overdue','Overdue'], ['due-soon','Due within 7 days'], ['upcoming','Upcoming']];
+  box.innerHTML = order.filter(function(o){ return groups[o[0]].length; }).map(function(o){
+    return '<div class="board-group"><div class="board-group-title">'+o[1]+'</div>'+
+      groups[o[0]].map(function(t){
+        var rr = roleOf(t.role);
+        var depTask = t.dependsOnStepId ? depById[t.episodeId+'_'+t.dependsOnStepId] : null;
+        var isBlocked = !!(depTask && !depTask.done);
+        var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
+        return '<div class="board-task'+(isBlocked?' task-blocked':'')+'" style="border-left:3px solid '+(rr?rr.color:'var(--line)')+'">'+
+          '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(depTask.label)+'\' is done"':'')+'>'+
+          '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+'</div>'+
+          '<div class="board-task-client">'+escapeHtml(t.clientName)+(showingAll?' <span class="role-chip" style="background:'+(rr?rr.color:'#888')+'">'+(rr?escapeHtml(rr.label):t.role)+'</span>':'')+'</div>'+
+          '<div class="board-task-episode">'+escapeHtml(t.episodeTitle)+' · due '+fmtDate(t.dueDate)+'</div>'+
+          (isBlocked?'<div class="task-meta"><span class="task-waiting">⛔ Waiting on: '+escapeHtml(depTask.label)+'</span></div>':'')+
+          '</div></div>';
+      }).join('')+
+      '</div>';
+  }).join('');
+  Array.prototype.forEach.call(box.querySelectorAll('.task-check:not([disabled])'), function(cb){
+    cb.addEventListener('change', function(){
+      var taskId = cb.getAttribute('data-task');
+      db.doc('tasks/'+taskId).update({done:true, doneByUserId:myUid, doneAt:new Date().toISOString()}).catch(function(err){ cb.checked=false; showToast('error', errMsg(err)); });
+    });
+  });
 }
 
 // ---------- TIMELOG ----------
@@ -2055,6 +2312,9 @@ function renderAdmin(){
     '<div class="section"><div class="section-head"><h2 class="section-title">All employees</h2><button type="button" class="btn btn-sm" id="adminInviteBtn">+ Invite someone</button></div>'+
     '<div class="page-sub" style="margin:-6px 0 12px;">Change anyone\'s role or team here - this is also how you move someone off a team they\'re stuck on, or make more than one person a Manager on the same team.</div>'+
     '<div id="employeesBox"><div class="skeleton" style="height:80px;"></div></div></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Pending invites</h2></div>'+
+    '<div class="page-sub" style="margin:-6px 0 12px;">Across every team - this used to only be visible from a Manager\'s own Team page.</div>'+
+    '<div id="allInvitesBox"><div class="skeleton" style="height:40px;"></div></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'
   );
   document.getElementById('newTeamBtn').addEventListener('click', function(){
@@ -2068,6 +2328,19 @@ function renderAdmin(){
   });
   document.getElementById('newGlobalServiceBtn').addEventListener('click', function(){ openCreateServiceTypeModal(null); });
   document.getElementById('adminInviteBtn').addEventListener('click', openAdminInviteModal);
+
+  // Ported over from the Manager's Team Settings page (renderTeamSettings) -
+  // that page only ever showed a Manager their OWN team's pending invites,
+  // and Admin had no equivalent view at all across any team. listInvites()
+  // with no teamId returns every invite (see src/lib/teams.js).
+  listInvites().then(function(invites){
+    var box = document.getElementById('allInvitesBox');
+    if(!box) return;
+    var pending = invites.filter(function(i){ return !i.usedAt; });
+    box.innerHTML = pending.length ? pending.map(function(i){
+      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleOf(i.role)?roleOf(i.role).label:i.role)+' · '+escapeHtml(teamName(i.teamId))+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div></div>';
+    }).join('') : '<div class="empty-state">No pending invites.</div>';
+  }).catch(function(){ var b=document.getElementById('allInvitesBox'); if(b) b.innerHTML = '<div class="empty-state">Could not load invites.</div>'; });
 
   Promise.all([listTeams(), db.collection('profiles').get()]).then(function(res){
     var teams = res[0].slice().sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
@@ -2085,13 +2358,26 @@ function renderAdmin(){
       var manager = profiles.filter(function(p){ return p.id===t.managerId; })[0];
       var actualManagers = profiles.filter(function(p){ return p.role==='manager' && p.teamId===t.id; });
       var memberOpts = profiles.map(function(p){ return '<option value="'+p.id+'"'+(p.id===t.managerId?' selected':'')+'>'+escapeHtml(p.displayName||p.email)+(p.role==='admin'?' (Admin)':(p.teamId?' ('+escapeHtml(teamName(p.teamId))+')':''))+'</option>'; }).join('');
+      var teamServices = servicesCache.filter(function(s){ return s.teamId===t.id; });
       return '<div class="panel" style="margin-bottom:12px;"><h3>'+escapeHtml(t.name)+'</h3>'+
         '<div style="font-size:13px;color:var(--muted);margin-bottom:4px;">Point of contact: '+(manager?escapeHtml(manager.displayName||manager.email):'- none assigned -')+'</div>'+
         '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Managers on this team: '+(actualManagers.length?actualManagers.map(function(m){return escapeHtml(m.displayName||m.email);}).join(', '):'- none yet -')+'</div>'+
         '<div class="field-row"><div class="field"><label>Assign/change point of contact (promotes a non-admin to Manager)</label><select data-assign-mgr="'+t.id+'"><option value="">(no point of contact)</option>'+memberOpts+'</select></div>'+
         '<div class="field"><label>Or invite a new Manager by email</label><input type="email" placeholder="name@bluekitemedia.com" data-invite-mgr="'+t.id+'"></div></div>'+
-        '</div>';
+        '<div style="margin-top:10px;"><label style="font-size:12px;color:var(--muted);display:block;margin-bottom:4px;">This team\'s services</label>'+
+        (teamServices.length ? teamServices.map(function(s){ return '<span class="tag">'+escapeHtml(s.name)+' <button type="button" class="tag-remove" data-del-svc="'+s.id+'">✕</button></span>'; }).join('') : '<span style="font-size:12.5px;color:var(--muted);">None yet.</span>')+
+        '</div></div>';
     }).join('') || '<div class="empty-state">No teams yet - create your first one.</div>';
+    // Same delete handler the "Global services" section below uses -
+    // team-scoped services created for any team (via the scope picker in
+    // "+ New service type") now show up and can be removed from here too,
+    // not just from that one team's own Manager-facing Team page.
+    Array.prototype.forEach.call(box.querySelectorAll('[data-del-svc]'), function(btn){
+      btn.addEventListener('click', function(){
+        if(!confirm('Delete this service from the vocabulary?')) return;
+        deleteService(btn.getAttribute('data-del-svc')).then(function(){ refreshServicesCache().then(route); }).catch(function(err){ showToast('error', errMsg(err)); });
+      });
+    });
 
     Array.prototype.forEach.call(box.querySelectorAll('[data-assign-mgr]'), function(sel){
       sel.addEventListener('change', function(){
@@ -2134,6 +2420,7 @@ function renderAdmin(){
     empBox.innerHTML = employees.length ? '<div class="roster-table">'+employees.map(function(p){
       var roleOpts = ASSIGNABLE_ROLES.map(function(r){ return '<option value="'+r.key+'"'+(r.key===p.role?' selected':'')+'>'+escapeHtml(r.label)+'</option>'; }).join('');
       return '<div class="roster-row" style="justify-content:space-between;">'+
+        '<span class="presence-dot'+(isOnline(p.id)?' online':'')+'"></span>'+
         '<div style="min-width:0;flex:1;"><div class="roster-name">'+escapeHtml(p.displayName||p.email)+'</div><div class="roster-role">'+escapeHtml(p.email)+'</div></div>'+
         '<div class="field-row" style="flex:none;gap:8px;">'+
         '<select data-emp-role="'+p.id+'" style="width:auto;">'+roleOpts+'</select>'+
@@ -2348,6 +2635,39 @@ function showClockInOverlay(){
   });
 }
 
+// Idle detector force-pause warning (2026-09-21) - see
+// src/lib/timelog.js's setIdleWarningHandler for the detection side. Kept
+// visually distinct from the clock-in overlay (red-tinted, no close button)
+// since dismissing it shouldn't be as easy as the clock-in prompt - the
+// entire point is that not responding actually does something (auto clock-
+// out), so it can't be a silent little toast easy to miss.
+function showIdleWarningOverlay(secondsRemaining){
+  var el = document.getElementById('idleWarningOverlay');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'idleWarningOverlay';
+    el.className = 'clockin-overlay idle-warning-overlay';
+    el.innerHTML = '<div class="clockin-card">'+
+      '<div class="clockin-icon">⏸</div>'+
+      '<div class="clockin-title">Still there?</div>'+
+      '<div class="clockin-sub">No activity has been seen for a while. You\'ll be automatically clocked out in <b id="idleWarningSeconds"></b> unless you move your mouse or press a key.</div>'+
+      '<button type="button" class="btn btn-primary" id="idleWarningDismissBtn">I\'m still here</button>'+
+      '</div>';
+    document.body.appendChild(el);
+    // The click itself already resets the idle timer (the same global
+    // keyboard/mouse hook that detects idling also sees this click) - this
+    // button just gives an obvious, reassuring thing to click instead of
+    // silently waving the mouse around and hoping it registered.
+    document.getElementById('idleWarningDismissBtn').addEventListener('click', function(){ el.remove(); });
+  }
+  var secEl = document.getElementById('idleWarningSeconds');
+  if(secEl) secEl.textContent = secondsRemaining+'s';
+}
+function hideIdleWarningOverlay(){
+  var el = document.getElementById('idleWarningOverlay');
+  if(el) el.remove();
+}
+
 // ---------- BOOT ----------
 (function boot(){
   initTheme();
@@ -2363,6 +2683,14 @@ function showClockInOverlay(){
   // to clock in again?" has an obvious answer instead of being a mystery.
   timelog.setSessionAutoClosedHandler(function(lastSeenAt){
     showToast('info', 'Your last clock-in wasn\'t closed properly (the app likely closed or crashed while you were clocked in) - it\'s been ended as of '+new Date(lastSeenAt).toLocaleString()+'. Go ahead and clock in again.');
+  });
+  // Idle detector force-pause - see src/lib/timelog.js.
+  timelog.setIdleWarningHandler(function(secondsRemaining){ showIdleWarningOverlay(secondsRemaining); });
+  timelog.setIdleClearedHandler(function(){ hideIdleWarningOverlay(); });
+  timelog.setIdleForcePausedHandler(function(lastActiveAt){
+    hideIdleWarningOverlay();
+    updateClockUI();
+    showToast('info', 'Clocked out after being idle since '+new Date(lastActiveAt).toLocaleString()+'. Clock back in whenever you\'re ready.');
   });
   if(!supabaseConfigured){
     document.getElementById('shell').style.display = 'none';
@@ -2427,17 +2755,21 @@ function showClockInOverlay(){
         myRole = p ? p.role : null;
         myTeamId = p ? p.teamId : null;
         document.getElementById('navAddClient').hidden = !canManage();
-        // Admin never had a "Team" nav item before, on purpose - but the
-        // page it pointed to (a Manager's own roster/invites) never had an
-        // Admin-appropriate equivalent either. Rather than leave Admin
-        // without a working link at all, this now points Admin at the same
-        // Admin page that has the real cross-team roster/invite tools.
+        // 2026-09-21: Admin used to also see this "Team" link, redirected
+        // to point at #/admin - but that made it a second nav item leading
+        // to the exact same place as "Admin" right below it. Now that Admin
+        // has every capability Team Settings had (roster with presence,
+        // pending invites across every team, and each team's own services -
+        // see renderAdmin), there's nothing left for Admin to reach here
+        // that "Admin" doesn't already cover, so this is Manager-only again
+        // and always points at their own Team page.
         var teamNav = document.getElementById('navTeam');
         if(teamNav){
-          teamNav.hidden = !(myRole==='manager' || isAdmin());
-          teamNav.setAttribute('href', isAdmin() ? '#/admin' : '#/team');
+          teamNav.hidden = !isManager();
+          teamNav.setAttribute('href', '#/team');
         }
         var adminNav = document.getElementById('navAdmin'); if(adminNav) adminNav.hidden = !isAdmin();
+        var workflowsNav = document.getElementById('navWorkflows'); if(workflowsNav) workflowsNav.hidden = !canManage();
         renderIdentityCard();
         Promise.all([refreshTeamsCache(), refreshServicesCache()]).then(route);
         if(wasFirstLoad && p){
@@ -2508,3 +2840,4 @@ function mountMusicPlayer(){
 }
 
 function renderRoleBoxFallback(){ var box=document.getElementById('roleBox'); if(box) box.innerHTML='<div class="role-box-label">Could not load your profile.</div>'; }
+round 6 fixes
