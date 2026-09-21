@@ -18,8 +18,33 @@
   admin-elevated processes can ever set a global hook that also sees
   keystrokes typed into ANOTHER elevated (admin) window - a real gap
   otherwise, e.g. if an employee runs some other tool as admin.
+
+  IMPORTANT - fixed 2026-09-21 (first attempt broke the app entirely): a
+  custom app_manifest() REPLACES Tauri's own default manifest outright, it
+  doesn't merge with it. Tauri's default manifest (tauri-build's own
+  windows-app-manifest.xml) exists specifically to declare a dependency on
+  the modern Common Controls v6 library - without it, Windows loads the
+  ancient system default (v5.82) instead, which is missing newer APIs
+  entirely. That's exactly what caused "The procedure entry point
+  TaskDialogIndirect could not be located" on launch: the first version of
+  this file only had the elevation block below and silently dropped that
+  dependency. Both pieces have to live in the same manifest, so this file
+  now carries both - the Common Controls v6 dependency (copied verbatim
+  from tauri-build's own default) AND the elevation request.
 -->
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
