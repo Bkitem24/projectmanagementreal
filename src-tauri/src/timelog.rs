@@ -25,8 +25,24 @@
 // it here since it's easy to forget once this is running quietly.
 
 use serde::Serialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// Added 2026-09-21 for the idle-detector force-pause feature: the millisecond
+// timestamp of the last keyboard/mouse/click event seen by the SAME global
+// hook that already powers activity logging below - only updated while
+// RUNNING (i.e. clocked in), so it can't drift from a clocked-OUT session's
+// last input and immediately read as "hours idle" the moment someone next
+// clocks in (timelog_start() resets it to "now" for exactly that reason).
+static LAST_ACTIVITY_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Default)]
 struct ActivityBuffer {
@@ -76,12 +92,22 @@ fn ensure_listener_started() {
                         buf.key_log.push(' ');
                     }
                     buf.key_log.push_str(&token);
+                    LAST_ACTIVITY_MS.store(now_ms(), Ordering::Relaxed);
                 }
                 rdev::EventType::MouseMove { x, y } => {
                     if let Some((lx, ly)) = buf.last_mouse {
                         buf.mouse_distance += ((x - lx).powi(2) + (y - ly).powi(2)).sqrt();
                     }
                     buf.last_mouse = Some((x, y));
+                    LAST_ACTIVITY_MS.store(now_ms(), Ordering::Relaxed);
+                }
+                rdev::EventType::ButtonPress(_) => {
+                    // Not counted in the activity report (key_count/
+                    // mouse_distance) - that report is specifically about
+                    // keystrokes and mouse travel - but a click with no
+                    // movement is still clearly "someone is here" for idle
+                    // purposes.
+                    LAST_ACTIVITY_MS.store(now_ms(), Ordering::Relaxed);
                 }
                 _ => {}
             }
@@ -106,12 +132,33 @@ pub fn timelog_start() {
         let mut buf = buffer().lock().unwrap();
         *buf = ActivityBuffer::default();
     }
+    // Always reset (even on a "resuming an already-running session" call) -
+    // otherwise the very first timelog_seconds_idle() poll after clocking in
+    // (or after a webview reload while already clocked in) could read as
+    // idle since whenever the LAST session happened to leave off, possibly
+    // hours ago, triggering an immediate false idle-warning.
+    LAST_ACTIVITY_MS.store(now_ms(), Ordering::Relaxed);
     ensure_listener_started();
 }
 
 #[tauri::command]
 pub fn timelog_stop() {
     RUNNING.store(false, Ordering::SeqCst);
+}
+
+// Idle-detector force-pause feature (2026-09-21): seconds since the global
+// hook last saw a keystroke, mouse move, or click while clocked in. JS polls
+// this (see src/lib/timelog.js's idle warning/force-pause logic) instead of
+// trying to track "idle" from inside the webview itself, which only ever
+// sees activity while the app window has focus - the whole point here is to
+// also catch someone stepping away while some OTHER window is focused.
+#[tauri::command]
+pub fn timelog_seconds_idle() -> u64 {
+    let last = LAST_ACTIVITY_MS.load(Ordering::Relaxed);
+    if last == 0 {
+        return 0;
+    }
+    now_ms().saturating_sub(last) / 1000
 }
 
 // Lets JS check, shortly after (re-)starting capture, whether the native
@@ -180,3 +227,4 @@ pub fn timelog_capture_screenshot() -> Result<Vec<u8>, String> {
         .map_err(|e| e.to_string())?;
     Ok(bytes)
 }
+round 6 fixes
