@@ -173,9 +173,21 @@ export function joinCallRoom(callId, myProfile, mySessionId, handlers) {
 async function authedFetch(path, opts) {
   const { data } = await supabase.auth.getSession();
   const token = data && data.session && data.session.access_token;
-  return fetch(REALTIME_WORKER_URL.replace(/\/$/, '') + path, Object.assign({}, opts, {
-    headers: Object.assign({ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, (opts && opts.headers) || {}),
-  }));
+  const url = REALTIME_WORKER_URL.replace(/\/$/, '') + path;
+  try {
+    return await fetch(url, Object.assign({}, opts, {
+      headers: Object.assign({ Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, (opts && opts.headers) || {}),
+    }));
+  } catch (err) {
+    // A network-level failure here (fetch() itself throwing - DNS not
+    // resolving, connection refused, offline) is what "failed to fetch"
+    // means, and on its own gives no hint WHICH url that was for. Worth
+    // checking this exact url's own /health endpoint directly in a browser
+    // (see worker-realtime/src/index.js) - if that doesn't load either, the
+    // worker likely isn't deployed yet, or VITE_REALTIME_WORKER_URL doesn't
+    // match its real deployed address.
+    throw new Error('Could not reach the Connect server at ' + url + ' - ' + (err && err.message ? err.message : 'the request failed') + '. Try opening ' + REALTIME_WORKER_URL.replace(/\/$/, '') + '/health in a browser to check it\'s deployed and reachable.');
+  }
 }
 
 // A response that isn't actually JSON (most often an HTML error/placeholder
@@ -206,7 +218,20 @@ export async function startLocalSession() {
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
   const res = await authedFetch('/session/new', { method: 'POST', body: JSON.stringify({ offer: pc.localDescription }) });
-  if (!res.ok) throw new Error('Could not start Connect session (' + res.status + ')');
+  if (!res.ok) {
+    // A real HTTP response (not a network failure - see authedFetch's own
+    // catch above) with a 404 specifically means the request reached SOME
+    // server but that server doesn't recognize /session/new - either
+    // VITE_REALTIME_WORKER_URL has an extra/wrong path baked into it, or
+    // it's pointing at a worker that's running OLDER code than what's in
+    // worker-realtime/src/index.js today (a redeploy is needed there
+    // whenever that file changes - it's easy to forget to redeploy that
+    // specific worker after a round that touched other things too).
+    const detail = res.status === 404
+      ? ' - the request reached ' + REALTIME_WORKER_URL.replace(/\/$/, '') + '/session/new but got a 404. Check VITE_REALTIME_WORKER_URL has no extra path or typo, and that worker-realtime has been redeployed (`cd worker-realtime && npx wrangler deploy`) since its code last changed.'
+      : '';
+    throw new Error('Could not start Connect session (' + res.status + ')' + detail);
+  }
   const body = await parseJsonResponse(res, 'a new session');
   await pc.setRemoteDescription(body.answer);
   return { sessionId: body.sessionId, pc, localStream: stream };
@@ -249,3 +274,4 @@ export function endSession(session) {
   try { session.pc.close(); } catch (e) {}
   try { session.localStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
 }
+round 6 fixes
