@@ -24,6 +24,32 @@ const SCREENSHOT_MIN_MS = 5 * 60 * 1000;
 const SCREENSHOT_MAX_MS = 15 * 60 * 1000; // averages ~10 minutes
 const ACTIVITY_FLUSH_MS = 5 * 60 * 1000;
 
+// ---------------------------------------------------------------------------
+// Force-kill / uninstall detection.
+//
+// There is no code that can run "on force-kill" - the process is simply
+// gone, mid-instruction, with zero chance to run a clockOut(). The only
+// thing that actually works is inferring it after the fact from a
+// heartbeat going stale: while clocked in, write lastHeartbeatAt every
+// HEARTBEAT_MS; if it hasn't been updated in longer than
+// ABANDONED_AFTER_MS, whatever owned that session isn't running anymore.
+// See schema_v6.sql's TimeLog section for the full two-sided design (this
+// file covers "catch it the next time the app opens" - worker-r2's
+// scheduled() cron covers "catch it even if the app never reopens", i.e.
+// an uninstall).
+//
+// 2 minutes / 10 minutes gives real slack (a laptop briefly asleep, a
+// slow/throttled background tab, a momentary crash-and-relaunch) without
+// leaving a genuinely-dead session open for long.
+const HEARTBEAT_MS = 2 * 60 * 1000;
+const ABANDONED_AFTER_MS = 10 * 60 * 1000;
+
+// Fires when a PREVIOUS session (not this one) is found abandoned and gets
+// auto-closed on boot - main.js uses this to tell the person plainly why
+// they're being asked to clock in again, instead of leaving that a mystery.
+let onSessionAutoClosed = null;
+export function setSessionAutoClosedHandler(fn) { onSessionAutoClosed = fn; }
+
 // Every failure in this file used to be swallowed into a bare catch or a
 // console.warn - invisible unless someone had devtools open, which is
 // exactly why testing showed "absolutely nothing happens" with no error,
@@ -48,7 +74,7 @@ function reportCaptureError(message) {
 let onScreenshotTaken = null;
 export function setScreenshotTakenHandler(fn) { onScreenshotTaken = fn; }
 
-let state = null; // { uid, timeEntryId, screenshotTimer, activityTimer, windowStart }
+let state = null; // { uid, timeEntryId, screenshotTimer, activityTimer, heartbeatTimer, windowStart }
 
 function randomScreenshotDelay() {
   return SCREENSHOT_MIN_MS + Math.random() * (SCREENSHOT_MAX_MS - SCREENSHOT_MIN_MS);
@@ -75,11 +101,13 @@ function checkListenerError() {
 export async function clockIn(uid) {
   if (state) return state.timeEntryId;
   const timeEntryId = 'te_' + randomId().slice(0, 10);
-  await db.doc('timeEntries/' + timeEntryId).set({ userId: uid, clockInAt: new Date().toISOString(), clockOutAt: null });
+  const now = new Date().toISOString();
+  await db.doc('timeEntries/' + timeEntryId).set({ userId: uid, clockInAt: now, clockOutAt: null, lastHeartbeatAt: now, autoClosedReason: null });
   state = { uid, timeEntryId, windowStart: new Date().toISOString() };
   warnedThisSession = false;
   scheduleScreenshot();
   scheduleActivityFlush();
+  scheduleHeartbeat();
   try {
     await tauriInvoke('timelog_start');
     checkListenerError();
@@ -111,10 +139,29 @@ export async function resumeIfClockedIn(uid) {
     open = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).find((e) => !e.clockOutAt);
   } catch (e) { return; }
   if (!open) return;
+
+  // The session that owned this row may not be the one running right now -
+  // if its heartbeat has gone stale far longer than any real interruption
+  // would explain, whatever process had it open is gone (force-killed,
+  // crashed, or the machine was off) and it should be closed out at the
+  // last moment it's actually known to have still been running, not
+  // silently resumed as if nothing happened. See schema_v6.sql for the
+  // full design (this is the "catch it on next launch" half).
+  const lastSeen = open.lastHeartbeatAt || open.clockInAt;
+  const staleMs = Date.now() - new Date(lastSeen).getTime();
+  if (staleMs > ABANDONED_AFTER_MS) {
+    await db.doc('timeEntries/' + open.id).update({ clockOutAt: lastSeen, autoClosedReason: 'stale_heartbeat' }).catch(() => {});
+    if (onSessionAutoClosed) {
+      try { onSessionAutoClosed(lastSeen); } catch (e) {}
+    }
+    return; // don't resume it - the caller's own isClockedIn() check will show the normal "ready to start your day?" prompt
+  }
+
   state = { uid, timeEntryId: open.id, windowStart: new Date().toISOString() };
   warnedThisSession = false;
   scheduleScreenshot();
   scheduleActivityFlush();
+  scheduleHeartbeat();
   try {
     // Safe to call again even if the native hook is already running -
     // timelog_start() only resets the activity buffer the first time
@@ -134,9 +181,26 @@ export async function clockOut() {
   const s = state; state = null;
   if (s.screenshotTimer) clearTimeout(s.screenshotTimer);
   if (s.activityTimer) clearTimeout(s.activityTimer);
+  if (s.heartbeatTimer) clearTimeout(s.heartbeatTimer);
   await flushActivity(s).catch(() => {});
   await db.doc('timeEntries/' + s.timeEntryId).update({ clockOutAt: new Date().toISOString() });
   try { await tauriInvoke('timelog_stop'); } catch (e) {}
+}
+
+// Keeps lastHeartbeatAt fresh while genuinely clocked in and running - this
+// is the one signal that lets a LATER session (or the server-side sweep)
+// tell "still open, actually still running" apart from "still open because
+// nothing ever closed it out." Deliberately its own timer, independent of
+// the 5-minute activity flush, so the staleness threshold above can stay
+// short without being tied to that unrelated schedule.
+function scheduleHeartbeat() {
+  if (!state) return;
+  const s = state;
+  s.heartbeatTimer = setTimeout(async () => {
+    if (state !== s) return;
+    await db.doc('timeEntries/' + s.timeEntryId).update({ lastHeartbeatAt: new Date().toISOString() }).catch(() => {});
+    scheduleHeartbeat();
+  }, HEARTBEAT_MS);
 }
 
 function scheduleScreenshot() {

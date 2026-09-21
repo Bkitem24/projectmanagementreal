@@ -1,4 +1,4 @@
--- Optional example data — the same Men's Therapy Online example the first
+-- Optional example data, the same Men's Therapy Online example the first
 -- prototype shipped with. Run this once, after schema.sql, if you want to
 -- start from real working examples instead of an empty app.
 -- Safe to re-run: it upserts on the fixed ids below.
@@ -17,7 +17,7 @@ insert into public.clients (id, name, "hostName", tagline, services, color, exam
 values (
   '22222222-2222-2222-2222-222222222222',
   'American Masculinity Podcast', 'Timothy Wienecke',
-  'Example client — edit this overview and add a real publishing schedule.',
+  'Example client, edit this overview and add a real publishing schedule.',
   array['Full episode production','Thumbnail & title packaging'],
   '#3f6b8a', true, now() + interval '1 second'
 )

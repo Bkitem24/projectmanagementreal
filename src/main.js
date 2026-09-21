@@ -1,7 +1,7 @@
 import { supabase, supabaseConfigured } from './lib/supabaseClient.js';
 import { db, randomId } from './lib/db.js';
 import { signUp, signIn, signOut, getSession, onAuthStateChange, fetchProfiles, updateEmail, updatePassword } from './lib/auth.js';
-import { listTeams, createTeam, assignTeamManager, createInvite, listInvites, listServices, createService, deleteService } from './lib/teams.js';
+import { listTeams, createTeam, assignTeamManager, clearTeamManager, createInvite, listInvites, listServices, createService, deleteService } from './lib/teams.js';
 import { startPresence, stopPresence, isOnline, onPresenceChange } from './lib/presence.js';
 import { compressImage } from './lib/imageCompress.js';
 import { imageHasFace } from './lib/faceDetect.js';
@@ -9,7 +9,7 @@ import { uploadFile, fileUrl, fetchProtectedUrl, downloadProtectedFile, deleteRe
 import * as timelog from './lib/timelog.js';
 import * as musicPlayer from './lib/music.js';
 import { MOODS } from './lib/music.js';
-import { connectConfigured, listenForConnects, ring, answerRing, sendHangup, startLocalSession, pullRemoteTrack, endSession } from './lib/connect.js';
+import { connectConfigured, listenForConnects, newCallId, ring, joinCallRoom, startLocalSession, pullRemoteTrack, endSession } from './lib/connect.js';
 
 // ---------- constants ----------
 var ROLES = [
@@ -153,7 +153,31 @@ function isAdmin(){ return myRole==='admin'; }
 function isManager(){ return myRole==='manager'; }
 function canManage(){ return isManager() || isAdmin(); }
 function clearSubs(){ activeUnsubs.forEach(function(u){ try{u();}catch(e){} }); activeUnsubs=[]; }
-function paint(html){ app.innerHTML = html; app.classList.remove('anim'); void app.offsetWidth; app.classList.add('anim'); }
+
+// ---------- back-button history stack ----------
+// A real stack of actually-visited hashes, not a fixed "parent page" lookup
+// (which is what would've had to special-case every single page type, and
+// still wouldn't get "go back to whatever I was on before" right for a
+// multi-hop path like Connect -> Home -> a client -> back, back, back).
+// route() below pushes onto this every time the hash genuinely changes to
+// something new; goBack() pops it and navigates there directly, marking
+// that one hashchange as "don't push" so going back doesn't also count as
+// a new forward visit.
+var navBackStack = [];
+var navSkipPush = false;
+var navCurrentHash = null;
+function goBack(){
+  if(!navBackStack.length) return;
+  var prev = navBackStack.pop();
+  navSkipPush = true;
+  location.hash = prev;
+}
+function paint(html){
+  var backHtml = navBackStack.length ? '<button type="button" class="page-back-btn" id="pageBackBtn" title="Back">'+ICON_BACK+'Back</button>' : '';
+  app.innerHTML = backHtml + html;
+  if(backHtml) document.getElementById('pageBackBtn').addEventListener('click', goBack);
+  app.classList.remove('anim'); void app.offsetWidth; app.classList.add('anim');
+}
 
 async function refreshTeamsCache(){
   try{
@@ -385,6 +409,11 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
 function route(){
   clearSubs();
   var hash = location.hash.replace(/^#/,'') || '/';
+  if(navCurrentHash!==null && navCurrentHash!==hash){
+    if(navSkipPush) navSkipPush = false;
+    else { navBackStack.push(navCurrentHash); if(navBackStack.length>50) navBackStack.shift(); }
+  }
+  navCurrentHash = hash;
   highlightNav(hash);
   var mClient = hash.match(/^\/client\/([^\/]+)$/);
   var mEpisode = hash.match(/^\/episode\/([^\/]+)$/);
@@ -985,7 +1014,8 @@ function renderEpisode(episodeId){
               '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+'>'+
               '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+(t.custom?' <span class="task-custom-badge">custom</span>':'')+'</div>'+
               '<div class="task-meta"><span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):t.role)+'</span>'+
-              (t.dependsOnLabel?'<span class="task-waiting">Waiting on: '+escapeHtml(t.dependsOnLabel)+'</span>':'')+
+              (t.dependsOnLabel?'<span class="task-waiting">Waiting on: '+escapeHtml(t.dependsOnLabel)+(canManage()?' <button type="button" class="dep-edit-btn" data-edit-dep="'+t._id+'" data-dep-label="'+escapeHtml(t.dependsOnLabel)+'" title="Edit dependency">'+ICON_PENCIL+'</button>':'')+'</span>'
+                :(canManage()?'<button type="button" class="dep-add-btn" data-edit-dep="'+t._id+'" data-dep-label="" title="Set a dependency">+ Waiting on</button>':''))+
               (t.done && t.doneByUserId?profileChip(t.doneByUserId):'')+
               '</div>'+
               '<button type="button" class="task-expand-btn" data-collab="'+t._id+'">'+(expandedTasks[t._id]?'Hide discussion':'Comments, links & files')+'</button>'+
@@ -1004,6 +1034,22 @@ function renderEpisode(episodeId){
             doneByUserId: checked ? myUid : null,
             doneAt: checked ? new Date().toISOString() : null
           }).catch(function(err){ cb.checked=!checked; showToast('error', errMsg(err)); });
+        });
+      });
+      Array.prototype.forEach.call(box.querySelectorAll('[data-edit-dep]'), function(btn){
+        btn.addEventListener('click', function(){
+          var taskId = btn.getAttribute('data-edit-dep');
+          var current = btn.getAttribute('data-dep-label')||'';
+          openModal('Task dependency',
+            '<div class="field"><label>Waiting on</label><input name="dependsOnLabel" type="text" value="'+escapeHtml(current)+'" placeholder="e.g. Trailer content extracted"></div>'+
+            '<div class="field-hint">Leave this blank and save to clear it.</div>',
+            function(fd){
+              setModalBusy(true);
+              var val = (fd.get('dependsOnLabel')||'').trim();
+              db.doc('tasks/'+taskId).update({ dependsOnLabel: val }).then(function(){
+                closeModal(); showToast('success', val ? 'Dependency updated' : 'Dependency cleared');
+              }).catch(function(err){ showModalError(errMsg(err)); });
+            });
         });
       });
       Array.prototype.forEach.call(box.querySelectorAll('[data-collab]'), function(btn){
@@ -1090,6 +1136,7 @@ var COLLAB_TABLES = {
 };
 function loadTaskCollab(taskId, panel){ return loadCollab('task', taskId, panel); }
 var ICON_PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+var ICON_BACK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>';
 var ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>';
 // kind is 'task' or 'episode' - same comments/links/attachments UI, just
 // pointed at a different set of tables. Rewritten (Phase 1 final fixes) to
@@ -1099,6 +1146,19 @@ var ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" st
 // than the plain stacked-text version this replaced. Edit is author-only;
 // delete is the author or a Manager/Admin (moderation), matching how those
 // same apps split the two permissions - see supabase/schema_v5.sql.
+//
+// Composer overhaul (2026-09-21): the separate "paste a link" row is gone -
+// linkifyHtml() already turns a URL typed straight into a message into a
+// real link, so a second input for the same thing was redundant. Attaching
+// a file is no longer its own fire-and-forget action either: picking a
+// file now just stages it as a chip above the composer, and ONE Send
+// either posts text alone, an attachment alone, or both together as a
+// single message (schema_v6.sql adds "commentId" to the attachments
+// tables so a file can actually belong to a specific message instead of
+// floating in a separate unordered grid). Also added: a real
+// auto-expanding textarea (like this very chat box), and emoji reactions
+// per message.
+var REACTION_EMOJI = ['👍','❤️','😂','😮','😢','🙏','🎉','👀'];
 function loadCollab(kind, id, panel){
   var cfg = COLLAB_TABLES[kind];
   panel.innerHTML = '<div class="skeleton" style="height:40px;"></div>';
@@ -1108,9 +1168,17 @@ function loadCollab(kind, id, panel){
     supabase.from(cfg.attachments).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
   ]).then(function(res){
     var comments = res[0].data||[], links = res[1].data||[], attachments = res[2].data||[];
-    var ids = comments.map(function(c){return c.authorId;}).concat(links.map(function(l){return l.addedBy;})).concat(attachments.map(function(a){return a.uploadedBy;})).filter(Boolean);
-    return fetchProfiles(ids).then(function(ps){
+    var commentIds = comments.map(function(c){ return c.id; });
+    var reactionsPromise = commentIds.length
+      ? supabase.from('commentReactions').select('*').eq('kind', kind).in('commentId', commentIds)
+      : Promise.resolve({ data: [] });
+    return reactionsPromise.then(function(rres){
+      var reactions = (rres && rres.data) || [];
+      var ids = comments.map(function(c){return c.authorId;}).concat(links.map(function(l){return l.addedBy;})).concat(attachments.map(function(a){return a.uploadedBy;})).concat(reactions.map(function(r){return r.userId;})).filter(Boolean);
+      return fetchProfiles(ids).then(function(ps){
       var editingComment = null, editingLink = null; // id of the row currently in inline-edit mode, if any
+      var pendingFile = null; // File staged for the NEXT send, via the composer's attach button
+      var openPicker = null; // commentId whose reaction picker is currently open, if any
       function who(uid){ return (ps[uid]&&ps[uid].name)||'Someone'; }
       function avatarFor(uid){
         var p = ps[uid]||{};
@@ -1124,6 +1192,43 @@ function loadCollab(kind, id, panel){
         return (edit||del) ? '<span class="comment-actions">'+edit+del+'</span>' : '';
       }
 
+      // Reactions grouped by comment - {emoji -> {emoji,count,mine,users[]}}
+      var reactionsByComment = {};
+      reactions.forEach(function(r){
+        var bucket = reactionsByComment[r.commentId] || (reactionsByComment[r.commentId] = {});
+        var e = bucket[r.emoji] || (bucket[r.emoji] = { emoji:r.emoji, count:0, mine:false, users:[] });
+        e.count++; e.users.push(r.userId);
+        if(r.userId===myUid) e.mine = true;
+      });
+      // Attachments that were sent as part of a specific message render
+      // inline under that message instead of the flat grid at the bottom -
+      // the grid is now only ever legacy attachments from before this
+      // change (no commentId).
+      var attachmentsByComment = {}, standaloneAttachments = [];
+      attachments.forEach(function(a){
+        if(a.commentId){ (attachmentsByComment[a.commentId]=attachmentsByComment[a.commentId]||[]).push(a); }
+        else standaloneAttachments.push(a);
+      });
+      function attachmentDeleteBtn(a){
+        return canDeleteRow(a.uploadedBy) ? '<button type="button" class="icon-btn attachment-delete" data-delete-attachment="'+a.id+'" data-key="'+escapeHtml(a.r2Key)+'" title="Delete">'+ICON_TRASH+'</button>' : '';
+      }
+      function attachmentItemHtml(a){
+        if(isImageAttachment(a)) return '<div class="attachment-thumb" data-img-key="'+escapeHtml(a.r2Key)+'" data-img-name="'+escapeHtml(a.fileName)+'"><img loading="lazy"><span class="attachment-name">'+escapeHtml(a.fileName)+'</span>'+attachmentDeleteBtn(a)+'</div>';
+        return '<div class="attachment-file"><a href="#" data-download-key="'+escapeHtml(a.r2Key)+'" data-download-name="'+escapeHtml(a.fileName)+'"><span class="attachment-file-icon">'+attachmentIcon(a)+'</span>'+escapeHtml(a.fileName)+'</a>'+attachmentDeleteBtn(a)+'</div>';
+      }
+      function renderReactions(commentId){
+        var bucket = reactionsByComment[commentId] || {};
+        var pills = Object.keys(bucket).map(function(em){
+          var r = bucket[em];
+          return '<button type="button" class="reaction-pill'+(r.mine?' mine':'')+'" data-react="'+commentId+'" data-emoji="'+em+'" title="'+escapeHtml(r.users.map(who).join(', '))+'">'+em+' <span>'+r.count+'</span></button>';
+        }).join('');
+        var pickerOpen = openPicker===commentId;
+        return '<div class="reaction-row">'+pills+
+          '<button type="button" class="reaction-add-btn" data-react-toggle-picker="'+commentId+'" title="Add a reaction">🙂+</button>'+
+          (pickerOpen?'<div class="reaction-picker">'+REACTION_EMOJI.map(function(em){ return '<button type="button" data-react="'+commentId+'" data-emoji="'+em+'">'+em+'</button>'; }).join('')+'</div>':'')+
+          '</div>';
+      }
+
       function renderComment(c){
         if(editingComment===c.id){
           return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
@@ -1131,13 +1236,16 @@ function loadCollab(kind, id, panel){
             '<div class="comment-edit-box"><textarea class="comment-edit-input" data-comment-edit-input>'+escapeHtml(c.body)+'</textarea>'+
             '<div class="comment-edit-actions"><button type="button" class="btn btn-sm" data-save-comment="'+c.id+'">Save</button><button type="button" class="btn btn-sm btn-ghost" data-cancel-comment>Cancel</button></div></div></div></div>';
         }
+        var attHtml = attachmentsByComment[c.id] ? '<div class="attachment-grid comment-inline-attachments">'+attachmentsByComment[c.id].map(attachmentItemHtml).join('')+'</div>' : '';
         return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
           '<div class="comment-main"><div class="comment-row-head">'+
           '<span class="comment-author">'+escapeHtml(who(c.authorId))+'</span>'+
           '<span class="comment-time">'+fmtDateTime(c.createdAt)+'</span>'+
           (c.editedAt?'<span class="comment-edited-tag">(edited)</span>':'')+
           actionButtons('edit-comment="'+c.id+'"', 'delete-comment="'+c.id+'"', c.authorId)+
-          '</div><div class="comment-body">'+linkifyHtml(escapeHtml(c.body))+'</div></div></div>';
+          '</div>'+(c.body?'<div class="comment-body">'+linkifyHtml(escapeHtml(c.body))+'</div>':'')+
+          attHtml+renderReactions(c.id)+
+          '</div></div>';
       }
       function renderLink(l){
         if(editingLink===l.id){
@@ -1152,9 +1260,6 @@ function loadCollab(kind, id, panel){
           actionButtons('edit-link="'+l.id+'"', 'delete-link="'+l.id+'"', l.addedBy)+
           '</div>';
       }
-      function attachmentDeleteBtn(a){
-        return canDeleteRow(a.uploadedBy) ? '<button type="button" class="icon-btn attachment-delete" data-delete-attachment="'+a.id+'" data-key="'+escapeHtml(a.r2Key)+'" title="Delete">'+ICON_TRASH+'</button>' : '';
-      }
 
       function render(){
         panel.innerHTML =
@@ -1162,57 +1267,93 @@ function loadCollab(kind, id, panel){
             (comments.length ? comments.map(renderComment).join('') : '<div class="collab-empty">No comments yet - start the discussion below.</div>') +
           '</div>'+
           (links.length?'<div class="collab-list collab-links">'+links.map(renderLink).join('')+'</div>':'')+
-          (attachments.length?'<div class="attachment-grid">'+attachments.map(function(a){
-            if(isImageAttachment(a)) return '<div class="attachment-thumb" data-img-key="'+escapeHtml(a.r2Key)+'" data-img-name="'+escapeHtml(a.fileName)+'"><img loading="lazy"><span class="attachment-name">'+escapeHtml(a.fileName)+'</span>'+attachmentDeleteBtn(a)+'</div>';
-            return '<div class="attachment-file"><a href="#" data-download-key="'+escapeHtml(a.r2Key)+'" data-download-name="'+escapeHtml(a.fileName)+'"><span class="attachment-file-icon">'+attachmentIcon(a)+'</span>'+escapeHtml(a.fileName)+'</a>'+attachmentDeleteBtn(a)+'</div>';
-          }).join('')+'</div>':'')+
-          '<div class="collab-composer">'+
-          '<div class="collab-input-row"><input type="text" id="commentInput_'+id+'" placeholder="Message the team…"><button type="button" class="btn btn-sm" id="commentSend_'+id+'">Send</button></div>'+
-          '<div class="collab-input-row"><input type="url" id="linkInput_'+id+'" placeholder="Paste a link…"><button type="button" class="btn btn-sm" id="linkSend_'+id+'">Add</button></div>'+
-          '<div class="collab-input-row"><label class="btn btn-sm" style="cursor:pointer;">Attach file<input type="file" id="fileInput_'+id+'" style="display:none;"></label><span id="fileStatus_'+id+'" style="font-size:11.5px;color:var(--muted);"></span></div>'+
+          (standaloneAttachments.length?'<div class="attachment-grid">'+standaloneAttachments.map(attachmentItemHtml).join('')+'</div>':'')+
+          '<div class="composer">'+
+          '<div class="composer-chip-row" id="composerChipRow_'+id+'"'+(pendingFile?'':' hidden')+'>'+
+            (pendingFile?'<span class="composer-file-chip"><span class="attachment-file-icon">'+attachmentIcon({fileName:pendingFile.name,fileType:pendingFile.type})+'</span>'+escapeHtml(pendingFile.name)+'<button type="button" id="composerChipRemove_'+id+'" title="Remove">✕</button></span>':'')+
+          '</div>'+
+          '<div class="composer-input-row">'+
+            '<label class="composer-attach-btn" title="Attach a file">📎<input type="file" id="fileInput_'+id+'" style="display:none;"></label>'+
+            '<textarea class="composer-textarea" id="commentInput_'+id+'" placeholder="Message the team…" rows="1"></textarea>'+
+            '<button type="button" class="composer-send-btn" id="commentSend_'+id+'" title="Send"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 11 13"/><path d="M22 2 15 22l-4-9-9-4 20-7Z"/></svg></button>'+
+          '</div>'+
           '</div>';
         wire();
       }
 
+      function autoGrow(ta){
+        ta.style.height = 'auto';
+        ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
+      }
+
+      function sendComposerMessage(){
+        var input = document.getElementById('commentInput_'+id);
+        var sendBtn = document.getElementById('commentSend_'+id);
+        var body = input.value.trim();
+        if(!body && !pendingFile) return; // nothing to send - matches the spec: text alone, file alone, or both, never neither
+        var file = pendingFile;
+        sendBtn.disabled = true;
+        var commentId = 'cm_'+uid8();
+        var row = { id:commentId, authorId: myUid, body: body };
+        row[cfg.idField] = id;
+        var uploadStep = file ? uploadFile(file, cfg.keyPrefix+id+'/'+Date.now()+'_'+file.name) : Promise.resolve(null);
+        uploadStep.then(function(key){
+          return supabase.from(cfg.comments).insert(row).then(function(res2){
+            if(res2.error) throw res2.error;
+            if(!key) return;
+            var attRow = { id:'att_'+uid8(), uploadedBy: myUid, r2Key:key, fileName:file.name, fileType:file.type, fileSize:file.size, commentId: commentId };
+            attRow[cfg.idField] = id;
+            return supabase.from(cfg.attachments).insert(attRow).then(function(res3){ if(res3.error) throw res3.error; });
+          });
+        }).then(function(){
+          pendingFile = null;
+          loadCollab(kind, id, panel);
+        }).catch(function(err){
+          sendBtn.disabled = false;
+          showToast('error', errMsg(err));
+        });
+      }
+
       function wire(){
-        document.getElementById('commentSend_'+id).addEventListener('click', function(){
-          var input = document.getElementById('commentInput_'+id);
-          var body = input.value.trim();
-          if(!body) return;
-          var row = { id:'cm_'+uid8(), authorId: myUid, body: body };
-          row[cfg.idField] = id;
-          supabase.from(cfg.comments).insert(row).then(function(res2){
-            if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-            input.value=''; loadCollab(kind, id, panel);
-          });
+        var textarea = document.getElementById('commentInput_'+id);
+        document.getElementById('commentSend_'+id).addEventListener('click', sendComposerMessage);
+        textarea.addEventListener('keydown', function(ev){
+          if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); sendComposerMessage(); }
         });
-        document.getElementById('commentInput_'+id).addEventListener('keydown', function(ev){
-          if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); document.getElementById('commentSend_'+id).click(); }
-        });
-        document.getElementById('linkSend_'+id).addEventListener('click', function(){
-          var input = document.getElementById('linkInput_'+id);
-          var url = input.value.trim();
-          if(!url) return;
-          var row = { id:'lk_'+uid8(), addedBy: myUid, url: url };
-          row[cfg.idField] = id;
-          supabase.from(cfg.links).insert(row).then(function(res2){
-            if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-            input.value=''; loadCollab(kind, id, panel);
-          });
-        });
+        textarea.addEventListener('input', function(){ autoGrow(textarea); });
+        autoGrow(textarea);
         document.getElementById('fileInput_'+id).addEventListener('change', function(ev){
           var file = ev.target.files[0]; if(!file) return;
-          var statusEl = document.getElementById('fileStatus_'+id);
-          statusEl.textContent = 'Uploading…';
-          var key = cfg.keyPrefix+id+'/'+Date.now()+'_'+file.name;
-          uploadFile(file, key).then(function(){
-            var row = { id:'att_'+uid8(), uploadedBy: myUid, r2Key:key, fileName:file.name, fileType:file.type, fileSize:file.size };
-            row[cfg.idField] = id;
-            return supabase.from(cfg.attachments).insert(row);
-          }).then(function(res2){
-            if(res2 && res2.error) throw res2.error;
-            loadCollab(kind, id, panel);
-          }).catch(function(err){ statusEl.textContent=''; showToast('error', errMsg(err)); });
+          pendingFile = file;
+          render(); // repaints the chip row + re-focuses nothing, but the textarea keeps whatever was typed since render() only rebuilds markup, not app state
+          document.getElementById('commentInput_'+id).focus();
+        });
+        var chipRemove = document.getElementById('composerChipRemove_'+id);
+        if(chipRemove) chipRemove.addEventListener('click', function(){ pendingFile = null; render(); });
+
+        // ---- reactions ----
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-react-toggle-picker]'), function(btn){
+          btn.addEventListener('click', function(){
+            var cid = btn.getAttribute('data-react-toggle-picker');
+            openPicker = (openPicker===cid) ? null : cid;
+            render();
+          });
+        });
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-react]'), function(btn){
+          btn.addEventListener('click', function(){
+            var cid = btn.getAttribute('data-react');
+            var emoji = btn.getAttribute('data-emoji');
+            var bucket = reactionsByComment[cid];
+            var already = bucket && bucket[emoji] && bucket[emoji].mine;
+            openPicker = null;
+            var op = already
+              ? supabase.from('commentReactions').delete().eq('kind', kind).eq('commentId', cid).eq('userId', myUid).eq('emoji', emoji)
+              : supabase.from('commentReactions').insert({ id:'rx_'+uid8(), kind: kind, commentId: cid, userId: myUid, emoji: emoji });
+            op.then(function(res2){
+              if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+              loadCollab(kind, id, panel);
+            });
+          });
         });
 
         // ---- comment edit / delete ----
@@ -1317,6 +1458,7 @@ function loadCollab(kind, id, panel){
       }
 
       render();
+      });
     });
   }).catch(function(err){ panel.innerHTML = '<div class="empty-state" style="padding:10px;">Could not load discussion.</div>'; });
 }
@@ -1458,10 +1600,7 @@ function renderTimeLog(){
     (canManage()?'<div class="field" style="max-width:320px;margin-bottom:20px;"><label>Viewing</label><select id="timelogWho"></select></div>':'')+
     '<div id="sessionList"><div class="skeleton" style="height:120px;margin-bottom:12px;"></div><div class="skeleton" style="height:120px;"></div></div>'
   );
-  document.getElementById('clockToggleBtn').addEventListener('click', function(){
-    if(timelog.isClockedIn()) timelog.clockOut().then(route).catch(function(err){ showToast('error', errMsg(err)); });
-    else timelog.clockIn(myUid).then(route).catch(function(err){ showToast('error', errMsg(err)); });
-  });
+  document.getElementById('clockToggleBtn').addEventListener('click', toggleClock);
 
   function loadFor(uid){
     var box = document.getElementById('sessionList');
@@ -1543,23 +1682,43 @@ function renderTimeLog(){
 }
 
 // ---------- CONNECT: call state ----------
-// Wires the previously-unverified media layer (src/lib/connect.js) up to an
-// actual button and a real two-way signaling handshake. 1:1 only - group
-// Connect is still a separate, not-yet-built stub (the "Start a group
-// Connect" button below still just shows a toast on purpose). This has
-// been checked against Cloudflare's current API reference but NOT run
-// end-to-end against a live call yet - that needs Humayun to actually try
-// it on two machines/accounts once worker-realtime is deployed.
-var activeCall = null; // { pc, localStream, sessionId, remoteUid, remoteName, answered, muted, remoteAudioEl }
+// Rebuilt 2026-09-21 from a 1:1-only ring/answer handshake into a real N-way
+// call: group Connect (pick anyone online), joining a call already in
+// progress, and adding a participant mid-call (for a 1:1 call too, not just
+// group). See lib/connect.js's top-of-file comment for the full design -
+// short version: everyone on a call shares one callId and tracks Supabase
+// Presence on a room named after it, so "someone joined" (initial join,
+// mid-call add, or arriving late to a group call already going) is a single
+// code path, not three. This has been checked against Cloudflare's current
+// API reference but NOT run end-to-end against a live call yet - that needs
+// Humayun to actually try it on two+ machines/accounts once worker-realtime
+// is deployed.
+var activeCall = null;
+// {
+//   callId, pc, localStream, sessionId, muted, hadOtherParticipant,
+//   room: { leave() },
+//   participants: { [uid]: { uid, name, sessionId, audioEl } },
+//   pendingPullUids: [], // FIFO - see wireRemoteAudio's comment
+// }
 
 function wireRemoteAudio(call){
+  // One RTCPeerConnection, one /pull per remote participant - each pull
+  // that actually adds a track fires `ontrack` once more. Correlating which
+  // track belongs to which participant isn't given to us directly by the
+  // event, so pullParticipant() below pushes the uid it's about to pull
+  // BEFORE awaiting the pull, and this shifts that same queue - pulls are
+  // always awaited one at a time (see connect.js's pullChain), so the order
+  // a track arrives in always matches the order it was requested in.
   call.pc.ontrack = function(ev){
-    if(!call.remoteAudioEl){
-      call.remoteAudioEl = document.createElement('audio');
-      call.remoteAudioEl.autoplay = true;
-      document.body.appendChild(call.remoteAudioEl);
+    var uid = call.pendingPullUids.shift();
+    var p = uid && call.participants[uid];
+    if(!p) return; // stray/late track for someone who already left - drop it
+    if(!p.audioEl){
+      p.audioEl = document.createElement('audio');
+      p.audioEl.autoplay = true;
+      document.body.appendChild(p.audioEl);
     }
-    call.remoteAudioEl.srcObject = ev.streams[0];
+    p.audioEl.srcObject = ev.streams[0];
   };
 }
 
@@ -1575,7 +1734,10 @@ function renderCallBar(){
     bar.className = 'connect-bar';
     document.body.appendChild(bar);
   }
-  bar.innerHTML = '<span class="connect-bar-status">'+(activeCall.answered?'On a call with ':'Calling ')+escapeHtml(activeCall.remoteName||'…')+'</span>'+
+  var names = Object.keys(activeCall.participants).map(function(uid){ return activeCall.participants[uid].name || 'Someone'; });
+  var status = names.length ? ('On a call with '+names.join(', ')) : 'Calling…';
+  bar.innerHTML = '<span class="connect-bar-status">'+escapeHtml(status)+'</span>'+
+    '<button type="button" class="btn btn-sm" id="callAddBtn">+ Add</button>'+
     '<button type="button" class="btn btn-sm" id="callMuteBtn">'+(activeCall.muted?'Unmute':'Mute')+'</button>'+
     '<button type="button" class="btn btn-sm btn-danger" id="callHangupBtn">Hang up</button>';
   document.getElementById('callMuteBtn').addEventListener('click', function(){
@@ -1584,74 +1746,153 @@ function renderCallBar(){
     activeCall.localStream.getAudioTracks().forEach(function(t){ t.enabled = !activeCall.muted; });
     renderCallBar();
   });
-  document.getElementById('callHangupBtn').addEventListener('click', function(){ hangupCall(true); });
+  document.getElementById('callHangupBtn').addEventListener('click', function(){ hangupCall(); });
+  document.getElementById('callAddBtn').addEventListener('click', openAddToCallModal);
 }
 
-function hangupCall(notifyOther){
+function hangupCall(){
   if(!activeCall) return;
-  var remoteUid = activeCall.remoteUid;
-  if(activeCall.remoteAudioEl){ try{ activeCall.remoteAudioEl.remove(); }catch(e){} }
-  endSession(activeCall);
+  var call = activeCall;
+  Object.keys(call.participants).forEach(function(uid){
+    var p = call.participants[uid];
+    if(p.audioEl){ try{ p.audioEl.remove(); }catch(e){} }
+  });
+  if(call.room) call.room.leave(); // this alone is the hangup signal - see connect.js
+  endSession(call);
   activeCall = null;
   renderCallBar();
-  if(notifyOther && remoteUid) sendHangup(remoteUid).catch(function(){});
 }
 
-// Caller side: click "Connect" on someone online.
-function startCall(targetUid, targetName){
-  if(activeCall){ showToast('error','You\'re already on a call - hang up first.'); return; }
-  if(!connectConfigured){ showToast('error','Connect isn\'t configured yet - see README.md.'); return; }
-  activeCall = { remoteUid: targetUid, remoteName: targetName, answered:false, muted:false };
+// Pulls one participant's audio in and tracks them on the call. Shared by
+// the initial join (called once per person already in the room) and by
+// someone arriving later (called once more, whenever that happens) - same
+// function either way, per the room-model design above.
+function pullParticipant(call, meta){
+  if(!call.pc || !meta || !meta.sessionId || call.participants[meta.uid]) return Promise.resolve();
+  call.participants[meta.uid] = { uid: meta.uid, name: meta.name, sessionId: meta.sessionId };
+  call.hadOtherParticipant = true;
+  call.pendingPullUids.push(meta.uid);
   renderCallBar();
-  startLocalSession().then(function(session){
-    if(!activeCall || activeCall.remoteUid!==targetUid){ endSession(session); return; } // hung up before this resolved
-    activeCall.pc = session.pc; activeCall.localStream = session.localStream; activeCall.sessionId = session.sessionId;
-    wireRemoteAudio(activeCall);
-    return ring(targetUid, { id: myUid, name: (myProfile&&myProfile.displayName)||'' }, session.sessionId, false);
-  }).catch(function(err){
-    showToast('error', errMsg(err));
-    activeCall = null; renderCallBar();
+  return pullRemoteTrack(call.sessionId, meta.sessionId, 'mic', call.pc).catch(function(err){
+    delete call.participants[meta.uid];
+    renderCallBar();
+    showToast('error', 'Could not hear '+(meta.name||'a participant')+': '+errMsg(err));
   });
 }
 
-// Callee side: someone rang us. Per spec there's no accept/decline for a
-// 1:1 when we're online - we join immediately.
-function handleIncomingRing(payload){
-  if(activeCall) return; // already on a call - no call-waiting yet
-  var fromUid = payload.from && payload.from.id;
-  var fromName = payload.from && payload.from.name;
-  if(!fromUid) return;
-  activeCall = { remoteUid: fromUid, remoteName: fromName, answered:true, muted:false };
+function enterCallRoom(call){
+  call.room = joinCallRoom(call.callId, { id: myUid, name: (myProfile&&myProfile.displayName)||'' }, call.sessionId, {
+    onParticipant: function(meta){ return pullParticipant(call, meta); },
+    onLeft: function(meta){
+      if(activeCall!==call) return; // stale handler from a call we've already left
+      var p = call.participants[meta.uid];
+      if(p && p.audioEl){ try{ p.audioEl.remove(); }catch(e){} }
+      delete call.participants[meta.uid];
+      renderCallBar();
+      // If we've had someone else with us at some point and now there's no
+      // one left, the call is over for us too - covers both a 1:1 hangup
+      // and a group call emptying out, with no separate code path for
+      // either. The hadOtherParticipant guard matters so this doesn't
+      // fire while we're still alone waiting for the first ring to be
+      // picked up.
+      if(call.hadOtherParticipant && Object.keys(call.participants).length===0) hangupCall();
+    },
+  });
+}
+
+// Starts a brand-new call (1:1 or group - targetUids is always an array,
+// even for one person), OR, if we're already on a call, rings the given
+// uid(s) to ADD them to it - the exact same ring()+room-join mechanism
+// handles both, so there's no separate "invite mid-call" implementation.
+function startCall(targetUids, names){
+  if(!targetUids || !targetUids.length) return;
+  var fromProfile = { id: myUid, name: (myProfile&&myProfile.displayName)||'' };
+  if(activeCall){
+    var callId = activeCall.callId;
+    Promise.all(targetUids.map(function(uid){ return ring(uid, fromProfile, callId, true); }))
+      .then(function(){
+        showToast('success', targetUids.length>1 ? 'Ringing '+targetUids.length+' people to join…' : 'Ringing '+(names[targetUids[0]]||'them')+' to join…');
+      }).catch(function(err){ showToast('error', errMsg(err)); });
+    return;
+  }
+  if(!connectConfigured){ showToast('error','Connect isn\'t configured yet - see README.md.'); return; }
+  var newId = newCallId();
+  activeCall = { callId: newId, participants:{}, pendingPullUids: [], hadOtherParticipant:false, muted:false };
   renderCallBar();
   startLocalSession().then(function(session){
-    if(!activeCall || activeCall.remoteUid!==fromUid){ endSession(session); return; }
+    if(!activeCall || activeCall.callId!==newId){ endSession(session); return; } // hung up before this resolved
     activeCall.pc = session.pc; activeCall.localStream = session.localStream; activeCall.sessionId = session.sessionId;
     wireRemoteAudio(activeCall);
-    return pullRemoteTrack(session.sessionId, payload.sessionId, 'mic', session.pc).then(function(){
-      return answerRing(fromUid, { id: myUid, name: (myProfile&&myProfile.displayName)||'' }, session.sessionId);
-    });
+    enterCallRoom(activeCall);
+    return Promise.all(targetUids.map(function(uid){ return ring(uid, fromProfile, newId, targetUids.length>1); }));
+  }).catch(function(err){
+    showToast('error', errMsg(err));
+    if(activeCall && activeCall.callId===newId){ if(activeCall.room) activeCall.room.leave(); activeCall = null; renderCallBar(); }
+  });
+}
+
+// Someone rang us - either a brand-new call, an invite into a call already
+// in progress, or (per the no-call-waiting rule below) something we have to
+// ignore because we're busy. Per spec there's no accept/decline step when
+// we're online - joining the room IS answering.
+function handleIncomingRing(payload){
+  var fromUid = payload.from && payload.from.id;
+  var callId = payload.callId;
+  if(!fromUid || !callId) return;
+  if(activeCall) return; // already on a call - no call-waiting yet, same as before
+  activeCall = { callId: callId, participants:{}, pendingPullUids: [], hadOtherParticipant:false, muted:false };
+  renderCallBar();
+  startLocalSession().then(function(session){
+    if(!activeCall || activeCall.callId!==callId){ endSession(session); return; }
+    activeCall.pc = session.pc; activeCall.localStream = session.localStream; activeCall.sessionId = session.sessionId;
+    wireRemoteAudio(activeCall);
+    enterCallRoom(activeCall);
   }).catch(function(err){
     showToast('error', 'Could not join call: '+errMsg(err));
-    if(activeCall && activeCall.remoteUid===fromUid){ activeCall=null; renderCallBar(); }
+    if(activeCall && activeCall.callId===callId){ if(activeCall.room) activeCall.room.leave(); activeCall=null; renderCallBar(); }
   });
 }
 
-// Caller side: the person we rang has their own session up now - pull
-// their audio so the call is two-way, not just us broadcasting to them.
-function handleConnectAnswer(payload){
-  if(!activeCall || !activeCall.pc) return;
-  var fromUid = payload.from && payload.from.id;
-  if(activeCall.remoteUid !== fromUid) return;
-  activeCall.answered = true;
-  renderCallBar();
-  pullRemoteTrack(activeCall.sessionId, payload.sessionId, 'mic', activeCall.pc).catch(function(err){
-    showToast('error', errMsg(err));
+// Modal: online teammates not already on the current call, to ring in.
+function callPickerBody(people){
+  return '<div class="field"><label>Who do you want to add?</label>'+
+    people.map(function(p){
+      return '<div class="check-row"><input type="checkbox" name="uids" value="'+p.id+'" id="callpick_'+p.id+'"><label for="callpick_'+p.id+'">'+escapeHtml(p.name)+'</label></div>';
+    }).join('')+'</div>';
+}
+function getOnlineTeammates(excludeUids){
+  var exclude = {}; (excludeUids||[]).forEach(function(u){ exclude[u]=true; });
+  return db.collection('profiles').get().then(function(snap){
+    return snap.docs.filter(function(d){ return d.id!==myUid && !exclude[d.id] && isOnline(d.id); })
+      .map(function(d){ var p=d.data(); return { id:d.id, name:p.displayName||p.email }; });
   });
 }
-
-function handleRemoteHangup(){
+function openAddToCallModal(){
   if(!activeCall) return;
-  hangupCall(false); // they already know - don't send it back to them
+  getOnlineTeammates(Object.keys(activeCall.participants)).then(function(people){
+    if(!people.length){ showToast('error','No one else is online to add.'); return; }
+    openModal('Add to call', callPickerBody(people), function(fd){
+      var uids = fd.getAll('uids');
+      if(!uids.length){ showModalError('Pick at least one person.'); return; }
+      var names = {}; people.forEach(function(p){ names[p.id]=p.name; });
+      closeModal();
+      startCall(uids, names);
+    }, 'Add');
+  }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+function openStartGroupCallModal(){
+  if(activeCall){ showToast('error','You\'re already on a call.'); return; }
+  if(!connectConfigured){ showToast('error','Connect isn\'t configured yet - see README.md.'); return; }
+  getOnlineTeammates([]).then(function(people){
+    if(!people.length){ showToast('error','No one else is online right now.'); return; }
+    openModal('Start a group Connect', callPickerBody(people), function(fd){
+      var uids = fd.getAll('uids');
+      if(!uids.length){ showModalError('Pick at least one person.'); return; }
+      var names = {}; people.forEach(function(p){ names[p.id]=p.name; });
+      closeModal();
+      startCall(uids, names);
+    }, 'Start call');
+  }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 
 // ---------- CONNECT ----------
@@ -1663,9 +1904,7 @@ function renderConnect(){
     (connectConfigured?'':'<div class="empty-state" style="margin-bottom:20px;"><strong>Connect isn\'t wired up yet</strong>This needs a Cloudflare Realtime App ID/Token - see README.md. The roster and online/offline status below already work.</div>')+
     '<div id="roster"><div class="skeleton" style="height:50px;"></div></div>'
   );
-  document.getElementById('groupConnectBtn').addEventListener('click', function(){
-    showToast(connectConfigured?'success':'error', connectConfigured ? 'Starting a group Connect…' : 'Connect isn\'t configured yet - see README.md.');
-  });
+  document.getElementById('groupConnectBtn').addEventListener('click', openStartGroupCallModal);
 
   // Root cause of "employee doesn't see admin online" (one-directional
   // presence): this used to filter non-admins down to `.where('teamId','==',
@@ -1693,7 +1932,9 @@ function renderConnect(){
           if(!connectConfigured){ showToast('error', 'Connect isn\'t configured yet - see README.md.'); return; }
           var targetUid = btn.getAttribute('data-connect');
           var nameEl = btn.parentElement && btn.parentElement.querySelector('.roster-name');
-          startCall(targetUid, nameEl ? nameEl.textContent : 'them');
+          var name = nameEl ? nameEl.textContent : 'them';
+          var names = {}; names[targetUid] = name;
+          startCall([targetUid], names);
         });
       });
     }
@@ -1847,15 +2088,23 @@ function renderAdmin(){
       return '<div class="panel" style="margin-bottom:12px;"><h3>'+escapeHtml(t.name)+'</h3>'+
         '<div style="font-size:13px;color:var(--muted);margin-bottom:4px;">Point of contact: '+(manager?escapeHtml(manager.displayName||manager.email):'- none assigned -')+'</div>'+
         '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Managers on this team: '+(actualManagers.length?actualManagers.map(function(m){return escapeHtml(m.displayName||m.email);}).join(', '):'- none yet -')+'</div>'+
-        '<div class="field-row"><div class="field"><label>Assign/change point of contact (promotes a non-admin to Manager)</label><select data-assign-mgr="'+t.id+'"><option value="">- choose -</option>'+memberOpts+'</select></div>'+
+        '<div class="field-row"><div class="field"><label>Assign/change point of contact (promotes a non-admin to Manager)</label><select data-assign-mgr="'+t.id+'"><option value="">(no point of contact)</option>'+memberOpts+'</select></div>'+
         '<div class="field"><label>Or invite a new Manager by email</label><input type="email" placeholder="name@bluekitemedia.com" data-invite-mgr="'+t.id+'"></div></div>'+
         '</div>';
     }).join('') || '<div class="empty-state">No teams yet - create your first one.</div>';
 
     Array.prototype.forEach.call(box.querySelectorAll('[data-assign-mgr]'), function(sel){
       sel.addEventListener('change', function(){
-        if(!sel.value) return;
         var teamId = sel.getAttribute('data-assign-mgr');
+        // "(no point of contact)" is a real, selectable choice now, not just
+        // an inert placeholder - picking it clears the team's point of
+        // contact without demoting whoever currently holds the 'manager'
+        // role there (a team can have Managers and no designated point of
+        // contact at the same time; those are two separate things).
+        if(!sel.value){
+          clearTeamManager(teamId).then(function(){ showToast('success', 'Point of contact cleared'); refreshTeamsCache().then(route); }).catch(function(err){ showToast('error', errMsg(err)); });
+          return;
+        }
         var picked = profiles.filter(function(p){ return p.id===sel.value; })[0];
         var task = (picked && picked.role==='admin')
           // Admin picked: just point teams.managerId at them for display -
@@ -2035,6 +2284,45 @@ function hideAuthScreen(){
   if(shell) shell.style.display = '';
 }
 
+// ---------- PERSISTENT CLOCK CONTROL ----------
+// Previously only lived on the TimeLog page itself - clocking out required
+// navigating there first, which is exactly the friction Humayun asked to
+// remove. This one control backs both the TimeLog page's own badge AND a
+// fixed, always-visible badge (added to document.body once at sign-in,
+// alongside connectBar/clockinOverlay's existing pattern of body-level
+// elements that survive page navigation), so either one can be clicked and
+// both - plus the TimeLog page's session list, if it's the one open right
+// now - stay in sync.
+function toggleClock(){
+  if(timelog.isClockedIn()) timelog.clockOut().then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
+  else timelog.clockIn(myUid).then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
+}
+function updateClockUI(){
+  var clockedIn = timelog.isClockedIn();
+  var label = clockedIn ? '● Clocked in - stop' : 'Clock in';
+  var badge = document.getElementById('globalClockBadge');
+  if(badge){ badge.classList.toggle('off', !clockedIn); badge.textContent = label; }
+  var pageBtn = document.getElementById('clockToggleBtn');
+  if(pageBtn){ pageBtn.classList.toggle('off', !clockedIn); pageBtn.textContent = label; }
+  // Refresh the TimeLog page's own session list immediately if it's open,
+  // rather than only after the next manual reload.
+  if(location.hash.replace(/^#/,'')==='/timelog') route();
+}
+function ensureGlobalClockBadge(){
+  if(document.getElementById('globalClockBadge')) { updateClockUI(); return; }
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'globalClockBadge';
+  btn.className = 'timelog-badge global-clock-badge';
+  btn.addEventListener('click', toggleClock);
+  document.body.appendChild(btn);
+  updateClockUI();
+}
+function removeGlobalClockBadge(){
+  var badge = document.getElementById('globalClockBadge');
+  if(badge) badge.remove();
+}
+
 // ---------- CLOCK-IN OVERLAY ----------
 function showClockInOverlay(){
   if(document.getElementById('clockinOverlay')) return;
@@ -2053,8 +2341,9 @@ function showClockInOverlay(){
   document.getElementById('clockinCloseBtn').addEventListener('click', function(){ el.remove(); });
   document.getElementById('clockinStartBtn').addEventListener('click', function(){
     timelog.clockIn(myUid).then(function(){
+      updateClockUI();
       document.getElementById('clockinStatus').innerHTML = '<div class="clockin-status"><span class="pulse-dot"></span> Clocked in - you can close this.</div>';
-      setTimeout(function(){ el.remove(); if(location.hash.replace('#','')==='/timelog') route(); }, 1400);
+      setTimeout(function(){ el.remove(); }, 1400);
     }).catch(function(err){ showToast('error', errMsg(err)); });
   });
 }
@@ -2067,6 +2356,14 @@ function showClockInOverlay(){
   // testing showed no visible symptom at all. Now they surface as a toast.
   timelog.setCaptureErrorHandler(function(message){ showToast('error', message); });
   timelog.setScreenshotTakenHandler(function(){ showScreenshotNotice(); });
+  // See src/lib/timelog.js + schema_v6.sql: a session left open by a
+  // force-kill/uninstall gets auto-closed the next time the app opens,
+  // instead of silently being resumed as if nothing happened - this is
+  // what tells the person that actually occurred, so "why am I being asked
+  // to clock in again?" has an obvious answer instead of being a mystery.
+  timelog.setSessionAutoClosedHandler(function(lastSeenAt){
+    showToast('info', 'Your last clock-in wasn\'t closed properly (the app likely closed or crashed while you were clocked in) - it\'s been ended as of '+new Date(lastSeenAt).toLocaleString()+'. Go ahead and clock in again.');
+  });
   if(!supabaseConfigured){
     document.getElementById('shell').style.display = 'none';
     var el = document.createElement('div');
@@ -2098,7 +2395,9 @@ function showClockInOverlay(){
       if(profileUnsub){ profileUnsub(); profileUnsub = null; }
       myUid = null; myRole = null; myProfile = null; myTeamId = null; lastUid = null; boundOnce = false;
       stopPresence();
-      hangupCall(true);
+      hangupCall();
+      removeGlobalClockBadge();
+      navBackStack = []; navSkipPush = false; navCurrentHash = null;
       renderAuthScreen('signin');
       return;
     }
@@ -2143,11 +2442,7 @@ function showClockInOverlay(){
         Promise.all([refreshTeamsCache(), refreshServicesCache()]).then(route);
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
-          listenForConnects(myUid, {
-            onRing: handleIncomingRing,
-            onAnswer: handleConnectAnswer,
-            onHangup: handleRemoteHangup,
-          });
+          listenForConnects(myUid, { onRing: handleIncomingRing });
           if(p.musicMood && p.musicMood!=='none'){ mountMusicPlayer(); musicPlayer.initPlayer('ytMusicMount', p.musicMood); }
           // Reconnect to an already-open clock-in (e.g. after a reload)
           // before ever deciding whether to show the "ready to start your
@@ -2156,6 +2451,7 @@ function showClockInOverlay(){
           // desync bug (a reload used to silently stop capture without
           // actually clocking anyone out server-side).
           timelog.resumeIfClockedIn(myUid).then(function(){
+            ensureGlobalClockBadge();
             if(!timelog.isClockedIn()) setTimeout(showClockInOverlay, 600);
           });
         }

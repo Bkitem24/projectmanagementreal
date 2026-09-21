@@ -156,6 +156,8 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 }
 .eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:var(--muted);font-weight:600;margin-bottom:7px;}
 .page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap;}
+.page-back-btn{display:inline-flex;align-items:center;gap:6px;border:none;background:none;color:var(--muted);font-size:13px;font-weight:600;padding:0;margin-bottom:14px;cursor:pointer;}
+.page-back-btn:hover{color:var(--ink);}
 .page-title{font-size:32px;}
 .page-sub{color:var(--muted);font-size:14px;margin-top:5px;}
 .btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--surface);color:var(--ink);padding:9px 15px;border-radius:9px;font-size:13.5px;font-weight:600;cursor:pointer;text-decoration:none;transition:border-color .15s ease,transform .12s var(--ease),box-shadow .15s ease,background .15s ease;}
@@ -240,7 +242,11 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .task-label{font-size:14px;font-weight:500;transition:color .2s ease;}
 .task-row.done .task-label{text-decoration:line-through;color:var(--muted);}
 .task-meta{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px;}
-.task-waiting{font-size:11.5px;color:var(--waiting);background:var(--waiting-soft);padding:2.5px 8px;border-radius:6px;}
+.task-waiting{font-size:11.5px;color:var(--waiting);background:var(--waiting-soft);padding:2.5px 8px;border-radius:6px;display:inline-flex;align-items:center;gap:4px;}
+.dep-edit-btn{border:none;background:none;color:inherit;opacity:.7;cursor:pointer;padding:0;display:inline-flex;align-items:center;}
+.dep-edit-btn:hover{opacity:1;}
+.dep-add-btn{font-size:11px;color:var(--muted);background:none;border:1px dashed var(--line);border-radius:6px;padding:2px 7px;cursor:pointer;}
+.dep-add-btn:hover{color:var(--ink);border-color:var(--ink-soft);}
 .task-done-by{font-size:11.5px;color:var(--muted);display:flex;align-items:center;gap:5px;}
 .task-custom-badge{font-size:10.5px;color:var(--blue-2);background:var(--blue-soft);padding:2.5px 8px;border-radius:6px;font-weight:600;}
 .task-expand-btn{font-size:11.5px;color:var(--blue-2);background:none;border:none;cursor:pointer;padding:0;font-weight:600;margin-top:6px;}
@@ -279,10 +285,38 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .link-row a,.attachment-row a{color:var(--blue-2);text-decoration:none;}
 .link-row a:hover,.attachment-row a:hover{text-decoration:underline;}
 .link-icon{flex:0 0 auto;}
-.collab-composer{display:flex;flex-direction:column;gap:7px;margin-top:4px;padding-top:9px;border-top:1px solid var(--line);}
-.collab-input-row{display:flex;gap:8px;}
-.collab-input-row input{flex:1;border:1px solid var(--line);background:var(--paper);border-radius:999px;padding:8px 14px;font-size:12.5px;}
-.collab-input-row .btn{border-radius:999px;}
+/* Composer (2026-09-21 overhaul): one auto-growing textarea (like this
+   chat box) instead of a fixed single-line input, a paperclip that stages
+   a file as a chip rather than firing an upload the instant it's picked,
+   and one Send that posts whichever combination of text/file is staged. */
+.composer{display:flex;flex-direction:column;gap:7px;margin-top:4px;padding-top:9px;border-top:1px solid var(--line);}
+.composer-chip-row:not([hidden]){display:flex;flex-wrap:wrap;gap:6px;}
+.composer-file-chip{display:inline-flex;align-items:center;gap:6px;background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 10px;font-size:12px;color:var(--ink);animation:chipIn .15s var(--ease);}
+.composer-file-chip button{border:none;background:var(--line-soft);color:var(--muted);width:17px;height:17px;border-radius:50%;cursor:pointer;font-size:10px;line-height:1;display:inline-flex;align-items:center;justify-content:center;}
+.composer-file-chip button:hover{background:var(--overdue);color:#fff;}
+@keyframes chipIn{from{opacity:0;transform:translateY(3px) scale(.94);}to{opacity:1;transform:none;}}
+.composer-input-row{display:flex;align-items:flex-end;gap:8px;}
+.composer-attach-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:1px solid var(--line);background:var(--paper);border-radius:50%;cursor:pointer;font-size:15px;transition:background .12s ease,border-color .12s ease;}
+.composer-attach-btn:hover{background:var(--line-soft);border-color:var(--ink-soft);}
+.composer-textarea{flex:1;border:1px solid var(--line);background:var(--paper);border-radius:18px;padding:8px 14px;font-size:12.5px;font-family:inherit;line-height:1.4;resize:none;max-height:160px;overflow-y:auto;transition:border-color .12s ease;}
+.composer-textarea:focus{outline:none;border-color:var(--accent);}
+.composer-send-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:var(--accent);color:#fff;border-radius:50%;cursor:pointer;transition:transform .1s var(--ease),background .12s ease;}
+.composer-send-btn:hover{background:var(--accent-2);transform:scale(1.06);}
+.composer-send-btn:active{transform:scale(.94);}
+.composer-send-btn:disabled{opacity:.5;cursor:default;transform:none;}
+/* Reactions - a small pill per emoji (with a live count), plus a "+" that
+   reveals a fixed emoji tray. Kept dependency-free rather than pulling in
+   a full emoji-picker library for eight options. */
+.reaction-row{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:5px;position:relative;}
+.reaction-pill{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;border:1px solid var(--line);background:var(--paper);border-radius:999px;padding:2px 8px;cursor:pointer;transition:transform .08s var(--ease),border-color .12s ease;}
+.reaction-pill:hover{transform:scale(1.05);border-color:var(--ink-soft);}
+.reaction-pill.mine{background:var(--accent-soft);border-color:var(--accent);color:var(--accent-ink);}
+.reaction-add-btn{border:none;background:none;color:var(--muted);font-size:12px;cursor:pointer;padding:2px 4px;border-radius:999px;opacity:0;transition:opacity .1s ease;}
+.comment-row:hover .reaction-add-btn{opacity:1;}
+.reaction-picker{position:absolute;bottom:calc(100% + 4px);left:0;display:flex;gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:4px 6px;box-shadow:var(--shadow);z-index:5;animation:chipIn .12s var(--ease);}
+.reaction-picker button{border:none;background:none;font-size:16px;cursor:pointer;padding:2px 3px;border-radius:6px;transition:transform .08s var(--ease),background .1s ease;}
+.reaction-picker button:hover{background:var(--line-soft);transform:scale(1.15);}
+.comment-inline-attachments{margin-top:6px;}
 /* Attachments: image thumbnails you can actually preview, and a
    type-appropriate icon for everything else - a step toward the "modern,
    Slack-like" collaboration UX asked for, without a full redesign. */
@@ -350,6 +384,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .toast{background:var(--ink);color:var(--paper);padding:12px 16px;border-radius:10px;font-size:13px;font-weight:500;box-shadow:var(--shadow-lg);display:flex;align-items:flex-start;gap:8px;animation:toastIn .22s var(--ease);line-height:1.4;}
 .toast.error{background:var(--overdue);color:#fff;}
 .toast.success{background:var(--good);color:#fff;}
+.toast.info{background:var(--accent-2);color:#fff;}
 @keyframes toastIn{from{opacity:0;transform:translateY(10px) scale(.96);}to{opacity:1;transform:translateY(0) scale(1);}}
 .toast.leaving{animation:toastOut .18s ease forwards;}
 @keyframes toastOut{to{opacity:0;transform:translateY(6px);}}
@@ -412,6 +447,11 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(1.4);}}
 .timelog-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:5px 11px;border-radius:99px;background:var(--good-soft);color:var(--good);cursor:pointer;border:none;}
 .timelog-badge.off{background:var(--line-soft);color:var(--muted);}
+/* Persistent clock in/out control, visible on every page (not just TimeLog) -
+   fixed bottom-right so it never collides with the Connect call bar
+   (bottom-center) or the mobile nav-toggle hamburger (top-left). */
+.global-clock-badge{position:fixed;bottom:18px;right:18px;z-index:55;padding:9px 16px;font-size:13px;box-shadow:var(--shadow-lg);}
+@media (max-width:900px){ .global-clock-badge{bottom:14px;right:14px;} }
 
 /* ---------- TimeLog screenshot grid ---------- */
 .shot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;}

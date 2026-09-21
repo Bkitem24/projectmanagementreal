@@ -14,11 +14,20 @@ compatibility_date = "2026-01-01"
 binding = "BUCKET"
 bucket_name = "blue-kite-ops-files"
 
-# Runs the retention cleanup (screenshots/attachments/activity older than
-# 6 months) once a day. Cron schedules here are UTC — 03:00 UTC is late
-# night in the US and pre-dawn in Pakistan, a quiet time either way.
+# Two schedules:
+#   "0 3 * * *"    — retention cleanup (screenshots/attachments/activity
+#                    older than 6 months), once a day. Cron schedules here
+#                    are UTC — 03:00 UTC is late night in the US and
+#                    pre-dawn in Pakistan, a quiet time either way.
+#   "*/15 * * * *" — abandoned TimeLog session sweep: closes out any
+#                    clock-in whose heartbeat has gone stale (the app was
+#                    force-killed, crashed, or uninstalled while clocked
+#                    in), even if that person's machine never runs the app
+#                    again to catch it client-side. See schema_v6.sql for
+#                    the full design and src/index.js's scheduled() for
+#                    which cron expression runs which job.
 [triggers]
-crons = ["0 3 * * *"]
+crons = ["0 3 * * *", "*/15 * * * *"]
 
 # Set these with:
 #   npx wrangler secret put SUPABASE_URL

@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows application manifest embedded into the built .exe (see build.rs)
+  so it always runs elevated ("Run as administrator"), requested 2026-09-21.
+
+  requireAdministrator makes Windows show the UAC elevation prompt every
+  single time the app is launched, and refuse to launch at all if the
+  person declines it - this is a real behavior change, not a cosmetic one,
+  so it's only worth doing with a real reason. Humayun asked for it "just
+  to avoid any other issues" after confirming every employee runs this on
+  their own personal home PC (not a locked-down/managed work machine) -
+  under that condition there's no real downside (no separate admin account
+  to juggle, no corporate policy blocking it), and it heads off a category
+  of hard-to-diagnose bugs before they ever get reported: the global
+  keyboard/mouse hook (rdev, src/timelog.rs) and screen capture (xcap) this
+  app relies on for TimeLog activity tracking can behave inconsistently or
+  fail outright without elevation on some Windows configurations, and only
+  admin-elevated processes can ever set a global hook that also sees
+  keystrokes typed into ANOTHER elevated (admin) window - a real gap
+  otherwise, e.g. if an employee runs some other tool as admin.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>

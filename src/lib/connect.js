@@ -5,84 +5,170 @@
 //
 // Two halves, deliberately split so the working half can ship now:
 //
-//   1. SIGNALING - who's calling whom, and relaying session/track ids
-//      between peers. This is fully working today: it rides on the same
-//      Supabase Realtime the rest of the app already uses (see
-//      lib/presence.js), no Cloudflare account needed for this part.
+//   1. SIGNALING - who's calling whom, and who's currently in a given call.
+//      This is fully working today: it rides on the same Supabase Realtime
+//      the rest of the app already uses (see lib/presence.js), no
+//      Cloudflare account needed for this part.
 //
 //   2. MEDIA - actually standing up the WebRTC audio session through
-//      Cloudflare's SFU. This is a STUB. Cloudflare's Calls/Realtime REST
-//      API (create a session, push a local track's SDP offer, pull a
-//      remote track by {sessionId, trackName}) is what this needs to call,
-//      proxied through worker-realtime/ so the App Token never ships inside
-//      this desktop app. The exact request/response shape should be
-//      double-checked against developers.cloudflare.com/realtime at the
-//      time this gets finished - API surfaces like this do shift, and
-//      guessing it confidently here would be worse than flagging it.
+//      Cloudflare's SFU. Cloudflare's Calls/Realtime REST API (create a
+//      session, push a local track's SDP offer, pull a remote track by
+//      {sessionId, trackName}) is what this needs to call, proxied through
+//      worker-realtime/ so the App Token never ships inside this desktop
+//      app.
+//
+// 2026-09-21 - rebuilt from a 1:1-only ring/answer handshake into a real
+// N-way call model (group Connect, join-a-call-in-progress, and adding a
+// participant mid-call - to a 1:1 call too). The key realization: Cloudflare's
+// pull-based SFU already supports any number of participants with ZERO
+// worker changes - a client just calls /pull once per additional remote
+// participant on its own single RTCPeerConnection. The only thing that
+// needed to change here is the signaling: instead of a direct
+// caller<->callee sessionId handoff, everyone on a given call (identified
+// by a shared callId) tracks Supabase Realtime PRESENCE on one channel
+// named after that call. Presence's own sync/join/leave events are the
+// entire signaling surface a multi-way call needs:
+//   - sync (fires right after you join, with everyone already there) =
+//     "pull audio from everyone who beat me here"
+//   - join = "someone new arrived, pull them too" - and this is ALSO
+//     exactly what "add a participant mid-call" is: the new person's
+//     ring() handler joins the same room, and everyone already in it gets
+//     a join event for them. No separate add-participant code path exists.
+//   - leave = "they hung up, tear their audio down"
+// This is why ring()/joinCallRoom() below no longer need an isGroup branch
+// anywhere in the actual logic - a "group call" is just a callId that more
+// than 2 people ever joined.
 import { supabase } from './supabaseClient.js';
 
 const REALTIME_WORKER_URL = import.meta.env.VITE_REALTIME_WORKER_URL || '';
-export const connectConfigured = !!REALTIME_WORKER_URL;
+// Deliberately stricter than a plain truthiness check: a bare truthy string
+// (even something malformed, or the literal text "undefined" from a build
+// where the env var substitution silently failed) used to count as
+// "configured" and would go straight into a fetch() call. A relative/
+// malformed URL like that resolves against the app's OWN origin instead of
+// failing outright, and Tauri's bundled server answers an unmatched path
+// with index.html (200 OK, HTML body) rather than a 404 - which is exactly
+// what turns into the cryptic "Unexpected token '<', \"<!doctype \"... is
+// not valid JSON" error reported 2026-09-21, instead of the clean "Connect
+// is not configured" message this is supposed to show. Requiring an actual
+// http(s) URL here catches that case up front.
+export const connectConfigured = /^https?:\/\//i.test(REALTIME_WORKER_URL);
 
 let ringChannel = null;
 let onIncoming = null;
-let onAnswered = null;
-let onHangup = null;
 
 // ---------------------------------------------------------------------------
-// Signaling (working today)
+// Signaling: "you're being invited to call <callId>" (working today)
 // ---------------------------------------------------------------------------
-// Three messages, one channel per user (their own uid), listened to once at
-// boot: 'ring' (someone wants to call you), 'answer' (the person you rang
-// has set up their own session and is telling you its id, so you can pull
-// their audio back), 'hangup' (either side ending the call - this is what
-// lets the OTHER side's UI clean up too, not just the one who clicked hang
-// up). Call this once per app session; main.js wires all three handlers up
-// at boot alongside the existing presence/timelog setup.
+// One channel per user (their own uid), listened to once at boot. This is
+// now the ONLY message type needed here - answering, mid-call roster
+// changes, and hangup are all handled by the call room's Presence state
+// (see joinCallRoom below) instead of extra broadcast events.
 export function listenForConnects(myUid, handlers) {
   onIncoming = handlers && handlers.onRing;
-  onAnswered = handlers && handlers.onAnswer;
-  onHangup = handlers && handlers.onHangup;
   if (ringChannel) supabase.removeChannel(ringChannel);
   ringChannel = supabase.channel('connect:' + myUid)
     .on('broadcast', { event: 'ring' }, (msg) => { if (onIncoming) onIncoming(msg.payload); })
-    .on('broadcast', { event: 'answer' }, (msg) => { if (onAnswered) onAnswered(msg.payload); })
-    .on('broadcast', { event: 'hangup' }, (msg) => { if (onHangup) onHangup(msg.payload); })
     .subscribe();
   return () => { if (ringChannel) { supabase.removeChannel(ringChannel); ringChannel = null; } };
 }
 
+// A fresh id identifying one call (used as the Presence room name). The
+// person starting a call (1:1 or group) generates one and reuses it for
+// every ring() tied to that call, including ringing someone to ADD them
+// mid-call later - reusing the same callId is what makes "add a
+// participant" and "join a call in progress" work for free.
+export function newCallId() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  return Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+
 // Because "online" already means "connectable" per Humayun's spec (no
-// accept/decline step for a 1:1 when the other side is online), ringing a
-// single online person immediately proceeds to media setup on both ends -
-// this broadcast is really just "here's my session id, come pull my audio."
-export async function ring(targetUid, fromProfile, sessionId, isGroup) {
+// accept/decline step when the other side is online), ringing someone
+// immediately proceeds to media setup on their end too - this broadcast is
+// really just "here's the call you're now part of, go join its room."
+export async function ring(targetUid, fromProfile, callId, isGroup) {
   await supabase.channel('connect:' + targetUid).send({
     type: 'broadcast', event: 'ring',
-    payload: { from: fromProfile, sessionId, isGroup: !!isGroup, at: new Date().toISOString() },
+    payload: { from: fromProfile, callId, isGroup: !!isGroup, at: new Date().toISOString() },
   });
-}
-
-// The callee sends this back once THEY have their own session up and have
-// pulled the caller's audio - it's what lets the original caller learn the
-// callee's session id and pull audio the other direction, completing a
-// real two-way call instead of one-way.
-export async function answerRing(callerUid, fromProfile, sessionId) {
-  await supabase.channel('connect:' + callerUid).send({
-    type: 'broadcast', event: 'answer',
-    payload: { from: fromProfile, sessionId, at: new Date().toISOString() },
-  });
-}
-
-// Either side can send this when ending the call, so the other side's UI
-// and local session get torn down too instead of thinking the call is
-// still live.
-export async function sendHangup(targetUid) {
-  await supabase.channel('connect:' + targetUid).send({ type: 'broadcast', event: 'hangup', payload: {} });
 }
 
 // ---------------------------------------------------------------------------
-// Media (stub - needs worker-realtime/ + real Cloudflare Realtime creds)
+// Call room (Presence-based, N-way signaling)
+// ---------------------------------------------------------------------------
+// Everyone currently on a call tracks their own {uid, name, sessionId} on
+// one shared Presence channel named after the call's id. Joining this room
+// IS "answering" the call; leaving it IS hanging up - there's no separate
+// answer/hangup message type to keep in sync with call-room membership
+// anymore, which was a real source of the old code's fragility (a missed
+// 'answer' or 'hangup' broadcast could leave one side's UI out of sync with
+// reality; Presence leave/join events can't be "missed" the same way since
+// they're derived from the actual socket connection, not a one-shot
+// message).
+//
+// handlers:
+//   onParticipant(meta) - a participant (already there, or newly joined) we
+//     don't have audio from yet. meta is { uid, name, sessionId }. Should
+//     return a Promise (pullRemoteTrack's) - calls are queued and awaited
+//     one at a time so concurrent renegotiations on the same
+//     RTCPeerConnection never race each other.
+//   onLeft(meta) - a participant just left the room.
+//   onRoster(uids) - full list of other participants' uids, after every
+//     sync/leave (handy for a "who's on this call" display if ever needed;
+//     current UI derives that from its own participants map instead, but
+//     this is here so that isn't the only way).
+export function joinCallRoom(callId, myProfile, mySessionId, handlers) {
+  var pulled = {};   // uid -> true, so a re-fired sync doesn't double-pull
+  var pullChain = Promise.resolve(); // serializes onParticipant calls
+  var room = supabase.channel('connect_room:' + callId, {
+    config: { presence: { key: myProfile.id } },
+  });
+
+  function schedulePull(meta) {
+    pulled[meta.uid] = true;
+    pullChain = pullChain.then(function () { return handlers.onParticipant(meta); })
+      .catch(function (err) { console.error('Connect: failed to pull participant', meta && meta.uid, err); });
+  }
+
+  function currentRoster(state) {
+    return Object.keys(state).filter(function (uid) { return uid !== myProfile.id; });
+  }
+
+  room
+    .on('presence', { event: 'sync' }, function () {
+      var state = room.presenceState();
+      currentRoster(state).forEach(function (uid) {
+        var metas = state[uid];
+        var meta = metas && metas[metas.length - 1];
+        if (meta && meta.sessionId && !pulled[uid]) schedulePull(meta);
+      });
+      if (handlers.onRoster) handlers.onRoster(currentRoster(state));
+    })
+    .on('presence', { event: 'leave' }, function (payload) {
+      (payload.leftPresences || []).forEach(function (meta) {
+        if (!meta || meta.uid === myProfile.id) return;
+        delete pulled[meta.uid];
+        if (handlers.onLeft) handlers.onLeft(meta);
+      });
+      if (handlers.onRoster) handlers.onRoster(currentRoster(room.presenceState()));
+    })
+    .subscribe(function (status) {
+      if (status === 'SUBSCRIBED') {
+        room.track({ uid: myProfile.id, name: myProfile.name || '', sessionId: mySessionId });
+      }
+    });
+
+  return {
+    leave: function () {
+      try { room.untrack(); } catch (e) {}
+      try { supabase.removeChannel(room); } catch (e) {}
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Media
 // ---------------------------------------------------------------------------
 async function authedFetch(path, opts) {
   const { data } = await supabase.auth.getSession();
@@ -92,10 +178,26 @@ async function authedFetch(path, opts) {
   }));
 }
 
+// A response that isn't actually JSON (most often an HTML error/placeholder
+// page served with a 200 status - see the connectConfigured comment above)
+// used to reach res.json() directly and throw a raw, cryptic SyntaxError
+// ("Unexpected token '<' ... is not valid JSON") straight into the UI. This
+// checks the content-type first and raises a message that actually points
+// at the real problem instead.
+async function parseJsonResponse(res, what) {
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const preview = (await res.text().catch(() => '')).slice(0, 120);
+    throw new Error(
+      'Connect worker did not return ' + what + ' (got ' + (res.status) + ', ' + (contentType || 'no content-type') + ')'
+      + (preview ? ' - response started with: ' + preview.replace(/\s+/g, ' ') : '')
+      + '. Check VITE_REALTIME_WORKER_URL points at the deployed worker-realtime, not something else.'
+    );
+  }
+  return res.json();
+}
+
 // Starts a new SFU session for the local mic, returns { sessionId, pc }.
-// TODO once Cloudflare creds exist: confirm this against the current
-// Realtime API reference - this assumes POST /session/new + POST
-// /session/:id/tracks/new taking/returning SDP, proxied by worker-realtime/.
 export async function startLocalSession() {
   if (!connectConfigured) throw new Error('Connect is not configured yet - see README.md (needs Cloudflare Realtime credentials).');
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -105,12 +207,15 @@ export async function startLocalSession() {
   await pc.setLocalDescription(offer);
   const res = await authedFetch('/session/new', { method: 'POST', body: JSON.stringify({ offer: pc.localDescription }) });
   if (!res.ok) throw new Error('Could not start Connect session (' + res.status + ')');
-  const body = await res.json();
+  const body = await parseJsonResponse(res, 'a new session');
   await pc.setRemoteDescription(body.answer);
   return { sessionId: body.sessionId, pc, localStream: stream };
 }
 
-// Pulls a remote participant's track into an existing local session.
+// Pulls a remote participant's track into an existing local session. Safe
+// to call more than once on the same `pc` for different remote sessions -
+// this is exactly what a group call is: one local pc, one /pull per other
+// participant.
 //
 // Checked 2026-09-21 against Cloudflare's current Realtime SFU API: adding
 // a track to an already-negotiated session commonly requires a follow-up
@@ -124,7 +229,7 @@ export async function pullRemoteTrack(localSessionId, remoteSessionId, trackName
     method: 'POST', body: JSON.stringify({ remoteSessionId, trackName }),
   });
   if (!res.ok) throw new Error('Could not join remote audio (' + res.status + ')');
-  const body = await res.json();
+  const body = await parseJsonResponse(res, 'remote-audio details');
 
   if (body.requiresRenegotiation) {
     await pc.setRemoteDescription(body.answer); // actually an offer in this branch

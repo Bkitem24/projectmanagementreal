@@ -103,14 +103,17 @@ export default {
     return cors(new Response('Method not allowed', { status: 405 }));
   },
 
-  // Runs on the schedule set in wrangler.toml's [triggers] block (daily).
-  // Needs SUPABASE_SERVICE_ROLE_KEY — a secret, server-side-only credential
-  // that bypasses Row Level Security. That's appropriate here (this job
-  // legitimately needs to touch every user's rows to expire them), but it
-  // must never be put anywhere the desktop app itself can read it — it
-  // only ever lives as a Cloudflare Worker secret.
+  // Runs on the schedules set in wrangler.toml's [triggers] block — two of
+  // them now, told apart by event.cron: the original daily retention job,
+  // and (added 2026-09-21) a every-15-minutes abandoned-TimeLog-session
+  // sweep. Both need SUPABASE_SERVICE_ROLE_KEY — a secret, server-side-only
+  // credential that bypasses Row Level Security. That's appropriate here
+  // (these jobs legitimately need to touch every user's rows), but it must
+  // never be put anywhere the desktop app itself can read it — it only
+  // ever lives as a Cloudflare Worker secret.
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runRetention(env));
+    if (event.cron === '*/15 * * * *') ctx.waitUntil(runAbandonedSessionSweep(env));
+    else ctx.waitUntil(runRetention(env));
   },
 };
 
@@ -152,6 +155,33 @@ async function purgeTable(env, table, dateField, cutoff, fileField) {
     if (rows.length < pageSize) break;
   }
   if (deletedTotal) console.log('[retention]', table, 'purged', deletedTotal, 'row(s) older than', cutoff);
+}
+
+// Server-side half of catching a force-kill/uninstalled TimeLog session -
+// see schema_v6.sql's TimeLog section for the full design. The client-side
+// half (src/lib/timelog.js's resumeIfClockedIn) only ever runs if the app
+// gets opened again; an UNINSTALL means it never will, so this sweep is
+// what actually closes that person's session out - it doesn't depend on
+// anyone ever launching the app on that machine again. Same staleness
+// threshold as the client-side check (10 minutes with no heartbeat), run
+// here independently every 15 minutes so a session gets closed out
+// reasonably promptly even with nobody around to reopen the app.
+const HEARTBEAT_ABANDONED_MS = 10 * 60 * 1000;
+
+async function runAbandonedSessionSweep(env) {
+  const cutoff = new Date(Date.now() - HEARTBEAT_ABANDONED_MS).toISOString();
+  try {
+    const res = await sbFetch(env, `/rest/v1/timeEntries?clockOutAt=is.null&lastHeartbeatAt=lt.${encodeURIComponent(cutoff)}&select=id,lastHeartbeatAt,clockInAt&limit=500`);
+    const rows = await res.json();
+    if (!Array.isArray(rows) || !rows.length) return;
+    await Promise.allSettled(rows.map((row) => sbFetch(env, `/rest/v1/timeEntries?id=eq.${encodeURIComponent(row.id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ clockOutAt: row.lastHeartbeatAt || row.clockInAt, autoClosedReason: 'stale_heartbeat' }),
+    })));
+    console.log('[abandoned-session-sweep] closed', rows.length, 'session(s) stale since before', cutoff);
+  } catch (e) {
+    console.error('[abandoned-session-sweep] failed:', e);
+  }
 }
 
 function sbFetch(env, path, opts) {
