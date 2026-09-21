@@ -17,7 +17,9 @@ fn main() {
             timelog::timelog_drain_activity,
             timelog::timelog_capture_screenshot,
             timelog::timelog_listener_error,
+            timelog::timelog_seconds_idle,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");
 }
+round 6 fixes
