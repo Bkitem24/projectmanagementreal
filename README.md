@@ -186,9 +186,12 @@ itself already work with no Cloudflare account, since that rides on the
 same Supabase Realtime the rest of the app uses — only the audio hookup
 needs this.
 
-1. Cloudflare dashboard → **Realtime** (formerly "Calls") → create an
-   Application. Usage-based pricing with a substantial free monthly
-   included egress — no card required to create it and try it at this
+1. Cloudflare dashboard → **Realtime** → this now splits into four products
+   (RealtimeKit, Turn Server, Serverless SFU, MOQ Relay) — pick
+   **Serverless SFU** (that's the one this code is built against: raw
+   session/track control, not RealtimeKit's higher-level meeting/room API)
+   → create an Application. Usage-based pricing with a free monthly
+   allowance (1,000 GB) — no card required to create it and try it at this
    team's scale.
 2. Note the **App ID** and generate an **App Token**.
    ```bash
@@ -202,15 +205,19 @@ needs this.
 3. Put the deployed worker's URL in `VITE_REALTIME_WORKER_URL` (`.env` and
    the GitHub Actions repo secret).
 
-**This one needs a live test before you rely on it.** `worker-realtime/src/index.js`
-was written against Cloudflare's published Realtime/Calls API reference,
-but without a real Cloudflare Realtime account to test against — that API
-surface has changed before. Once you've done steps 1–3 above, try an actual
-Connect call between two machines (or two browser profiles signed in as
-different users). If it fails, the worker returns the raw Cloudflare error
-in its response — compare that against the current reference at
-developers.cloudflare.com/realtime and adjust; the comments at the top of
-`worker-realtime/src/index.js` point at the most likely spot for drift.
+**This one still needs a live test before you rely on it, but the code is
+now checked against Cloudflare's current API reference** (2026-09-21, once
+a real Serverless SFU app existed to confirm against) — `worker-realtime/src/index.js`
+and `src/lib/connect.js`'s endpoint paths, request/response field names, and
+the renegotiation round-trip that pulling a remote track requires now match
+the current OpenAPI spec at developers.cloudflare.com/realtime. What's
+still unverified is an actual end-to-end call between two real clients.
+Once you've done steps 1–3 above, try a real Connect call between two
+machines (or two browser profiles signed in as different users). If it
+fails, the worker returns the raw Cloudflare error in its response —
+compare that against a fresh pull of the current reference and adjust;
+the comments at the top of `worker-realtime/src/index.js` point at the
+most likely spot for drift.
 
 ## 6. Music player
 

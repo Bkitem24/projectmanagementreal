@@ -12,6 +12,13 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Native "Save As" dialog + file write, used for downloading task
+# attachments reliably (see src/lib/r2.js's downloadProtectedFile) — a
+# browser-only blob-URL-click download is flaky inside the WebView2 shell
+# on Windows, which is what testing was actually hitting.
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+
 # TimeLog (src/timelog.rs): screen capture + global keyboard/mouse activity.
 #
 # Version note: this sandbox has no network access to crates.io, so these

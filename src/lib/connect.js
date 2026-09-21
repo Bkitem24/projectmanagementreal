@@ -80,13 +80,32 @@ export async function startLocalSession() {
 }
 
 // Pulls a remote participant's track into an existing local session.
+//
+// Checked 2026-09-21 against Cloudflare's current Realtime SFU API: adding
+// a track to an already-negotiated session commonly requires a follow-up
+// renegotiation round trip rather than a direct answer — the worker's
+// /pull response says which case this is via `requiresRenegotiation`. When
+// true, what comes back as `answer` is actually an OFFER from Cloudflare
+// that this side must answer and post back via /renegotiate to finish the
+// handshake; when false, it's a normal, ready-to-apply answer.
 export async function pullRemoteTrack(localSessionId, remoteSessionId, trackName, pc) {
   const res = await authedFetch('/session/' + localSessionId + '/pull', {
     method: 'POST', body: JSON.stringify({ remoteSessionId, trackName }),
   });
   if (!res.ok) throw new Error('Could not join remote audio (' + res.status + ')');
   const body = await res.json();
-  await pc.setRemoteDescription(body.answer);
+
+  if (body.requiresRenegotiation) {
+    await pc.setRemoteDescription(body.answer); // actually an offer in this branch
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    const renegRes = await authedFetch('/session/' + localSessionId + '/renegotiate', {
+      method: 'POST', body: JSON.stringify({ answer: pc.localDescription }),
+    });
+    if (!renegRes.ok) throw new Error('Could not complete remote audio renegotiation (' + renegRes.status + ')');
+  } else if (body.answer) {
+    await pc.setRemoteDescription(body.answer);
+  }
 }
 
 export function endSession(session) {

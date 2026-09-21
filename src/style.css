@@ -118,6 +118,13 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .presence-dot.online{background:var(--online);}
 .nav{display:flex;flex-direction:column;gap:2px;flex:1;}
 .nav-link{display:flex;align-items:center;gap:9px;padding:9px 10px 9px 13px;border-radius:8px;font-size:14px;font-weight:500;color:var(--ink-soft);text-decoration:none;position:relative;transition:background .15s ease,color .15s ease,transform .12s ease;}
+/* Root cause of "Admin nav visible to non-admins": the browser's built-in
+   [hidden]{display:none} rule and .nav-link{display:flex} above have equal
+   specificity, and this stylesheet loads after the browser's default one —
+   so .nav-link's display:flex was winning and silently overriding `hidden`
+   on #navAdmin/#navTeam whenever main.js set adminNav.hidden=true. This
+   re-asserts display:none for any nav-link actually marked hidden. */
+.nav-link[hidden]{display:none;}
 .nav-link svg{flex:none;opacity:.85;}
 .nav-link:hover{background:var(--line-soft);transform:translateX(1px);}
 .nav-link.active{background:var(--blue-soft);color:var(--ink);font-weight:600;}

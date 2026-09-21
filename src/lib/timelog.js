@@ -24,6 +24,24 @@ const SCREENSHOT_MIN_MS = 5 * 60 * 1000;
 const SCREENSHOT_MAX_MS = 15 * 60 * 1000; // averages ~10 minutes
 const ACTIVITY_FLUSH_MS = 5 * 60 * 1000;
 
+// Every failure in this file used to be swallowed into a bare catch or a
+// console.warn — invisible unless someone had devtools open, which is
+// exactly why testing showed "absolutely nothing happens" with no error,
+// no prompt, and nothing in Defender's history: whatever's actually going
+// wrong (a native capture error, a permission issue, anything) was real,
+// it just had nowhere to surface. main.js registers a handler for this via
+// setCaptureErrorHandler() so a real failure now shows up as a toast
+// instead of vanishing — that message is what will actually tell us what's
+// wrong, instead of guessing further blind.
+let onCaptureError = null;
+export function setCaptureErrorHandler(fn) { onCaptureError = fn; }
+let warnedThisSession = false;
+function reportCaptureError(message) {
+  if (warnedThisSession) return;
+  warnedThisSession = true;
+  if (onCaptureError) { try { onCaptureError(message); } catch (e) {} }
+}
+
 let state = null; // { uid, timeEntryId, screenshotTimer, activityTimer, windowStart }
 
 function randomScreenshotDelay() {
@@ -37,9 +55,21 @@ export async function clockIn(uid) {
   const timeEntryId = 'te_' + randomId().slice(0, 10);
   await db.doc('timeEntries/' + timeEntryId).set({ userId: uid, clockInAt: new Date().toISOString(), clockOutAt: null });
   state = { uid, timeEntryId, windowStart: new Date().toISOString() };
+  warnedThisSession = false;
   scheduleScreenshot();
   scheduleActivityFlush();
-  try { await tauriInvoke('timelog_start'); } catch (e) { /* dev-mode / not in Tauri */ }
+  try {
+    await tauriInvoke('timelog_start');
+  } catch (e) {
+    // Only warn for a REAL failure inside the desktop app — not for the
+    // expected "Not running inside the Blue Kite Ops desktop app" case,
+    // which just means this is a plain browser dev session with no native
+    // capture available at all (normal, not an error).
+    if (e && e.message !== 'Not running inside the Blue Kite Ops desktop app') {
+      console.warn('[blue-kite-ops] timelog_start failed:', e);
+      reportCaptureError('Time tracking started, but screen/activity capture could not start: ' + (e.message || e));
+    }
+  }
   return timeEntryId;
 }
 
@@ -58,7 +88,10 @@ function scheduleScreenshot() {
   const s = state;
   s.screenshotTimer = setTimeout(async () => {
     if (state !== s) return;
-    await takeScreenshot(s).catch((e) => console.warn('[blue-kite-ops] screenshot skipped:', e.message));
+    await takeScreenshot(s).catch((e) => {
+      console.warn('[blue-kite-ops] screenshot skipped:', e.message);
+      reportCaptureError('A screenshot could not be saved: ' + (e.message || e));
+    });
     scheduleScreenshot();
   }, randomScreenshotDelay());
 }

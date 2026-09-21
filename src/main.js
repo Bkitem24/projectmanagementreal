@@ -5,7 +5,7 @@ import { listTeams, createTeam, assignTeamManager, createInvite, listInvites, li
 import { startPresence, stopPresence, isOnline, onPresenceChange } from './lib/presence.js';
 import { compressImage } from './lib/imageCompress.js';
 import { imageHasFace } from './lib/faceDetect.js';
-import { uploadFile, fileUrl, fetchProtectedUrl, r2Configured } from './lib/r2.js';
+import { uploadFile, fileUrl, fetchProtectedUrl, downloadProtectedFile, r2Configured } from './lib/r2.js';
 import * as timelog from './lib/timelog.js';
 import * as musicPlayer from './lib/music.js';
 import { MOODS } from './lib/music.js';
@@ -146,7 +146,10 @@ function hydrateProfiles(container){
       var nameEl = e.querySelector('.pname');
       var avEl = e.querySelector('.avatar');
       if(nameEl) nameEl.textContent = (p && p.name) ? p.name : 'Someone';
-      if(avEl && p){ avEl.style.background = p.color; avEl.textContent = p.initial; }
+      if(avEl && p){
+        if(p.avatarUrl){ avEl.style.backgroundImage = 'url(\''+p.avatarUrl+'\')'; avEl.style.backgroundColor=''; avEl.textContent=''; }
+        else { avEl.style.background = p.color; avEl.textContent = p.initial; }
+      }
     });
   }).catch(function(){});
 }
@@ -277,29 +280,46 @@ document.getElementById('navToggle').addEventListener('click', function(){
 // ---------- SPOTLIGHT (Employee of the Month) ----------
 function renderSpotlight(container){
   var monthKey = currentMonthKey();
-  db.doc('spotlights/'+monthKey).get().then(function(snap){
+  // Was a one-time .get() — meaning it only ever loaded when this page was
+  // first opened. If Admin changed the spotlight while an employee already
+  // had Home open, they'd never see it until they navigated away and back.
+  // Switched to .onSnapshot() so it updates live like everything else.
+  var unsub = db.doc('spotlights/'+monthKey).onSnapshot(function(snap){
     var s = snap.exists ? snap.data() : null;
+    function wireEditBtn(){
+      // This used to run right after the outer .get()/.onSnapshot()
+      // callback fired, but for the "spotlight already set" branch below,
+      // the actual innerHTML write happens one tick later inside
+      // fetchProfiles().then(...) — so the button didn't exist in the DOM
+      // yet when this looked for it, and the click handler silently never
+      // attached. That's the "Edit button does nothing" bug: the button
+      // was real, it just had no listener. Now this only runs after the
+      // HTML that contains the button has actually been written.
+      var btn = document.getElementById('spotlightEditBtn');
+      if(btn) btn.addEventListener('click', function(){ openSpotlightModal(monthKey, s); });
+    }
     if(!s || !s.employeeId){
       if(!canManage()) { container.innerHTML=''; return; }
       container.innerHTML = '<div class="spotlight-banner" style="background:linear-gradient(120deg,var(--line-soft),var(--line));color:var(--ink);">'+
         '<div class="spotlight-body"><div class="spotlight-eyebrow" style="opacity:.7;">Employee of the month</div>'+
         '<div class="spotlight-name">Not set yet</div><div class="spotlight-note">Pick this month\'s spotlight.</div></div>'+
         '<button type="button" class="btn spotlight-edit" id="spotlightEditBtn" style="background:var(--surface);color:var(--ink);border-color:var(--line);">Set spotlight</button></div>';
+      wireEditBtn();
     } else {
       fetchProfiles([s.employeeId]).then(function(ps){
-        var p = ps[s.employeeId] || {name:'Someone', initial:'?', color:'#888'};
+        var p = ps[s.employeeId] || {name:'Someone', initial:'?', color:'#888', avatarUrl:''};
         container.innerHTML = '<div class="spotlight-banner">'+
-          (myProfile && s.employeeId===myUid && myProfile.avatarUrl ? '<img class="spotlight-photo" src="'+escapeHtml(myProfile.avatarUrl)+'">' : '<div class="spotlight-photo" style="display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:28px;font-weight:700;background:'+p.color+';color:#fff;">'+escapeHtml(p.initial)+'</div>')+
+          (p.avatarUrl ? '<img class="spotlight-photo" src="'+escapeHtml(p.avatarUrl)+'">' : '<div class="spotlight-photo" style="display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:28px;font-weight:700;background:'+p.color+';color:#fff;">'+escapeHtml(p.initial)+'</div>')+
           '<div class="spotlight-body"><div class="spotlight-eyebrow">🏆 Employee of the month</div>'+
           '<div class="spotlight-name">'+escapeHtml(p.name)+'</div>'+
           (s.note?'<div class="spotlight-note">'+escapeHtml(s.note)+'</div>':'')+'</div>'+
           (canManage()?'<button type="button" class="btn spotlight-edit" id="spotlightEditBtn">Edit</button>':'')+
           '</div>';
-      });
+        wireEditBtn();
+      }).catch(function(){ container.innerHTML=''; });
     }
-    var btn = document.getElementById('spotlightEditBtn');
-    if(btn) btn.addEventListener('click', function(){ openSpotlightModal(monthKey, s); });
-  }).catch(function(){ container.innerHTML=''; });
+  }, function(){ container.innerHTML=''; });
+  activeUnsubs.push(unsub);
 }
 
 function openSpotlightModal(monthKey, existing){
@@ -408,7 +428,7 @@ function renderClient(clientId){
     var mgr = canManage();
     app.innerHTML =
       '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+'</h1>'+
-      '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'—')+'</div></div>'+
+      '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'—')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div>'+
       (mgr?'<button type="button" class="btn btn-primary btn-sm" id="genEpisodesBtn">Generate upcoming episodes</button>':'')+
       '</div>'+
       '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="margin-bottom:18px;border-radius:14px;height:150px;position:relative;'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\');background-size:cover;background-position:center;':'background:linear-gradient(135deg,var(--blue-soft),var(--line-soft));')+'">'+
@@ -478,6 +498,24 @@ function renderClient(clientId){
       document.getElementById('saveOverviewBtn').addEventListener('click', function(){
         var val = document.getElementById('overviewEdit').value;
         db.doc('clients/'+clientId).update({tagline: val}).then(function(){ showToast('success','Overview updated'); }).catch(function(err){ showToast('error', errMsg(err)); });
+      });
+    });
+
+    // Reassigning a client to a different team — Admin-only per the
+    // permissions matrix (a Manager can't move a client out of their own
+    // team). This is the "editable afterward" piece for clients that came
+    // in without a team (see schema_v3.sql's Team A backfill).
+    var editTeamBtn = document.getElementById('editTeamBtn');
+    if(editTeamBtn) editTeamBtn.addEventListener('click', function(){
+      var row = document.getElementById('clientTeamRow');
+      var teamOpts = Object.keys(teamsCache).map(function(id){ return '<option value="'+id+'"'+(id===c.teamId?' selected':'')+'>'+escapeHtml(teamsCache[id].name)+'</option>'; }).join('');
+      row.innerHTML = '<select id="teamReassignSelect" style="font-size:12px;padding:2px 4px;">'+teamOpts+'</select> '+
+        '<button type="button" class="btn btn-sm" id="saveTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;">Save</button> '+
+        '<button type="button" class="btn btn-sm" id="cancelTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;">Cancel</button>';
+      document.getElementById('cancelTeamBtn').addEventListener('click', function(){ route(); });
+      document.getElementById('saveTeamBtn').addEventListener('click', function(){
+        var newTeamId = document.getElementById('teamReassignSelect').value;
+        db.doc('clients/'+clientId).update({teamId: newTeamId}).then(function(){ showToast('success','Client moved to '+teamName(newTeamId)); }).catch(function(err){ showToast('error', errMsg(err)); });
       });
     });
 
@@ -628,8 +666,13 @@ function openAddServiceToClientModal(clientId, existing){
 }
 
 function openCreateServiceTypeModal(clientIdToAttach){
+  // Admin isn't on any one Team, so "Just my Team" (which reads fine for a
+  // Manager) doesn't make sense for them — they need to actually pick which
+  // Team a team-scoped service belongs to. The picker itself already
+  // existed and worked; this was purely a confusing-label + always-visible
+  // issue, now fixed to only show when it's actually relevant.
   var scopeOptions = isAdmin()
-    ? '<option value="team">Just my Team</option><option value="global">Every Team (global)</option>'
+    ? '<option value="team">A specific Team</option><option value="global">Every Team (global)</option>'
     : '<option value="team">Just my Team</option>';
   var teamPickerHtml = isAdmin()
     ? '<div class="field" id="teamPickerField"><label>Team</label><select name="teamId">'+Object.keys(teamsCache).map(function(id){ return '<option value="'+id+'">'+escapeHtml(teamsCache[id].name)+'</option>'; }).join('')+'</select></div>'
@@ -673,6 +716,12 @@ function openCreateServiceTypeModal(clientIdToAttach){
         closeModal(); showToast('success','Service type created'); route();
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Create service', {large:true});
+  if(isAdmin()){
+    var scopeSelect = document.getElementById('scopeSelect');
+    var teamPickerField = document.getElementById('teamPickerField');
+    function syncTeamPickerVisibility(){ if(teamPickerField) teamPickerField.style.display = (scopeSelect.value==='global') ? 'none' : ''; }
+    if(scopeSelect){ scopeSelect.addEventListener('change', syncTeamPickerVisibility); syncTeamPickerVisibility(); }
+  }
 }
 
 function openAddOneOffEpisodeModal(clientId, clientName){
@@ -906,12 +955,21 @@ function loadTaskCollab(taskId, panel){
       Array.prototype.forEach.call(panel.querySelectorAll('[data-download-key]'), function(a){
         a.addEventListener('click', function(ev){
           ev.preventDefault();
-          fetchProtectedUrl(a.getAttribute('data-download-key')).then(function(url){
-            var tmp = document.createElement('a');
-            tmp.href = url; tmp.download = a.getAttribute('data-download-name') || 'file';
-            document.body.appendChild(tmp); tmp.click(); tmp.remove();
-            setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
-          }).catch(function(err){ showToast('error', errMsg(err)); });
+          if(a.dataset.downloading) return; // ignore rapid double-clicks while one is already in flight
+          a.dataset.downloading = '1';
+          var originalText = a.textContent;
+          a.textContent = 'Downloading…';
+          downloadProtectedFile(a.getAttribute('data-download-key'), a.getAttribute('data-download-name'))
+            .then(function(saved){
+              a.textContent = originalText;
+              delete a.dataset.downloading;
+              if(saved) showToast('success', 'Downloaded '+(a.getAttribute('data-download-name')||'file'));
+            })
+            .catch(function(err){
+              a.textContent = originalText;
+              delete a.dataset.downloading;
+              showToast('error', errMsg(err));
+            });
         });
       });
       document.getElementById('fileInput_'+taskId).addEventListener('change', function(ev){
@@ -1044,7 +1102,14 @@ function renderConnect(){
     showToast(connectConfigured?'success':'error', connectConfigured ? 'Starting a group Connect…' : 'Connect isn\'t configured yet — see README.md.');
   });
 
-  var q = isAdmin() ? db.collection('profiles').get() : db.collection('profiles').where('teamId','==',myTeamId).get();
+  // Root cause of "employee doesn't see admin online" (one-directional
+  // presence): this used to filter non-admins down to `.where('teamId','==',
+  // myTeamId)`, which always excludes Admin — Admin's own profile has no
+  // teamId at all. Presence itself was never one-directional; the roster
+  // *query* just never asked for Admin's row in the first place. Dropping
+  // the explicit filter and letting RLS scope the result (own team + any
+  // Admins, or everyone for Admin) fixes it without weakening access.
+  var q = db.collection('profiles').get();
   q.then(function(snap){
     var roster = document.getElementById('roster');
     var rows = snap.docs.filter(function(d){ return d.id!==myUid; });
@@ -1111,6 +1176,31 @@ function renderTeamSettings(){
   });
 }
 
+// A plain alert() box was the old way of showing a freshly-created invite
+// code — its text isn't reliably selectable/copyable in a webview, which is
+// exactly what was reported. This shows the code in a real input with a
+// Copy button instead, using the clipboard API with an execCommand
+// fallback for older webview builds.
+function showInviteCodeModal(email, roleLabel, code){
+  openModal('Invite created',
+    '<div class="field"><label>Invite code for '+escapeHtml(email)+(roleLabel?' ('+escapeHtml(roleLabel)+')':'')+'</label>'+
+    '<div style="display:flex;gap:8px;"><input type="text" id="inviteCodeField" value="'+escapeHtml(code)+'" readonly style="flex:1;font-family:monospace;font-size:15px;letter-spacing:.5px;"><button type="button" class="btn btn-sm" id="copyInviteBtn" style="width:auto;flex-shrink:0;">Copy</button></div></div>'+
+    '<p style="font-size:12.5px;color:var(--muted);margin-top:10px;">Send this to them along with the sign-up screen — they\'ll need this exact code plus this exact email to create their account.</p>',
+    function(){ closeModal(); }, 'Done');
+  var field = document.getElementById('inviteCodeField');
+  var copyBtn = document.getElementById('copyInviteBtn');
+  if(copyBtn) copyBtn.addEventListener('click', function(){
+    function copied(){ copyBtn.textContent = 'Copied!'; setTimeout(function(){ copyBtn.textContent = 'Copy'; }, 1500); }
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(code).then(copied).catch(function(){ fallbackCopy(); });
+    } else { fallbackCopy(); }
+    function fallbackCopy(){
+      try{ field.focus(); field.select(); document.execCommand('copy'); copied(); }
+      catch(e){ showToast('error', 'Could not copy — select the code and copy it manually.'); }
+    }
+  });
+}
+
 function openInviteModal(){
   openModal('Invite a teammate', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
     '<div class="field"><label>Role</label><select name="role">'+INVITABLE_ROLES.map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>',
@@ -1118,10 +1208,9 @@ function openInviteModal(){
       var email = (fd.get('email')||'').trim();
       if(!email){ showModalError('Enter their email.'); return; }
       setModalBusy(true);
+      var roleLabel = (INVITABLE_ROLES.filter(function(r){ return r.key===fd.get('role'); })[0]||{}).label;
       createInvite(email, fd.get('role'), myTeamId, myUid).then(function(invite){
-        closeModal();
-        showToast('success', 'Invite created — code: '+invite.id);
-        alert('Invite code for '+email+':\n\n'+invite.id+'\n\nSend this to them along with the sign-up screen — they\'ll need this exact code plus this exact email to create their account.');
+        showInviteCodeModal(email, roleLabel, invite.id);
         route();
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Create invite');
@@ -1173,8 +1262,9 @@ function renderAdmin(){
         var email = input.value.trim();
         if(!email) return;
         createInvite(email, 'manager', input.getAttribute('data-invite-mgr'), myUid).then(function(invite){
-          alert('Invite code for '+email+' (Manager):\n\n'+invite.id);
-          input.value=''; route();
+          input.value='';
+          showInviteCodeModal(email, 'Manager', invite.id);
+          route();
         }).catch(function(err){ showToast('error', errMsg(err)); });
       });
     });
@@ -1276,9 +1366,25 @@ function renderAuthScreen(mode){
         var uid = result.user.id;
         var musicMood = fd.get('musicMood')||'';
         var key = 'avatars/'+uid+'/photo.jpg';
-        return uploadFile(new File([pendingAvatarBlob],'photo.jpg',{type:'image/jpeg'}), key).then(function(){
-          return db.doc('profiles/'+uid).update({ avatarUrl: fileUrl(key), musicMood: musicMood });
-        }).catch(function(err){ console.warn('[blue-kite-ops] avatar/mood save failed (non-fatal):', err); });
+        // These two used to be chained (mood-save only ran after the avatar
+        // upload succeeded), so a single failed/slow upload silently took
+        // both down with it and the error never surfaced anywhere — just a
+        // console.warn nobody sees. Now they're independent: each saves on
+        // its own and reports its own failure via a toast once the app has
+        // loaded, instead of quietly leaving the profile half-filled-in.
+        var avatarDone = uploadFile(new File([pendingAvatarBlob],'photo.jpg',{type:'image/jpeg'}), key)
+          .then(function(){ return db.doc('profiles/'+uid).update({ avatarUrl: fileUrl(key) }); })
+          .catch(function(err){
+            console.warn('[blue-kite-ops] avatar upload failed:', err);
+            setTimeout(function(){ showToast('error', 'Your profile photo didn\'t save ('+errMsg(err)+'). Ask an admin to help you re-add it.'); }, 800);
+          });
+        var moodDone = musicMood
+          ? db.doc('profiles/'+uid).update({ musicMood: musicMood }).catch(function(err){
+              console.warn('[blue-kite-ops] music mood save failed:', err);
+              setTimeout(function(){ showToast('error', 'Your music mood didn\'t save ('+errMsg(err)+'). Ask an admin to help you set it.'); }, 800);
+            })
+          : Promise.resolve();
+        return Promise.all([avatarDone, moodDone]);
       }
     }).then(function(){
       // onAuthStateChange (wired in boot()) takes it from here.
@@ -1323,6 +1429,10 @@ function showClockInOverlay(){
 // ---------- BOOT ----------
 (function boot(){
   initTheme();
+  // See src/lib/timelog.js — screenshot/activity capture failures used to
+  // be swallowed silently (console.warn at best), which is exactly why
+  // testing showed no visible symptom at all. Now they surface as a toast.
+  timelog.setCaptureErrorHandler(function(message){ showToast('error', message); });
   if(!supabaseConfigured){
     document.getElementById('shell').style.display = 'none';
     var el = document.createElement('div');

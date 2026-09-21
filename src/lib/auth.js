@@ -51,7 +51,7 @@ export async function fetchProfiles(ids) {
   const unique = Array.from(new Set(ids)).filter(Boolean);
   const out = {};
   if (!unique.length) return out;
-  const { data, error } = await supabase.from('profiles').select('id, displayName, email').in('id', unique);
+  const { data, error } = await supabase.from('profiles').select('id, displayName, email, avatarUrl').in('id', unique);
   if (error) throw error;
   const byId = {};
   (data || []).forEach((row) => { byId[row.id] = row; });
@@ -63,6 +63,7 @@ export async function fetchProfiles(ids) {
       name,
       initial: name ? name.trim()[0].toUpperCase() : '?',
       color: colorFor(id),
+      avatarUrl: (row && row.avatarUrl) || '',
     };
   });
   return out;

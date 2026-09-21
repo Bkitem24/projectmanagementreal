@@ -2,25 +2,30 @@
 // so the App Token that can create/read call sessions never ships inside
 // the desktop app — only this Worker holds it, as a secret.
 //
-// *** NOT independently verified. *** This Worker was written without a
-// live Cloudflare Realtime account to test against (Humayun hasn't created
-// one yet — see README.md's Connect section) and without live network
-// access to developers.cloudflare.com from the sandbox this was built in.
-// The endpoint shapes below (POST /sessions/new, POST
-// /sessions/:id/tracks/new with a sessionDescription + tracks array) match
-// Cloudflare's published Realtime/Calls API as of when this was written,
-// but that surface has moved before and a field name or two below could be
-// stale. Before relying on Connect for real:
-//   1. Create the Cloudflare Realtime app, set the four secrets below.
-//   2. Try a real 1:1 Connect from two machines (or two browser profiles).
-//   3. If it fails, compare the request/response bodies logged here
-//      against the CURRENT reference at developers.cloudflare.com/realtime
-//      and adjust — most likely spot for drift is the exact shape of the
-//      `tracks` array entries (location/mid/trackName/sessionId fields).
+// Checked 2026-09-21 against Cloudflare's current Realtime SFU HTTP API
+// reference (developers.cloudflare.com/realtime/sfu/https-api/ + its
+// OpenAPI schema) once Humayun had a real "Serverless SFU" app to confirm
+// against — the endpoint paths and field names below (POST /sessions/new,
+// POST /sessions/:id/tracks/new with a sessionDescription + tracks array)
+// match. One real gap this pass found and fixed: pulling a REMOTE track
+// into an already-established session very often requires a renegotiation
+// round-trip (the API flags this back as `requiresImmediateRenegotiation`),
+// which the original version of this file didn't handle at all — it would
+// have just tried to apply an offer as if it were the final answer and
+// failed. See the /session/:id/pull and new /session/:id/renegotiate
+// handlers below, and the matching client-side handling in
+// src/lib/connect.js's pullRemoteTrack().
+//
+// Still genuinely unverified: an actual end-to-end call between two real
+// clients, which needs Humayun to deploy this and try it — this Worker's
+// own comments and the request/response bodies it forwards are the first
+// thing to check against a fresh export of the OpenAPI spec if that test
+// fails, since Cloudflare's Realtime surface has moved before.
 //
 // Endpoints this exposes to the app (see src/lib/connect.js):
-//   POST /session/new              body { offer }                  -> { sessionId, answer }
-//   POST /session/:id/pull         body { remoteSessionId, trackName } -> { answer }
+//   POST /session/new              body { offer }                          -> { sessionId, answer }
+//   POST /session/:id/pull         body { remoteSessionId, trackName }      -> { answer, requiresRenegotiation }
+//   POST /session/:id/renegotiate  body { answer }                         -> { ok: true }
 
 const CF_BASE = 'https://rtc.live.cloudflare.com/v1';
 
@@ -107,7 +112,13 @@ export default {
 
     // --- POST /session/:id/pull ---------------------------------------------
     // Pulls a remote participant's already-published track into the
-    // caller's existing session, returning the renegotiated SDP answer.
+    // caller's existing session. Per Cloudflare's current API, adding a
+    // track to an already-negotiated session commonly needs a follow-up
+    // renegotiation round trip rather than returning a ready-to-use answer
+    // directly — `requiresImmediateRenegotiation` says which case this is:
+    //   - false: `sessionDescription` (if present) is a normal answer.
+    //   - true: `sessionDescription` is actually an OFFER the client must
+    //     answer and send back via POST /session/:id/renegotiate below.
     const pullMatch = url.pathname.match(/^\/session\/([^/]+)\/pull$/);
     if (pullMatch && request.method === 'POST') {
       const localSessionId = pullMatch[1];
@@ -122,7 +133,36 @@ export default {
           return cors(json({ error: 'Cloudflare Realtime remote track pull failed', detail: await tracksRes.text() }, 502));
         }
         const tracksBody = await tracksRes.json();
-        return cors(json({ answer: tracksBody.sessionDescription }));
+        return cors(json({
+          answer: tracksBody.sessionDescription,
+          requiresRenegotiation: !!tracksBody.requiresImmediateRenegotiation,
+        }));
+      } catch (err) {
+        return cors(json({ error: String(err) }, 500));
+      }
+    }
+
+    // --- POST /session/:id/renegotiate --------------------------------------
+    // Completes the renegotiation Cloudflare asked for above: the client
+    // has applied the offer we handed back from /pull and generated its own
+    // answer — this forwards that answer to Cloudflare's renegotiate
+    // endpoint to finish the handshake.
+    const renegMatch = url.pathname.match(/^\/session\/([^/]+)\/renegotiate$/);
+    if (renegMatch && request.method === 'POST') {
+      const sessionId = renegMatch[1];
+      try {
+        const { answer } = await request.json();
+        if (!answer || !answer.sdp) return cors(json({ error: 'Missing answer.sdp' }, 400));
+
+        const renegRes = await fetch(CF_BASE + '/apps/' + env.CF_REALTIME_APP_ID + '/sessions/' + sessionId + '/renegotiate', {
+          method: 'PUT',
+          headers: { Authorization: 'Bearer ' + env.CF_REALTIME_APP_TOKEN, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionDescription: { type: 'answer', sdp: answer.sdp } }),
+        });
+        if (!renegRes.ok) {
+          return cors(json({ error: 'Cloudflare Realtime renegotiate failed', detail: await renegRes.text() }, 502));
+        }
+        return cors(json({ ok: true }));
       } catch (err) {
         return cors(json({ error: String(err) }, 500));
       }

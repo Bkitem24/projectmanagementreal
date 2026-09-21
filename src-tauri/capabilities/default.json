@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capabilities for the main window: the app's own native commands (timelog.rs) work without any entry here — Tauri v2 only gates plugin-provided commands — so this file exists specifically for the two plugins added for reliable file downloads (see src/lib/r2.js's downloadProtectedFile).",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-save",
+    "fs:allow-write-file"
+  ]
+}
