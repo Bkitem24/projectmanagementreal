@@ -17,9 +17,19 @@ export async function createTeam(name) {
 
 export async function assignTeamManager(teamId, managerId) {
   await db.doc('teams/' + teamId).update({ managerId });
-  // Admin-only action per RLS (protect_profile_fields_trg) - sets the
-  // profile's role/team, which only succeeds when the caller is Admin.
-  await db.doc('profiles/' + managerId).update({ role: 'manager', teamId });
+  // Requires schema_v6.sql's "profiles writable" policy (Admin can update
+  // ANY profile row, not just their own) - before that fix, this call
+  // silently updated zero rows whenever managerId wasn't the caller's own
+  // uid, which is exactly why this only ever seemed to work when Admin
+  // assigned themselves.
+  if (managerId) await db.doc('profiles/' + managerId).update({ role: 'manager', teamId });
+}
+
+// Clears a team's point-of-contact without touching whoever currently
+// holds the 'manager' role there (their role/team assignment is untouched -
+// this only clears the label shown as "who to contact for this team").
+export async function clearTeamManager(teamId) {
+  await db.doc('teams/' + teamId).update({ managerId: null });
 }
 
 // ---------------------------------------------------------------------------
