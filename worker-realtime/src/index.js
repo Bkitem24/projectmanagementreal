@@ -104,7 +104,14 @@ export default {
 
         const newSessionRes = await cf(env, '/sessions/new', {});
         if (!newSessionRes.ok) {
-          return cors(json({ error: 'Cloudflare Realtime session create failed', detail: await newSessionRes.text() }, 502));
+          const detail = await newSessionRes.text();
+          // Logged (not just returned in the response body) so `npx wrangler
+          // tail` shows the exact reason Cloudflare's own API gave — added
+          // 2026-09-21 while chasing a 502 that the app only surfaced as a
+          // bare status code. Common causes at this exact call: a wrong/
+          // mismatched CF_REALTIME_APP_ID or CF_REALTIME_APP_TOKEN secret.
+          console.error('[session/new] Cloudflare Realtime session create failed:', newSessionRes.status, detail);
+          return cors(json({ error: 'Cloudflare Realtime session create failed', detail }, 502));
         }
         const { sessionId } = await newSessionRes.json();
 
@@ -117,7 +124,9 @@ export default {
           tracks: [{ location: 'local', mid: '0', trackName: 'mic' }],
         });
         if (!tracksRes.ok) {
-          return cors(json({ error: 'Cloudflare Realtime track push failed', detail: await tracksRes.text() }, 502));
+          const detail = await tracksRes.text();
+          console.error('[session/new] Cloudflare Realtime track push failed:', tracksRes.status, detail);
+          return cors(json({ error: 'Cloudflare Realtime track push failed', detail }, 502));
         }
         const tracksBody = await tracksRes.json();
         return cors(json({ sessionId, answer: tracksBody.sessionDescription }));
@@ -146,7 +155,9 @@ export default {
           tracks: [{ location: 'remote', sessionId: remoteSessionId, trackName }],
         });
         if (!tracksRes.ok) {
-          return cors(json({ error: 'Cloudflare Realtime remote track pull failed', detail: await tracksRes.text() }, 502));
+          const detail = await tracksRes.text();
+          console.error('[session/pull] Cloudflare Realtime remote track pull failed:', tracksRes.status, detail);
+          return cors(json({ error: 'Cloudflare Realtime remote track pull failed', detail }, 502));
         }
         const tracksBody = await tracksRes.json();
         return cors(json({
@@ -176,7 +187,9 @@ export default {
           body: JSON.stringify({ sessionDescription: { type: 'answer', sdp: answer.sdp } }),
         });
         if (!renegRes.ok) {
-          return cors(json({ error: 'Cloudflare Realtime renegotiate failed', detail: await renegRes.text() }, 502));
+          const detail = await renegRes.text();
+          console.error('[session/renegotiate] Cloudflare Realtime renegotiate failed:', renegRes.status, detail);
+          return cors(json({ error: 'Cloudflare Realtime renegotiate failed', detail }, 502));
         }
         return cors(json({ ok: true }));
       } catch (err) {
@@ -187,4 +200,3 @@ export default {
     return cors(new Response('Not found', { status: 404 }));
   },
 };
-
