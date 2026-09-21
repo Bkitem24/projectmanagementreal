@@ -1,0 +1,28 @@
+# Cloudflare Worker that proxies the "Connect" voice-huddle feature to
+# Cloudflare Realtime (formerly "Calls") — a WebRTC SFU. The desktop app
+# never talks to Cloudflare Realtime directly: it only ever holds a Supabase
+# session, and this Worker is the only thing that holds the Realtime App
+# Token, forwarding SDP back and forth on the app's behalf. That keeps the
+# App Token (a secret that can create/read call sessions) out of a binary
+# that ships to every employee's PC.
+#
+# Setup, once you've created the Cloudflare Realtime app (Cloudflare
+# dashboard -> Realtime -> Create Application — it's usage-based with a
+# generous free monthly egress allowance, no card required to try it):
+#   cd worker-realtime && npx wrangler deploy
+#   npx wrangler secret put CF_REALTIME_APP_ID     (the App ID shown after creating it)
+#   npx wrangler secret put CF_REALTIME_APP_TOKEN  (the App Token — treat like a password)
+#   npx wrangler secret put SUPABASE_URL
+#   npx wrangler secret put SUPABASE_ANON_KEY
+#
+# Then set VITE_REALTIME_WORKER_URL in .env (and as a repo secret for the
+# GitHub Actions Windows build) to this Worker's deployed URL. Until that's
+# set, Connect's signaling (who's online, who's ringing whom) still works —
+# only the actual audio hookup is disabled, and the UI says so.
+
+name = "blue-kite-ops-realtime"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Set with `npx wrangler secret put <NAME>` (see setup notes above):
+#   CF_REALTIME_APP_ID, CF_REALTIME_APP_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY

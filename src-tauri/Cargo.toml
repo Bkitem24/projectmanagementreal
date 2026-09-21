@@ -1,0 +1,32 @@
+[package]
+name = "blue-kite-ops"
+version = "0.1.0"
+description = "Blue Kite Ops — production board desktop app"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# TimeLog (src/timelog.rs): screen capture + global keyboard/mouse activity.
+#
+# Version note: this sandbox has no network access to crates.io, so these
+# couldn't be resolved/compiled here to pin exact known-good versions (see
+# the header comment in src/timelog.rs). Left unpinned ("*") on purpose so
+# that whichever machine actually builds this (the GitHub Actions Windows
+# workflow, or your own machine) resolves the current latest release from
+# crates.io itself, rather than trusting a version number I couldn't verify.
+# Once a build succeeds, it's worth pinning these to the resolved versions
+# (copy them out of the generated Cargo.lock) so future builds are
+# reproducible instead of silently picking up new majors.
+xcap = "*"
+rdev = "*"
+image = "*"
+
+[[bin]]
+name = "blue-kite-ops"
+path = "src/main.rs"

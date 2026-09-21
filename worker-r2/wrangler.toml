@@ -1,0 +1,36 @@
+# Cloudflare Worker that fronts an R2 bucket for file uploads (thumbnails,
+# guest photos, etc). Optional — the app runs fine without this; it's here
+# ready for whenever you add a file-upload feature. R2 gives you 10GB of
+# free storage and, unlike S3, zero egress fees.
+#
+# Deploy with: cd worker-r2 && npx wrangler deploy
+# (npx wrangler login first, once, to connect your Cloudflare account.)
+
+name = "blue-kite-ops-r2"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "blue-kite-ops-files"
+
+# Runs the retention cleanup (screenshots/attachments/activity older than
+# 6 months) once a day. Cron schedules here are UTC — 03:00 UTC is late
+# night in the US and pre-dawn in Pakistan, a quiet time either way.
+[triggers]
+crons = ["0 3 * * *"]
+
+# Set these with:
+#   npx wrangler secret put SUPABASE_URL
+#   npx wrangler secret put SUPABASE_ANON_KEY
+#   npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+#
+# SUPABASE_URL/ANON_KEY: used to verify that an upload/download request
+# carries a valid, currently-logged-in Supabase session.
+#
+# SUPABASE_SERVICE_ROLE_KEY: used ONLY by the daily retention job to delete
+# rows across every user once they're 6 months old — a job like that has to
+# bypass Row Level Security to do its work, which is exactly what the
+# service_role key is for. Find it in Supabase: Settings -> API -> service_role
+# secret. Treat it like a master password: it is never put in `.env`, never
+# put in the desktop app, and lives only as this Worker's secret.
