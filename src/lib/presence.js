@@ -1,4 +1,4 @@
-// Online/offline presence via Supabase Realtime's Presence feature — no
+// Online/offline presence via Supabase Realtime's Presence feature - no
 // extra table needed, purely ephemeral (a browser refresh or app close and
 // you drop off automatically, exactly what "online/offline" should mean).
 import { supabase } from './supabaseClient.js';

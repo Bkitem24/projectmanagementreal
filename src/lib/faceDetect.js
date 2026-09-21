@@ -1,4 +1,4 @@
-// Client-side face detection for the forced signup profile photo — runs
+// Client-side face detection for the forced signup profile photo - runs
 // fully on-device (no server round trip, no extra cost). Model weights load
 // lazily from jsdelivr's CDN the first time this is used (a few hundred KB,
 // cached by the browser/webview after that) rather than being bundled into
@@ -18,8 +18,8 @@ async function ensureModels() {
 }
 
 // Returns true if at least one face is detected in the given image File.
-// Fails OPEN (returns true) if the model can't load at all — e.g. no
-// internet on first run — so a flaky connection never blocks signup
+// Fails OPEN (returns true) if the model can't load at all - e.g. no
+// internet on first run - so a flaky connection never blocks signup
 // outright; it just skips the check that one time.
 export async function imageHasFace(file) {
   try {

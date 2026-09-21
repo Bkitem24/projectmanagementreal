@@ -1,6 +1,6 @@
 // In-app music player, keyed off the mood/genre an employee picked at
 // signup (profiles.musicMood). Built on the YouTube IFrame Player API,
-// playing from the curated links Humayun sent per mood (CATALOG below) —
+// playing from the curated links Humayun sent per mood (CATALOG below) -
 // this replaces an earlier self-hosted-<audio> draft, since real YouTube
 // links per category is the direction actually chosen.
 //
@@ -8,13 +8,13 @@
 //
 //   1. YouTube's Required Minimum Functionality policy requires an embedded
 //      player to stay visible (roughly 200x200px or larger) while it's
-//      playing — unlike a plain <audio> tag, this can't be fully hidden.
+//      playing - unlike a plain <audio> tag, this can't be fully hidden.
 //      The player widget in main.js keeps a small always-visible video
 //      frame for exactly this reason. It's deliberately compact (not
 //      hidden), which keeps the embed compliant without taking over the
 //      sidebar.
 //   2. "Shuffle" here means picking a random entry from the mood's own
-//      curated list below — the IFrame API has no supported way to force
+//      curated list below - the IFrame API has no supported way to force
 //      real shuffle on an embedded playlist. Two entries below (Film Music,
 //      and one High-BPM entry) are a whole curated YouTube playlist rather
 //      than single videos, per Humayun's "add this entire playlist" notes;
@@ -25,16 +25,16 @@
 //      category is a flat list of individual videos, and "change track" /
 //      auto-advance-on-end pick a new random one from that list.
 //
-// No YouTube Data API key needed anywhere here — track titles come from
+// No YouTube Data API key needed anywhere here - track titles come from
 // the embedded player itself (player.getVideoData()), which is free and
 // needs no server-side credential.
 
 // ---------------------------------------------------------------------------
-// Catalog — Humayun's Sep 21 2026 list, one entry per mood. `id` is a plain
+// Catalog - Humayun's Sep 21 2026 list, one entry per mood. `id` is a plain
 // 11-char YouTube video id for a `video` entry, or a playlist id (the
 // `list=` param) for a `playlist` entry. Radio-mix params some of the
 // pasted links carried (`&list=RD...&start_radio=1`) are intentionally
-// dropped — those are YouTube's own "start an auto mix from this video"
+// dropped - those are YouTube's own "start an auto mix from this video"
 // convenience for a human browsing youtube.com, not something the IFrame
 // API can reliably reproduce for an embedded viewer, and Humayun's pasted
 // video itself is already the point of that link.
@@ -115,7 +115,7 @@ export const MOODS = Object.keys(CATALOG).map((key) => ({ key, label: CATALOG[ke
   .concat([{ key: 'none', label: "I'd rather not" }]);
 
 // ---------------------------------------------------------------------------
-// YouTube IFrame API loader — injects the script once, resolves once the
+// YouTube IFrame API loader - injects the script once, resolves once the
 // global YT.Player constructor exists.
 // ---------------------------------------------------------------------------
 let ytApiPromise = null;
@@ -199,7 +199,7 @@ function startPolling() {
   if (pollTimer) return;
   // Only used to catch title metadata arriving a beat after cue/load, and
   // to keep the "playing" indicator honest if something external pauses
-  // the underlying <iframe> — cheap and local, no network calls of its own.
+  // the underlying <iframe> - cheap and local, no network calls of its own.
   pollTimer = setInterval(notify, 2000);
 }
 
@@ -225,7 +225,7 @@ export function initPlayer(mountElId, mood) {
           // 0 = ended. A single video has nothing to continue into; a
           // playlist item reaching this point has run itself out too
           // (YouTube advances through a playlist's own tracks internally
-          // without an ENDED in between) — either way, move on.
+          // without an ENDED in between) - either way, move on.
           if (e.data === 0) next();
           else notify();
         },

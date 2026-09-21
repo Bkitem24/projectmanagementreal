@@ -1,23 +1,23 @@
-// "Connect" — instant voice huddles (1:1 and group) over Cloudflare Realtime
+// "Connect" - instant voice huddles (1:1 and group) over Cloudflare Realtime
 // (WebRTC SFU). See README.md's "Connect / Cloudflare Realtime" section
-// before wiring this up for real — it needs a Cloudflare Realtime App ID +
+// before wiring this up for real - it needs a Cloudflare Realtime App ID +
 // App Token, which only exist once Humayun creates that Cloudflare account.
 //
 // Two halves, deliberately split so the working half can ship now:
 //
-//   1. SIGNALING — who's calling whom, and relaying session/track ids
+//   1. SIGNALING - who's calling whom, and relaying session/track ids
 //      between peers. This is fully working today: it rides on the same
 //      Supabase Realtime the rest of the app already uses (see
 //      lib/presence.js), no Cloudflare account needed for this part.
 //
-//   2. MEDIA — actually standing up the WebRTC audio session through
+//   2. MEDIA - actually standing up the WebRTC audio session through
 //      Cloudflare's SFU. This is a STUB. Cloudflare's Calls/Realtime REST
 //      API (create a session, push a local track's SDP offer, pull a
 //      remote track by {sessionId, trackName}) is what this needs to call,
 //      proxied through worker-realtime/ so the App Token never ships inside
 //      this desktop app. The exact request/response shape should be
 //      double-checked against developers.cloudflare.com/realtime at the
-//      time this gets finished — API surfaces like this do shift, and
+//      time this gets finished - API surfaces like this do shift, and
 //      guessing it confidently here would be worse than flagging it.
 import { supabase } from './supabaseClient.js';
 
@@ -35,7 +35,7 @@ let onHangup = null;
 // Three messages, one channel per user (their own uid), listened to once at
 // boot: 'ring' (someone wants to call you), 'answer' (the person you rang
 // has set up their own session and is telling you its id, so you can pull
-// their audio back), 'hangup' (either side ending the call — this is what
+// their audio back), 'hangup' (either side ending the call - this is what
 // lets the OTHER side's UI clean up too, not just the one who clicked hang
 // up). Call this once per app session; main.js wires all three handlers up
 // at boot alongside the existing presence/timelog setup.
@@ -54,7 +54,7 @@ export function listenForConnects(myUid, handlers) {
 
 // Because "online" already means "connectable" per Humayun's spec (no
 // accept/decline step for a 1:1 when the other side is online), ringing a
-// single online person immediately proceeds to media setup on both ends —
+// single online person immediately proceeds to media setup on both ends -
 // this broadcast is really just "here's my session id, come pull my audio."
 export async function ring(targetUid, fromProfile, sessionId, isGroup) {
   await supabase.channel('connect:' + targetUid).send({
@@ -64,7 +64,7 @@ export async function ring(targetUid, fromProfile, sessionId, isGroup) {
 }
 
 // The callee sends this back once THEY have their own session up and have
-// pulled the caller's audio — it's what lets the original caller learn the
+// pulled the caller's audio - it's what lets the original caller learn the
 // callee's session id and pull audio the other direction, completing a
 // real two-way call instead of one-way.
 export async function answerRing(callerUid, fromProfile, sessionId) {
@@ -82,7 +82,7 @@ export async function sendHangup(targetUid) {
 }
 
 // ---------------------------------------------------------------------------
-// Media (stub — needs worker-realtime/ + real Cloudflare Realtime creds)
+// Media (stub - needs worker-realtime/ + real Cloudflare Realtime creds)
 // ---------------------------------------------------------------------------
 async function authedFetch(path, opts) {
   const { data } = await supabase.auth.getSession();
@@ -94,10 +94,10 @@ async function authedFetch(path, opts) {
 
 // Starts a new SFU session for the local mic, returns { sessionId, pc }.
 // TODO once Cloudflare creds exist: confirm this against the current
-// Realtime API reference — this assumes POST /session/new + POST
+// Realtime API reference - this assumes POST /session/new + POST
 // /session/:id/tracks/new taking/returning SDP, proxied by worker-realtime/.
 export async function startLocalSession() {
-  if (!connectConfigured) throw new Error('Connect is not configured yet — see README.md (needs Cloudflare Realtime credentials).');
+  if (!connectConfigured) throw new Error('Connect is not configured yet - see README.md (needs Cloudflare Realtime credentials).');
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
   const pc = new RTCPeerConnection();
   stream.getTracks().forEach((t) => pc.addTrack(t, stream));
@@ -114,7 +114,7 @@ export async function startLocalSession() {
 //
 // Checked 2026-09-21 against Cloudflare's current Realtime SFU API: adding
 // a track to an already-negotiated session commonly requires a follow-up
-// renegotiation round trip rather than a direct answer — the worker's
+// renegotiation round trip rather than a direct answer - the worker's
 // /pull response says which case this is via `requiresRenegotiation`. When
 // true, what comes back as `answer` is actually an OFFER from Cloudflare
 // that this side must answer and post back via /renegotiate to finish the

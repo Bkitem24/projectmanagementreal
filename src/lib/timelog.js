@@ -1,11 +1,11 @@
 // TimeLog: manual clock-in, randomized-interval screenshots, and
 // keyboard/mouse activity sampling while clocked in. The actual capture
-// happens in Rust (src-tauri/src/timelog.rs) — this module just drives the
+// happens in Rust (src-tauri/src/timelog.rs) - this module just drives the
 // schedule from JS and uploads/records what comes back.
 //
 // In a plain browser (e.g. `npm run dev` outside the Tauri shell) there's
 // no native capture available at all, so every Tauri call here is wrapped
-// to fail quietly — the rest of the app stays usable for web development,
+// to fail quietly - the rest of the app stays usable for web development,
 // it just never actually takes a screenshot or logs a keystroke.
 import { db, randomId } from './db.js';
 import { uploadFile } from './r2.js';
@@ -25,13 +25,13 @@ const SCREENSHOT_MAX_MS = 15 * 60 * 1000; // averages ~10 minutes
 const ACTIVITY_FLUSH_MS = 5 * 60 * 1000;
 
 // Every failure in this file used to be swallowed into a bare catch or a
-// console.warn — invisible unless someone had devtools open, which is
+// console.warn - invisible unless someone had devtools open, which is
 // exactly why testing showed "absolutely nothing happens" with no error,
 // no prompt, and nothing in Defender's history: whatever's actually going
 // wrong (a native capture error, a permission issue, anything) was real,
 // it just had nowhere to surface. main.js registers a handler for this via
 // setCaptureErrorHandler() so a real failure now shows up as a toast
-// instead of vanishing — that message is what will actually tell us what's
+// instead of vanishing - that message is what will actually tell us what's
 // wrong, instead of guessing further blind.
 let onCaptureError = null;
 export function setCaptureErrorHandler(fn) { onCaptureError = fn; }
@@ -42,6 +42,12 @@ function reportCaptureError(message) {
   if (onCaptureError) { try { onCaptureError(message); } catch (e) {} }
 }
 
+// Fires once per successful screenshot - main.js uses this to show a brief
+// on-screen notice + play a sound, so a screenshot being taken is something
+// the person can actually notice happening, not a silent background thing.
+let onScreenshotTaken = null;
+export function setScreenshotTakenHandler(fn) { onScreenshotTaken = fn; }
+
 let state = null; // { uid, timeEntryId, screenshotTimer, activityTimer, windowStart }
 
 function randomScreenshotDelay() {
@@ -49,6 +55,22 @@ function randomScreenshotDelay() {
 }
 
 export function isClockedIn() { return !!state; }
+
+// Rust's rdev::listen() can fail to actually install the global hook (e.g.
+// blocked by security software, or a Windows API mismatch) - before this,
+// that failure only ever went to eprintln!, which lands in a console window
+// a normal .exe never shows. Checking this shortly after (re-)starting
+// capture is what actually tells us, instead of guessing from symptoms,
+// whether the hook is failing to start at all versus starting fine but
+// missing certain keystrokes for some other reason (like Windows blocking a
+// non-admin app from seeing keys typed into an admin-elevated one).
+function checkListenerError() {
+  setTimeout(() => {
+    tauriInvoke('timelog_listener_error').then((msg) => {
+      if (msg) reportCaptureError('Screen/keyboard/mouse activity capture could not start: ' + msg);
+    }).catch(() => {});
+  }, 1500);
+}
 
 export async function clockIn(uid) {
   if (state) return state.timeEntryId;
@@ -60,8 +82,9 @@ export async function clockIn(uid) {
   scheduleActivityFlush();
   try {
     await tauriInvoke('timelog_start');
+    checkListenerError();
   } catch (e) {
-    // Only warn for a REAL failure inside the desktop app — not for the
+    // Only warn for a REAL failure inside the desktop app - not for the
     // expected "Not running inside the Blue Kite Ops desktop app" case,
     // which just means this is a plain browser dev session with no native
     // capture available at all (normal, not an error).
@@ -71,6 +94,39 @@ export async function clockIn(uid) {
     }
   }
   return timeEntryId;
+}
+
+// A page reload wipes this module's in-memory `state` - before this fix,
+// that silently stopped all further screenshots/activity flushes even
+// though the actual clock-in row (and, in practice, the still-running Rust
+// process) never really stopped, so the UI showing "Clock in" again after a
+// reload was flat-out wrong. Call this once at boot (after the signed-in
+// user's uid is known) to reconnect to whatever's genuinely still open in
+// the database, instead of treating a reload as an implicit clock-out.
+export async function resumeIfClockedIn(uid) {
+  if (state) return; // already tracking this session (e.g. clockIn() already ran)
+  let open;
+  try {
+    const snap = await db.collection('timeEntries').where('userId', '==', uid).orderBy('clockInAt', 'desc').limit(5).get();
+    open = snap.docs.map((d) => Object.assign({ id: d.id }, d.data())).find((e) => !e.clockOutAt);
+  } catch (e) { return; }
+  if (!open) return;
+  state = { uid, timeEntryId: open.id, windowStart: new Date().toISOString() };
+  warnedThisSession = false;
+  scheduleScreenshot();
+  scheduleActivityFlush();
+  try {
+    // Safe to call again even if the native hook is already running -
+    // timelog_start() only resets the activity buffer the first time
+    // (see src-tauri/src/timelog.rs), so resuming after a reload doesn't
+    // throw away whatever was already collected in the current window.
+    await tauriInvoke('timelog_start');
+    checkListenerError();
+  } catch (e) {
+    if (e && e.message !== 'Not running inside the Blue Kite Ops desktop app') {
+      reportCaptureError('Time tracking resumed, but screen/activity capture could not restart: ' + (e.message || e));
+    }
+  }
 }
 
 export async function clockOut() {
@@ -107,6 +163,7 @@ async function takeScreenshot(s) {
   await db.doc('screenshots/' + id).set({
     userId: s.uid, timeEntryId: s.timeEntryId, r2Key: key, takenAt: new Date().toISOString(),
   });
+  if (onScreenshotTaken) { try { onScreenshotTaken(); } catch (e) {} }
 }
 
 function scheduleActivityFlush() {
@@ -135,7 +192,7 @@ async function flushActivity(s) {
 }
 
 // ---------------------------------------------------------------------------
-// Viewing — an employee's own history, or (for a Manager/Admin) a
+// Viewing - an employee's own history, or (for a Manager/Admin) a
 // teammate's. RLS enforces who's actually allowed to see what; this just
 // runs the query.
 // ---------------------------------------------------------------------------
@@ -144,12 +201,22 @@ export async function listScreenshots(userId, limitN) {
   return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
 }
 
+// Screenshots for one specific clock-in session, oldest first - used by the
+// TimeLog page's per-session view (see main.js's renderTimeLog) so a
+// session's screenshots sit directly under that session's clock-in/clock-out
+// summary instead of one long flat "recent screenshots" grid with no sense
+// of which work day or shift any of them belonged to.
+export async function listScreenshotsForEntry(timeEntryId, limitN) {
+  const snap = await db.collection('screenshots').where('timeEntryId', '==', timeEntryId).orderBy('takenAt', 'asc').limit(limitN || 60).get();
+  return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
+}
+
 export async function listTimeEntries(userId, limitN) {
   const snap = await db.collection('timeEntries').where('userId', '==', userId).orderBy('clockInAt', 'desc').limit(limitN || 30).get();
   return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
 }
 
-// All activity windows recorded during one clock-in — used to find which
+// All activity windows recorded during one clock-in - used to find which
 // window (if any) overlaps a given screenshot's takenAt, for the "click a
 // screenshot, see the activity around it" view in main.js.
 export async function listActivityForEntry(timeEntryId) {

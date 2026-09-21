@@ -1,6 +1,6 @@
 // Client helper for the optional Cloudflare R2 file-storage worker
-// (see worker-r2/). Not called anywhere yet — the app has no file-upload
-// feature today — but it's ready for when you add one (e.g. an episode
+// (see worker-r2/). Not called anywhere yet - the app has no file-upload
+// feature today - but it's ready for when you add one (e.g. an episode
 // thumbnail). Wire it up like:
 //
 //   import { uploadFile, fileUrl } from './lib/r2.js';
@@ -15,13 +15,13 @@ export const r2Configured = !!WORKER_URL;
 
 // "Failed to fetch" reports during testing (uploads *and* downloads, on both
 // office wifi and different machines) point at transient network blips
-// rather than a code bug — the worker itself responds fine when reachable.
+// rather than a code bug - the worker itself responds fine when reachable.
 // fetch() gives up on the first hiccup with no retry and no timeout, so a
 // one-second stall reads to the user as a hard failure. This wraps every
 // call to the worker with: an explicit timeout (so a stalled connection
 // fails fast with a clear message instead of hanging forever) and a couple
 // of automatic retries with backoff for genuine network-level failures
-// (fetch() throwing) — but NOT for real HTTP error responses like 401/413,
+// (fetch() throwing) - but NOT for real HTTP error responses like 401/413,
 // which are legitimate and retrying them would just be noise.
 const TIMEOUT_MS = 30000;
 const RETRY_DELAYS_MS = [800, 2000];
@@ -34,7 +34,7 @@ async function fetchWithRetry(url, opts) {
     try {
       const res = await fetch(url, Object.assign({}, opts, { signal: controller.signal }));
       clearTimeout(timer);
-      return res; // got a real HTTP response (even an error one) — not a network failure, don't retry
+      return res; // got a real HTTP response (even an error one) - not a network failure, don't retry
     } catch (e) {
       clearTimeout(timer);
       lastErr = e;
@@ -46,12 +46,12 @@ async function fetchWithRetry(url, opts) {
   }
   const isAbort = lastErr && lastErr.name === 'AbortError';
   throw new Error(isAbort
-    ? 'The connection timed out — check your internet connection and try again.'
-    : 'Could not reach the file server — check your internet connection and try again.');
+    ? 'The connection timed out - check your internet connection and try again.'
+    : 'Could not reach the file server - check your internet connection and try again.');
 }
 
 export async function uploadFile(file, key) {
-  if (!WORKER_URL) throw new Error('R2 upload worker is not configured — set VITE_R2_UPLOAD_WORKER_URL in .env');
+  if (!WORKER_URL) throw new Error('R2 upload worker is not configured - set VITE_R2_UPLOAD_WORKER_URL in .env');
   const { data: sessionData } = await supabase.auth.getSession();
   const token = sessionData && sessionData.session && sessionData.session.access_token;
   if (!token) throw new Error('You must be signed in to upload files.');
@@ -65,6 +65,26 @@ export async function uploadFile(file, key) {
   return body.key;
 }
 
+// Removes the underlying object from the bucket - called after a
+// taskAttachments/episodeAttachments row is deleted (see main.js's
+// loadCollab), so a deleted attachment doesn't sit in R2 forever as an
+// orphan (the 6-month retention job in worker-r2 only ever looks at rows
+// that still exist, so once the row's gone nothing else would ever clean
+// this up). Best-effort: if this fails after the row is already deleted,
+// there's nothing sensible left to roll back, so callers just log/toast it
+// rather than treating it as a hard failure.
+export async function deleteRemoteFile(key) {
+  if (!WORKER_URL) return;
+  const { data: sessionData } = await supabase.auth.getSession();
+  const token = sessionData && sessionData.session && sessionData.session.access_token;
+  if (!token) return;
+  const res = await fetchWithRetry(WORKER_URL.replace(/\/$/, '') + '/f/' + encodeURIComponent(key), {
+    method: 'DELETE',
+    headers: { Authorization: 'Bearer ' + token },
+  });
+  if (!res.ok && res.status !== 404) throw new Error('Could not delete file (' + res.status + ')');
+}
+
 export function fileUrl(key) {
   if (!WORKER_URL) return '';
   return WORKER_URL.replace(/\/$/, '') + '/f/' + encodeURIComponent(key);
@@ -72,7 +92,7 @@ export function fileUrl(key) {
 
 // For screenshots/ and attachments/ keys, the worker requires a session on
 // GET too (see worker-r2/src/index.js's isSensitiveKey), so a plain
-// fileUrl() can't be dropped into <img src> or <a href> for those — there's
+// fileUrl() can't be dropped into <img src> or <a href> for those - there's
 // no way to attach an Authorization header to either. This fetches the
 // bytes with the header and hands back a blob: URL the browser can use the
 // same way. Caller is responsible for URL.revokeObjectURL(...) once done
@@ -90,14 +110,14 @@ export async function fetchProtectedUrl(key) {
 }
 
 // Saving a file the user downloads (task attachments) needs to be reliable,
-// and a plain <a download> click on a blob: URL — the only trick available
-// in a normal browser — is known to be flaky inside the WebView2 shell Tauri
+// and a plain <a download> click on a blob: URL - the only trick available
+// in a normal browser - is known to be flaky inside the WebView2 shell Tauri
 // uses on Windows: it can silently do nothing, only occasionally prompt a
 // save dialog, and feel slow even when it does. That matches exactly what
 // testing showed. Tauri's own dialog + fs plugins give a real, native
 // "Save As" flow instead, so this uses those when available (i.e. running
 // inside the actual desktop app) and only falls back to the old browser
-// trick when they can't be loaded at all — e.g. `npm run dev` in a plain
+// trick when they can't be loaded at all - e.g. `npm run dev` in a plain
 // browser tab, where there's no Tauri shell to talk to.
 // Returns true if the file was saved, false if the user cancelled the
 // Save As dialog.
@@ -117,7 +137,7 @@ export async function downloadProtectedFile(key, suggestedName) {
       import('@tauri-apps/plugin-dialog'),
       import('@tauri-apps/plugin-fs'),
     ]);
-  } catch (e) { /* not running inside Tauri — fall through to the browser method below */ }
+  } catch (e) { /* not running inside Tauri - fall through to the browser method below */ }
 
   if (dialogMod && fsMod) {
     const path = await dialogMod.save({ defaultPath: suggestedName || 'file' });

@@ -8,6 +8,12 @@
 //                     screenshots/ and attachments/ keys — see
 //                     isSensitiveKey() below. Avatars and client photos stay
 //                     openly readable so a plain <img src> can use the URL).
+//                     DELETE removes an object outright (same auth check as
+//                     PUT) — used when someone deletes an attachment from
+//                     the comments/discussion UI, so the object doesn't sit
+//                     in the bucket forever as an orphan once its database
+//                     row is gone (the 6-month retention job below only
+//                     ever looks at rows that still exist).
 //   2. scheduled()   — a daily cron job that deletes screenshots, task
 //                     attachments, and activity samples once they're 6
 //                     months old, per Humayun's retention decision — both
@@ -15,8 +21,9 @@
 //                     ever a broken link or an orphaned row.
 //
 // Usage from the app (see src/lib/r2.js):
-//   PUT  /f/<key>   Authorization: Bearer <supabase access token>   body: file bytes
-//   GET  /f/<key>   Authorization required only for screenshots/*, attachments/*   -> file bytes back
+//   PUT    /f/<key>   Authorization: Bearer <supabase access token>   body: file bytes
+//   GET    /f/<key>   Authorization required only for screenshots/*, attachments/*   -> file bytes back
+//   DELETE /f/<key>   Authorization: Bearer <supabase access token>   -> removes the object
 
 async function verifySession(request, env) {
   const auth = request.headers.get('Authorization') || '';
@@ -42,7 +49,7 @@ function isSensitiveKey(key) {
 function cors(resp) {
   resp.headers.set('Access-Control-Allow-Origin', '*');
   resp.headers.set('Access-Control-Allow-Headers', 'Authorization, Content-Type');
-  resp.headers.set('Access-Control-Allow-Methods', 'GET, PUT, OPTIONS');
+  resp.headers.set('Access-Control-Allow-Methods', 'GET, PUT, DELETE, OPTIONS');
   return resp;
 }
 
@@ -78,6 +85,19 @@ export default {
         httpMetadata: { contentType: request.headers.get('content-type') || 'application/octet-stream' },
       });
       return cors(new Response(JSON.stringify({ key }), { headers: { 'content-type': 'application/json' } }));
+    }
+
+    if (request.method === 'DELETE') {
+      // Same auth bar as PUT — any logged-in user can delete any key, just
+      // like any logged-in user can already overwrite any key. Real
+      // per-user/per-Team enforcement for *which* attachment someone is
+      // allowed to remove happens one layer up, in Postgres RLS on
+      // taskAttachments/episodeAttachments (see schema_v5.sql) — the app
+      // only ever calls this after that row-delete already succeeded.
+      const ok = await verifySession(request, env);
+      if (!ok) return cors(new Response('Unauthorized', { status: 401 }));
+      await env.BUCKET.delete(key);
+      return cors(new Response(null, { status: 204 }));
     }
 
     return cors(new Response('Method not allowed', { status: 405 }));

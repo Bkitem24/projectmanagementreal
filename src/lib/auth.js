@@ -2,7 +2,7 @@ import { supabase } from './supabaseClient.js';
 
 // inviteCode is required for everyone except the very first account ever
 // created on a fresh project (see the handle_new_user() bootstrap logic in
-// supabase/schema_v2.sql) — the server enforces this regardless of what the
+// supabase/schema_v2.sql) - the server enforces this regardless of what the
 // UI does, so an invalid/missing code here surfaces as a normal signUp
 // error rather than silently doing the wrong thing.
 export async function signUp(email, password, displayName, inviteCode) {
@@ -29,7 +29,7 @@ export async function signOut() {
 // Changing your own email/password, for the "Edit profile" modal in
 // main.js. Email changes go through Supabase Auth's own confirmation flow
 // (it emails both the old and new address before the change actually takes
-// effect) — that's Supabase's behavior, not something this app controls, so
+// effect) - that's Supabase's behavior, not something this app controls, so
 // the UI just tells the person to check their inbox.
 export async function updateEmail(newEmail) {
   const { error } = await supabase.auth.updateUser({ email: newEmail });

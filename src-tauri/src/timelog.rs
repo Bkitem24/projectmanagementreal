@@ -1,7 +1,7 @@
 // TimeLog: randomized-interval screenshots + keyboard/mouse activity,
 // while an employee is clocked in. The scheduling (when to take the next
 // screenshot, how often to flush activity) lives in JS
-// (src/lib/timelog.js) — this module only does the two things that need
+// (src/lib/timelog.js) - this module only does the two things that need
 // real OS access: grabbing a screen capture, and listening to global
 // keyboard/mouse events system-wide (not just inside the app window).
 //
@@ -9,19 +9,19 @@
 // built in has no network access to crates.io, so `cargo build` couldn't
 // actually be run here to confirm this compiles and links. The existing
 // `.github/workflows/build-windows.yml` DOES have full internet access and
-// builds this for real on a Windows runner — treat that build's result
+// builds this for real on a Windows runner - treat that build's result
 // (and a first real run on Windows) as this module's actual test, and
 // expect to iterate on it if the Windows build turns up an API mismatch in
 // the `xcap` or `rdev` crates' current versions.
 //
 // A practical thing worth knowing going in: rdev's global keyboard hook
 // reports the literal key that was pressed (via its `name` field where the
-// OS provides one, e.g. "a", "5", "!" — falling back to a token like
+// OS provides one, e.g. "a", "5", "!" - falling back to a token like
 // "Return" or "Shift" for non-printable keys), for every keystroke typed
-// anywhere on the machine while clocked in — there's no per-application or
+// anywhere on the machine while clocked in - there's no per-application or
 // per-field awareness, so a password typed into an unrelated program during
 // a clocked-in session is captured the same as anything else. That's the
-// tradeoff of "full keystroke logging" as specified, not a bug — flagging
+// tradeoff of "full keystroke logging" as specified, not a bug - flagging
 // it here since it's easy to forget once this is running quietly.
 
 use serde::Serialize;
@@ -39,9 +39,19 @@ struct ActivityBuffer {
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static BUFFER: OnceLock<Mutex<ActivityBuffer>> = OnceLock::new();
 static LISTENER_STARTED: AtomicBool = AtomicBool::new(false);
+// Set if rdev::listen() ever returns an error (hook failed to install -
+// blocked by security software, an API mismatch, etc). Previously this only
+// went to eprintln!, which lands in a console window a normal .exe never
+// shows, so a total capture failure looked identical to "nothing to
+// report" from the JS side. timelog_listener_error() below exposes it.
+static LISTENER_ERROR: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 fn buffer() -> &'static Mutex<ActivityBuffer> {
     BUFFER.get_or_init(|| Mutex::new(ActivityBuffer::default()))
+}
+
+fn listener_error_slot() -> &'static Mutex<Option<String>> {
+    LISTENER_ERROR.get_or_init(|| Mutex::new(None))
 }
 
 fn ensure_listener_started() {
@@ -51,7 +61,7 @@ fn ensure_listener_started() {
     std::thread::spawn(|| {
         // rdev::listen blocks forever pumping a native event loop; it only
         // makes sense to start it once per process, so `timelog_stop` just
-        // flips RUNNING to false rather than tearing this down — cheap to
+        // flips RUNNING to false rather than tearing this down - cheap to
         // leave idle, and avoids re-registering the OS-level hook.
         let callback = |event: rdev::Event| {
             if !RUNNING.load(Ordering::Relaxed) {
@@ -77,24 +87,40 @@ fn ensure_listener_started() {
             }
         };
         if let Err(err) = rdev::listen(callback) {
-            eprintln!("[blue-kite-ops] activity listener failed to start: {:?}", err);
+            let msg = format!("{:?}", err);
+            eprintln!("[blue-kite-ops] activity listener failed to start: {}", msg);
+            *listener_error_slot().lock().unwrap() = Some(msg);
         }
     });
 }
 
 #[tauri::command]
 pub fn timelog_start() {
-    {
+    // Only reset the buffer on a genuine fresh start, not when this is
+    // called again while already running (e.g. resuming after the webview
+    // reloads - see timelog.js's resumeIfClockedIn()) - otherwise whatever
+    // activity was already collected in the current window gets thrown away
+    // for no reason.
+    let already_running = RUNNING.swap(true, Ordering::SeqCst);
+    if !already_running {
         let mut buf = buffer().lock().unwrap();
         *buf = ActivityBuffer::default();
     }
     ensure_listener_started();
-    RUNNING.store(true, Ordering::SeqCst);
 }
 
 #[tauri::command]
 pub fn timelog_stop() {
     RUNNING.store(false, Ordering::SeqCst);
+}
+
+// Lets JS check, shortly after (re-)starting capture, whether the native
+// global input hook actually failed to install at all - as opposed to
+// installing fine but missing some keystrokes for an unrelated reason (see
+// the module-level doc comment above about per-app isolation on Windows).
+#[tauri::command]
+pub fn timelog_listener_error() -> Option<String> {
+    listener_error_slot().lock().unwrap().clone()
 }
 
 #[derive(Serialize)]
@@ -122,7 +148,7 @@ pub fn timelog_drain_activity() -> ActivityReport {
 }
 
 // Captures the primary monitor, downsizes and JPEG-compresses it, and hands
-// the bytes to JS (which uploads them as-is to R2 — see
+// the bytes to JS (which uploads them as-is to R2 - see
 // src/lib/timelog.js). Doing the compression here, not in JS, means the
 // full-resolution raw bitmap never has to cross the Tauri IPC bridge.
 #[tauri::command]
@@ -135,7 +161,7 @@ pub fn timelog_capture_screenshot() -> Result<Vec<u8>, String> {
         .ok_or_else(|| "No monitor found to capture".to_string())?;
     let image = monitor.capture_image().map_err(|e| e.to_string())?;
 
-    // Downscale to a max width of 1600px before encoding — plenty readable
+    // Downscale to a max width of 1600px before encoding - plenty readable
     // for reviewing what someone was working on, at a fraction of the
     // storage/bandwidth of a full 4K/5K capture.
     let dynamic = image::DynamicImage::ImageRgba8(image);

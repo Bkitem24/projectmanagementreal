@@ -3,7 +3,7 @@
 // against (db.collection(x).where().orderBy().limit().onSnapshot(), and
 // db.doc(x).get()/set()/update()/onSnapshot()). This is what let the
 // original artifact prototype's render functions carry over to this real
-// backend with almost no changes — only this file and the boot sequence in
+// backend with almost no changes - only this file and the boot sequence in
 // main.js are backend-specific.
 import { supabase } from './supabaseClient.js';
 
@@ -114,7 +114,7 @@ function docRef(table, id) {
 function splitPath(path) {
   const parts = path.split('/').filter(Boolean);
   if (parts.length !== 2) {
-    throw new Error('db.doc() path must be "table/id" — got "' + path + '"');
+    throw new Error('db.doc() path must be "table/id" - got "' + path + '"');
   }
   return parts;
 }

@@ -1,5 +1,5 @@
 // Tauri here is a native window + installer around the built frontend in
-// ../dist, which talks straight to Supabase over HTTPS — plus a handful of
+// ../dist, which talks straight to Supabase over HTTPS - plus a handful of
 // native-only commands (mod timelog) for things the web view can't do
 // itself: capturing the screen and listening to keyboard/mouse activity
 // system-wide while an employee is clocked in via TimeLog.
@@ -16,6 +16,7 @@ fn main() {
             timelog::timelog_stop,
             timelog::timelog_drain_activity,
             timelog::timelog_capture_screenshot,
+            timelog::timelog_listener_error,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");

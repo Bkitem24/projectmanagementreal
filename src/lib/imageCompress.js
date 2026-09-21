@@ -1,4 +1,4 @@
-// Client-side image compression (canvas-based) for user-supplied images —
+// Client-side image compression (canvas-based) for user-supplied images -
 // profile photos and client photos. Screenshots are compressed separately,
 // on the Rust side at capture time (see src-tauri/), since re-encoding a
 // full screen capture through a JS canvas would mean shipping the

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Blue Kite Ops — design system v2
+   Blue Kite Ops - design system v2
    Palette: light blue gradients (brand/chrome) + white/black (surfaces/ink)
    + orange (accent/actions). Light mode is the default; dark mode can be
    forced with data-theme="dark" on <html> (see the toggle wired in main.js)
@@ -113,6 +113,8 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .role-current{display:flex;align-items:center;gap:8px;}
 .role-dot{width:10px;height:10px;border-radius:50%;flex:none;}
 .role-current-label{font-weight:600;font-size:14px;flex:1;}
+.identity-edit-btn{flex:none;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:7px;border:1px solid var(--line);background:var(--surface);color:var(--muted);cursor:pointer;transition:background .12s ease,color .12s ease;}
+.identity-edit-btn:hover{background:var(--blue-soft);color:var(--blue-2);border-color:var(--blue-soft);}
 .team-current-label{font-size:11px;color:var(--muted);margin-top:2px;}
 .presence-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--muted);box-shadow:0 0 0 2px var(--surface);}
 .presence-dot.online{background:var(--online);}
@@ -120,7 +122,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .nav-link{display:flex;align-items:center;gap:9px;padding:9px 10px 9px 13px;border-radius:8px;font-size:14px;font-weight:500;color:var(--ink-soft);text-decoration:none;position:relative;transition:background .15s ease,color .15s ease,transform .12s ease;}
 /* Root cause of "Admin nav visible to non-admins": the browser's built-in
    [hidden]{display:none} rule and .nav-link{display:flex} above have equal
-   specificity, and this stylesheet loads after the browser's default one —
+   specificity, and this stylesheet loads after the browser's default one -
    so .nav-link's display:flex was winning and silently overriding `hidden`
    on #navAdmin/#navTeam whenever main.js set adminNav.hidden=true. This
    re-asserts display:none for any nav-link actually marked hidden. */
@@ -244,28 +246,58 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .task-expand-btn{font-size:11.5px;color:var(--blue-2);background:none;border:none;cursor:pointer;padding:0;font-weight:600;margin-top:6px;}
 .task-expand-btn:hover{text-decoration:underline;}
 .task-collab{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:10px;}
-.collab-list{display:flex;flex-direction:column;gap:7px;}
-.comment-row{font-size:12.5px;background:var(--paper);border-radius:10px;padding:8px 10px;display:flex;flex-direction:column;gap:5px;}
+/* Discussion/comments - restyled (Phase 1 final fixes) to read like an
+   actual chat thread (Slack/ClickUp) instead of a flat stack of text:
+   avatar + grouped header per message, hover-revealed edit/delete, an
+   "(edited)" tag, and a distinct composer area at the bottom. */
+.collab-list{display:flex;flex-direction:column;gap:2px;}
+.collab-empty{font-size:12.5px;color:var(--muted);padding:10px 2px;}
+.comment-row{font-size:13px;display:flex;gap:9px;padding:6px 8px;border-radius:8px;transition:background .1s ease;}
+.comment-row:hover{background:var(--paper);}
+.comment-row .avatar{flex:0 0 auto;width:28px;height:28px;font-size:11.5px;}
+.comment-main{flex:1;min-width:0;}
 .comment-row-head{display:flex;align-items:center;gap:7px;}
 .comment-author{font-weight:600;}
-.comment-time{color:var(--muted);font-size:11px;margin-left:auto;}
-.comment-body{padding-left:23px;white-space:pre-wrap;word-break:break-word;line-height:1.4;}
-.link-row,.attachment-row{display:flex;align-items:center;gap:8px;font-size:12.5px;}
+.comment-time{color:var(--muted);font-size:11px;}
+.comment-edited-tag{color:var(--muted);font-size:11px;font-style:italic;}
+.comment-actions{display:flex;gap:2px;margin-left:auto;opacity:0;transition:opacity .1s ease;}
+.comment-row:hover .comment-actions,.link-row:hover .comment-actions{opacity:1;}
+.icon-btn{border:none;background:none;color:var(--muted);cursor:pointer;padding:3px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;}
+.icon-btn:hover{background:var(--line);color:var(--ink);}
+.comment-body{white-space:pre-wrap;word-break:break-word;line-height:1.45;margin-top:1px;}
+.comment-body a{color:var(--blue-2);}
+.comment-edit-box,.link-edit-box{display:flex;flex-direction:column;gap:6px;margin-top:3px;}
+.comment-edit-input{width:100%;min-height:52px;border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:7px 9px;font-size:13px;font-family:inherit;resize:vertical;}
+.comment-edit-actions{display:flex;gap:8px;}
+.link-edit-box{flex-direction:row;flex-wrap:wrap;align-items:center;flex:1;}
+.link-edit-url,.link-edit-label{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 9px;font-size:12.5px;}
+.link-edit-url{flex:2;min-width:140px;}
+.link-edit-label{flex:1;min-width:100px;}
+.collab-list.collab-links{gap:4px;margin-top:2px;}
+.link-row,.attachment-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 8px;border-radius:8px;}
+.link-row:hover{background:var(--paper);}
 .link-row a,.attachment-row a{color:var(--blue-2);text-decoration:none;}
 .link-row a:hover,.attachment-row a:hover{text-decoration:underline;}
+.link-icon{flex:0 0 auto;}
+.collab-composer{display:flex;flex-direction:column;gap:7px;margin-top:4px;padding-top:9px;border-top:1px solid var(--line);}
 .collab-input-row{display:flex;gap:8px;}
-.collab-input-row input{flex:1;border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:7px 10px;font-size:12.5px;}
+.collab-input-row input{flex:1;border:1px solid var(--line);background:var(--paper);border-radius:999px;padding:8px 14px;font-size:12.5px;}
+.collab-input-row .btn{border-radius:999px;}
 /* Attachments: image thumbnails you can actually preview, and a
-   type-appropriate icon for everything else — a step toward the "modern,
+   type-appropriate icon for everything else - a step toward the "modern,
    Slack-like" collaboration UX asked for, without a full redesign. */
 .attachment-grid{display:flex;flex-wrap:wrap;gap:9px;}
-.attachment-thumb{width:88px;cursor:pointer;transition:transform .12s ease;}
+.attachment-thumb{width:88px;position:relative;transition:transform .12s ease;}
 .attachment-thumb:hover{transform:scale(1.04);}
-.attachment-thumb img{width:88px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block;background:var(--paper);}
+.attachment-thumb img{width:88px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block;background:var(--paper);cursor:pointer;}
 .attachment-name{font-size:10px;color:var(--muted);display:block;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
-.attachment-file{font-size:12.5px;background:var(--paper);border-radius:8px;padding:6px 10px;}
-.attachment-file a{display:inline-flex;align-items:center;gap:7px;}
+.attachment-file{font-size:12.5px;background:var(--paper);border-radius:8px;padding:6px 10px;display:flex;align-items:center;gap:6px;}
+.attachment-file a{display:inline-flex;align-items:center;gap:7px;flex:1;min-width:0;}
 .attachment-file-icon{font-size:15px;}
+.attachment-thumb .attachment-delete{position:absolute;top:3px;right:3px;background:rgba(0,0,0,.55);color:#fff;opacity:0;}
+.attachment-thumb:hover .attachment-delete{opacity:1;}
+.attachment-thumb .attachment-delete:hover{background:rgba(0,0,0,.75);}
+.attachment-file .attachment-delete{margin-left:auto;flex:0 0 auto;}
 /* Full-screen image preview for attachment thumbnails. */
 .lightbox-frame{position:relative;max-width:92vw;max-height:92vh;}
 .lightbox-frame img{max-width:92vw;max-height:92vh;border-radius:10px;display:block;box-shadow:var(--shadow-lg);}
@@ -321,6 +353,12 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 @keyframes toastIn{from{opacity:0;transform:translateY(10px) scale(.96);}to{opacity:1;transform:translateY(0) scale(1);}}
 .toast.leaving{animation:toastOut .18s ease forwards;}
 @keyframes toastOut{to{opacity:0;transform:translateY(6px);}}
+
+#screenshotNotice.screenshot-notice{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:80;background:var(--ink);color:var(--paper);padding:10px 18px;border-radius:999px;font-size:12.5px;font-weight:600;box-shadow:var(--shadow-lg);display:flex;align-items:center;gap:8px;animation:screenshotIn .22s var(--ease);}
+#screenshotNotice.screenshot-notice svg{flex:0 0 auto;opacity:.9;}
+@keyframes screenshotIn{from{opacity:0;transform:translate(-50%,-10px);}to{opacity:1;transform:translate(-50%,0);}}
+#screenshotNotice.screenshot-notice.leaving{animation:screenshotOut .3s ease forwards;}
+@keyframes screenshotOut{to{opacity:0;transform:translate(-50%,-8px);}}
 
 /* ---------- auth screen ---------- */
 #authScreen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;position:relative;overflow:hidden;}
@@ -381,6 +419,28 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .shot-thumb:hover{transform:scale(1.03);box-shadow:var(--shadow);}
 .shot-thumb img{width:100%;height:100%;object-fit:cover;}
 .shot-time{position:absolute;bottom:0;left:0;right:0;background:linear-gradient(to top, rgba(0,0,0,.6), transparent);color:#fff;font-size:10.5px;padding:4px 6px;}
+.shot-grid.compact{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:9px;}
+
+/* TimeLog reorganized (Phase 1 final fixes) around clock-in sessions -
+   each card is one clock-in-to-clock-out span, with a Kimai/Upwork-style
+   activity bar (one segment per 5-minute activitySamples window) and that
+   session's own screenshots underneath, instead of one long flat grid with
+   no sense of which shift anything belonged to. */
+.session-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin-bottom:14px;box-shadow:var(--shadow-sm);}
+.session-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:10px;}
+.session-when{display:flex;align-items:center;gap:7px;font-size:14px;}
+.session-live-dot{width:8px;height:8px;border-radius:50%;background:var(--good);flex:none;animation:pulseDot 1.6s ease-in-out infinite;}
+@keyframes pulseDot{0%,100%{opacity:1;}50%{opacity:.35;}}
+.session-duration{font-size:12.5px;color:var(--muted);font-weight:600;}
+.session-activity{margin-bottom:4px;}
+.activity-bar{display:flex;gap:2px;height:22px;border-radius:5px;overflow:hidden;}
+.activity-seg{flex:1;min-width:2px;background:var(--line);cursor:default;}
+.activity-seg.activity-low{background:var(--line);}
+.activity-seg.activity-med{background:var(--waiting);}
+.activity-seg.activity-high{background:var(--good);}
+.session-activity-empty{font-size:12px;color:var(--muted);padding:4px 0;}
+.session-activity-stats{display:flex;gap:14px;font-size:11px;color:var(--muted);margin-top:5px;}
+.session-shots{margin-top:10px;}
 
 /* ---------- Connect (presence + calling) ---------- */
 .roster-row{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--surface);margin-bottom:8px;transition:box-shadow .15s ease;}
@@ -395,7 +455,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 
 /* ---------- music player ---------- */
 .music-player{display:flex;flex-direction:column;gap:7px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:8px;box-shadow:var(--shadow-sm);}
-/* Kept small but always visible (never display:none) — YouTube's embed
+/* Kept small but always visible (never display:none) - YouTube's embed
    terms require the player to stay visible while playing; see the header
    comment in src/lib/music.js. */
 .music-frame{width:100%;aspect-ratio:16/9;max-height:96px;border-radius:8px;overflow:hidden;background:var(--paper);flex:none;}

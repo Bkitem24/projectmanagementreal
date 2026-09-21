@@ -5,7 +5,7 @@ import { listTeams, createTeam, assignTeamManager, createInvite, listInvites, li
 import { startPresence, stopPresence, isOnline, onPresenceChange } from './lib/presence.js';
 import { compressImage } from './lib/imageCompress.js';
 import { imageHasFace } from './lib/faceDetect.js';
-import { uploadFile, fileUrl, fetchProtectedUrl, downloadProtectedFile, r2Configured } from './lib/r2.js';
+import { uploadFile, fileUrl, fetchProtectedUrl, downloadProtectedFile, deleteRemoteFile, r2Configured } from './lib/r2.js';
 import * as timelog from './lib/timelog.js';
 import * as musicPlayer from './lib/music.js';
 import { MOODS } from './lib/music.js';
@@ -23,7 +23,7 @@ var ROLES = [
 ];
 var INVITABLE_ROLES = ROLES.filter(function(r){ return r.key!=='manager' && r.key!=='admin'; });
 // Everything an Admin can hand out to an existing employee or a fresh
-// invite, short of the (single, effectively-permanent) Admin role itself —
+// invite, short of the (single, effectively-permanent) Admin role itself -
 // this is what lets multiple people share 'manager' on the same team, since
 // it's just a per-person role+team assignment, not a one-slot field.
 var ASSIGNABLE_ROLES = ROLES.filter(function(r){ return r.key!=='admin'; });
@@ -33,6 +33,25 @@ var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday'
 function roleOf(key){ for(var i=0;i<ROLES.length;i++){ if(ROLES[i].key===key) return ROLES[i]; } return null; }
 function ordinal(n){ if(n===-1) return 'Last'; var s=['','1st','2nd','3rd','4th']; return s[n]||(n+'th'); }
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
+// Turns bare URLs typed into plain comment text into real clickable links -
+// previously only the dedicated "Paste a link…" field produced a clickable
+// result, so a URL typed straight into a comment just sat there as text.
+// Operates on already-escapeHtml()'d text (safe: the pattern below can't
+// match anything that would introduce a tag), so it's fine to inject the
+// resulting <a> markup straight into innerHTML.
+function linkifyHtml(escaped){
+  return escaped.replace(/((?:https?:\/\/|www\.)[^\s<]+)/gi, function(match){
+    // Trim off trailing punctuation that's almost always part of the
+    // sentence, not the URL (e.g. "check this out: https://x.com/y." or a
+    // link in parentheses).
+    var trail = '';
+    var m = match.match(/[).,;:!?]+$/);
+    if(m){ trail = m[0]; match = match.slice(0, -trail.length); }
+    if(!match) return match + trail;
+    var href = /^https?:\/\//i.test(match) ? match : 'https://' + match;
+    return '<a href="' + href + '" target="_blank" rel="noopener">' + match + '</a>' + trail;
+  });
+}
 function todayISO(){ var d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function isoDate(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function fmtDate(iso){ if(!iso) return ''; var p=iso.split('-'); var d=new Date(+p[0],+p[1]-1,+p[2]); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
@@ -91,7 +110,36 @@ function showToast(type, message){
     setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); }, 200);
   }, 3400);
 }
-function errMsg(err){ return (err && err.message) ? err.message : 'Something went wrong — please try again.'; }
+
+// A short beep, embedded as base64 so a screenshot notice never depends on
+// an extra asset file shipping correctly. Generated once (8kHz, ~0.15s tone
+// with a linear fade-out) - see the punch-list notes for how it was made.
+var SCREENSHOT_BEEP = 'data:audio/wav;base64,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';
+
+// Brief on-screen notice + sound when a TimeLog screenshot is captured, so
+// it's something the employee can actually notice happening in the moment
+// rather than a silent background action. Visible ~5s total, separate from
+// the toast system (top-of-screen, camera icon) so it doesn't get lost
+// among ordinary error/success toasts.
+function showScreenshotNotice(){
+  var existing = document.getElementById('screenshotNotice');
+  if(existing && existing.parentNode) existing.parentNode.removeChild(existing);
+  var el = document.createElement('div');
+  el.id = 'screenshotNotice';
+  el.className = 'screenshot-notice';
+  el.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z"/><circle cx="12" cy="13" r="4"/></svg><span>Screenshot captured</span>';
+  document.body.appendChild(el);
+  try{
+    var audio = new Audio(SCREENSHOT_BEEP);
+    audio.volume = 0.5;
+    audio.play().catch(function(){});
+  }catch(e){}
+  setTimeout(function(){
+    el.classList.add('leaving');
+    setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); }, 300);
+  }, 4700);
+}
+function errMsg(err){ return (err && err.message) ? err.message : 'Something went wrong - please try again.'; }
 
 // ---------- app state ----------
 var app = document.getElementById('app');
@@ -117,16 +165,16 @@ async function refreshTeamsCache(){
 async function refreshServicesCache(){
   try{ servicesCache = await listServices(); }catch(e){ servicesCache = []; }
 }
-function teamName(id){ return (teamsCache[id] && teamsCache[id].name) || '—'; }
+function teamName(id){ return (teamsCache[id] && teamsCache[id].name) || '-'; }
 // Every team <select> in the app used to list teams in creation order
-// (teamsCache/listTeams() is ordered by createdAt) — alphabetical is what
+// (teamsCache/listTeams() is ordered by createdAt) - alphabetical is what
 // people actually expect once there's more than a couple of teams. This is
 // the one place that builds team <option> lists now.
 function sortedTeamList(){
   return Object.keys(teamsCache).map(function(id){ return teamsCache[id]; }).sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
 }
 function teamOptionsHtml(selectedId, includeBlank){
-  var opts = (includeBlank ? '<option value="">— no team —</option>' : '') +
+  var opts = (includeBlank ? '<option value="">- no team -</option>' : '') +
     sortedTeamList().map(function(t){ return '<option value="'+t.id+'"'+(t.id===selectedId?' selected':'')+'>'+escapeHtml(t.name)+'</option>'; }).join('');
   return opts;
 }
@@ -146,7 +194,12 @@ function renderIdentityCard(){
     '<div style="display:flex;align-items:center;gap:9px;">'+avatar+
     '<div style="min-width:0;flex:1;"><div class="role-current-label" style="line-height:1.15;">'+escapeHtml((myProfile&&myProfile.displayName)||'')+'</div>'+
     '<div class="team-current-label"><span class="role-dot" style="background:'+(r?r.color:'#888')+';display:inline-block;margin-right:5px;"></span>'+escapeHtml(r?r.label:myRole)+(myTeamId?' · '+escapeHtml(teamName(myTeamId)):'')+'</div></div>'+
-    '<button type="button" id="editProfileBtn" title="Edit your profile" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:4px;flex:none;">✎</button></div>';
+    // Used to be a bare 13px "✎" character with no border or background - a
+    // real button, but nothing about it looked clickable, which is almost
+    // certainly why "there's no way to change my profile picture or name"
+    // kept coming up even after this was built. A visibly bordered icon
+    // button reads as UI chrome instead of decoration.
+    '<button type="button" id="editProfileBtn" class="identity-edit-btn" title="Edit your profile - name, photo, email, password">'+ICON_PENCIL+'</button></div>';
   var editBtn = document.getElementById('editProfileBtn');
   if(editBtn) editBtn.addEventListener('click', openEditProfileModal);
 }
@@ -164,7 +217,7 @@ function openEditProfileModal(){
       (currentAvatar ? '<img src="'+escapeHtml(currentAvatar)+'">' : '<div class="avatar-drop-hint">Click to choose a photo</div>')+
       '<input type="file" accept="image/*" id="profileAvatarInput" style="display:none;"></div></div>'+
     '<div class="field"><label>Your name</label><input name="displayName" type="text" value="'+escapeHtml((myProfile&&myProfile.displayName)||'')+'" required></div>'+
-    '<div class="field"><label>Email</label><input name="email" type="email" value="'+escapeHtml((myProfile&&myProfile.email)||'')+'"><div class="field-hint">Changing this sends a confirmation link to your new address — the change only takes effect once you click it.</div></div>'+
+    '<div class="field"><label>Email</label><input name="email" type="email" value="'+escapeHtml((myProfile&&myProfile.email)||'')+'"><div class="field-hint">Changing this sends a confirmation link to your new address - the change only takes effect once you click it.</div></div>'+
     '<div class="field"><label>New password (leave blank to keep your current one)</label><input name="password" type="password" minlength="6" placeholder="••••••••"></div>',
     function(fd){
       var displayName = (fd.get('displayName')||'').trim();
@@ -184,7 +237,7 @@ function openEditProfileModal(){
       if(newPassword) work.push(updatePassword(newPassword));
       Promise.all(work).then(function(){
         closeModal();
-        showToast('success','Profile updated'+(newEmail && myProfile && newEmail!==myProfile.email ? ' — check your inbox to confirm the new email' : ''));
+        showToast('success','Profile updated'+(newEmail && myProfile && newEmail!==myProfile.email ? ' - check your inbox to confirm the new email' : ''));
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Save changes');
 
@@ -195,14 +248,14 @@ function openEditProfileModal(){
     var file = input.files[0]; if(!file) return;
     drop.innerHTML = '<div class="avatar-drop-hint">Checking for a face…</div>';
     imageHasFace(file).then(function(ok){
-      if(!ok){ drop.innerHTML = '<div class="avatar-drop-hint">No face detected — click to try another photo.</div>'; drop.appendChild(input); pendingProfileAvatarBlob=null; return; }
+      if(!ok){ drop.innerHTML = '<div class="avatar-drop-hint">No face detected - click to try another photo.</div>'; drop.appendChild(input); pendingProfileAvatarBlob=null; return; }
       return compressImage(file, {maxWidth:400,maxHeight:400,quality:.85}).then(function(blob){
         pendingProfileAvatarBlob = blob;
         var url = URL.createObjectURL(blob);
         drop.innerHTML = '<img src="'+url+'">';
         drop.appendChild(input);
       });
-    }).catch(function(){ drop.innerHTML = '<div class="avatar-drop-hint">Could not check this photo — click to try another.</div>'; drop.appendChild(input); });
+    }).catch(function(){ drop.innerHTML = '<div class="avatar-drop-hint">Could not check this photo - click to try another.</div>'; drop.appendChild(input); });
   });
 }
 
@@ -355,7 +408,7 @@ document.getElementById('navToggle').addEventListener('click', function(){
 // ---------- SPOTLIGHT (Employee of the Month) ----------
 function renderSpotlight(container){
   var monthKey = currentMonthKey();
-  // Was a one-time .get() — meaning it only ever loaded when this page was
+  // Was a one-time .get() - meaning it only ever loaded when this page was
   // first opened. If Admin changed the spotlight while an employee already
   // had Home open, they'd never see it until they navigated away and back.
   // Switched to .onSnapshot() so it updates live like everything else.
@@ -365,7 +418,7 @@ function renderSpotlight(container){
       // This used to run right after the outer .get()/.onSnapshot()
       // callback fired, but for the "spotlight already set" branch below,
       // the actual innerHTML write happens one tick later inside
-      // fetchProfiles().then(...) — so the button didn't exist in the DOM
+      // fetchProfiles().then(...) - so the button didn't exist in the DOM
       // yet when this looked for it, and the click handler silently never
       // attached. That's the "Edit button does nothing" bug: the button
       // was real, it just had no listener. Now this only runs after the
@@ -418,7 +471,7 @@ function renderHome(){
   paint(
     '<div id="spotlightBox"></div>'+
     '<div class="page-head"><div><div class="eyebrow">Overview</div><h1 class="page-title">Clients & Shows</h1>'+
-    '<div class="page-sub">Every project Blue Kite produces for'+(myTeamId&&!isAdmin()?' — '+escapeHtml(teamName(myTeamId)):'')+'.</div></div></div>'+
+    '<div class="page-sub">Every project Blue Kite produces for'+(myTeamId&&!isAdmin()?' - '+escapeHtml(teamName(myTeamId)):'')+'.</div></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Due soon</h2></div>'+
     '<div id="dueSoonStrip" class="strip"><div class="skeleton" style="height:44px;"></div></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Clients</h2></div>'+
@@ -430,13 +483,13 @@ function renderHome(){
   var unsub1 = db.collection('episodes').where('dueDate','>=',today).orderBy('dueDate','asc').limit(6).onSnapshot(function(snap){
     var strip = document.getElementById('dueSoonStrip');
     if(!strip) return;
-    if(snap.empty){ strip.innerHTML = '<div class="empty-state">Nothing due yet — generate episodes from a client\'s schedule.</div>'; return; }
+    if(snap.empty){ strip.innerHTML = '<div class="empty-state">Nothing due yet - generate episodes from a client\'s schedule.</div>'; return; }
     strip.innerHTML = snap.docs.map(function(d){
       var e = d.data();
       var status = dueStatus(e.dueDate,false);
       return '<a class="strip-item" href="#/episode/'+d.id+'">'+
         '<span class="strip-dot" style="background:var(--blue)"></span>'+
-        '<div class="strip-main"><div class="strip-title">'+escapeHtml(e.clientName)+' — '+escapeHtml(e.title)+'</div>'+
+        '<div class="strip-main"><div class="strip-title">'+escapeHtml(e.clientName)+' - '+escapeHtml(e.title)+'</div>'+
         '<div class="strip-sub">'+fmtDate(e.dueDate)+(e.paid?' · Paid $'+e.amount:'')+'</div></div>'+
         '<span class="badge badge-'+status+'">'+statusLabel(status)+'</span></a>';
     }).join('');
@@ -453,7 +506,7 @@ function renderHome(){
         '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\')':'background:linear-gradient(135deg,'+color+',var(--line-soft))')+'"></div>'+
         '<div class="client-card-body">'+
         '<div class="client-card-name">'+escapeHtml(c.name)+'</div>'+
-        '<div class="client-card-host">Hosted by '+escapeHtml(c.hostName||'—')+'</div>'+
+        '<div class="client-card-host">Hosted by '+escapeHtml(c.hostName||'-')+'</div>'+
         '<div class="client-card-tagline">'+escapeHtml(c.tagline||'')+'</div>'+
         '<div class="client-card-foot"><span>'+(c.services?c.services.length:0)+' services</span>'+(isAdmin()?'<span class="badge badge-team">'+escapeHtml(teamName(c.teamId))+'</span>':'')+(c.example?'<span class="badge badge-upcoming">Example</span>':'<span>View board →</span>')+'</div>'+
         '</div></a>';
@@ -503,7 +556,7 @@ function renderClient(clientId){
     var mgr = canManage();
     app.innerHTML =
       '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+'</h1>'+
-      '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'—')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div>'+
+      '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'-')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div>'+
       (mgr?'<button type="button" class="btn btn-primary btn-sm" id="genEpisodesBtn">Generate upcoming episodes</button>':'')+
       '</div>'+
       '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="margin-bottom:18px;border-radius:14px;height:150px;position:relative;'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\');background-size:cover;background-position:center;':'background:linear-gradient(135deg,var(--blue-soft),var(--line-soft));')+'">'+
@@ -548,7 +601,7 @@ function renderClient(clientId){
       }).then(function(created){
         genBtn.disabled=false; genBtn.textContent='Generate upcoming episodes';
         var made = created.filter(Boolean).length;
-        showToast('success', made ? ('Generated '+made+' new episode'+(made===1?'':'s')) : 'Already up to date — nothing new to generate.');
+        showToast('success', made ? ('Generated '+made+' new episode'+(made===1?'':'s')) : 'Already up to date - nothing new to generate.');
       }).catch(function(err){ genBtn.disabled=false; genBtn.textContent='Generate upcoming episodes'; showToast('error', errMsg(err)); });
     });
 
@@ -576,7 +629,7 @@ function renderClient(clientId){
       });
     });
 
-    // Reassigning a client to a different team — Admin-only per the
+    // Reassigning a client to a different team - Admin-only per the
     // permissions matrix (a Manager can't move a client out of their own
     // team). This is the "editable afterward" piece for clients that came
     // in without a team (see schema_v3.sql's Team A backfill).
@@ -726,7 +779,7 @@ function wireStepDrag(box, tplId, steps){
 
 function openAddServiceToClientModal(clientId, existing){
   var available = servicesForMyScope().filter(function(s){ return existing.indexOf(s.name)===-1; });
-  if(!available.length){ showToast('error','No more services in the vocabulary to add — create a new service type first.'); return; }
+  if(!available.length){ showToast('error','No more services in the vocabulary to add - create a new service type first.'); return; }
   openModal('Add a service', '<div class="field"><label>Choose from the vocabulary</label>'+
     available.map(function(s){ return '<div class="check-row"><input type="checkbox" name="svc" value="'+escapeHtml(s.name)+'" id="svc_'+escapeHtml(s.id)+'"><label for="svc_'+escapeHtml(s.id)+'">'+escapeHtml(s.name)+(s.scope==='global'?' <span class="tag tag-global" style="margin:0;">global</span>':'')+'</label></div>'; }).join('')+
     '</div>',
@@ -742,7 +795,7 @@ function openAddServiceToClientModal(clientId, existing){
 
 function openCreateServiceTypeModal(clientIdToAttach){
   // Admin isn't on any one Team, so "Just my Team" (which reads fine for a
-  // Manager) doesn't make sense for them — they need to actually pick which
+  // Manager) doesn't make sense for them - they need to actually pick which
   // Team a team-scoped service belongs to. The picker itself already
   // existed and worked; this was purely a confusing-label + always-visible
   // issue, now fixed to only show when it's actually relevant.
@@ -896,7 +949,7 @@ function renderEpisode(episodeId){
       (canManage()?'<div style="margin-top:14px;"><button type="button" class="btn btn-sm" id="addCustomTaskBtn">+ Add custom task</button></div>':'')+
       '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>'+
       '<div class="section"><div class="section-head"><h2 class="section-title">Discussion</h2></div>'+
-      '<div class="page-sub" style="margin:-6px 0 12px;">General chat about this episode as a whole — for a specific subtask, use "Comments, links & files" on that task instead.</div>'+
+      '<div class="page-sub" style="margin:-6px 0 12px;">General chat about this episode as a whole - for a specific subtask, use "Comments, links & files" on that task instead.</div>'+
       '<div id="epCollab"></div></div>';
 
     var addCustomBtn = document.getElementById('addCustomTaskBtn');
@@ -1009,7 +1062,7 @@ function attachmentIcon(a){
   if(/\.(ppt|pptx)$/.test(name)) return '📽️';
   return '📎';
 }
-// A simple full-screen preview for image attachments — clicking a thumbnail
+// A simple full-screen preview for image attachments - clicking a thumbnail
 // used to just be a download link with no way to actually look at the
 // picture without saving it to disk first.
 function showImageLightbox(url, title){
@@ -1022,12 +1075,12 @@ function showImageLightbox(url, title){
   document.getElementById('modalBackdrop').addEventListener('click', function(e){ if(e.target.id==='modalBackdrop') closeModal(); });
 }
 
-// kind is 'task' or 'episode' — same comments/links/attachments UI, just
+// kind is 'task' or 'episode' - same comments/links/attachments UI, just
 // pointed at a different set of tables (see supabase/schema_v2.sql for
 // taskComments/taskLinks/taskAttachments and schema_v4.sql for the episode-
 // level equivalents added for the general per-episode discussion thread).
 var COLLAB_TABLES = {
-  // Both prefixes start with 'attachments/' on purpose — worker-r2 only
+  // Both prefixes start with 'attachments/' on purpose - worker-r2 only
   // requires an authenticated GET for keys under 'screenshots/' or
   // 'attachments/' (see worker-r2/src/index.js's isSensitiveKey()); a
   // different prefix here would have made episode-level files readable by
@@ -1036,6 +1089,16 @@ var COLLAB_TABLES = {
   episode: { idField:'episodeId', comments:'episodeComments', links:'episodeLinks', attachments:'episodeAttachments', keyPrefix:'attachments/episode/' }
 };
 function loadTaskCollab(taskId, panel){ return loadCollab('task', taskId, panel); }
+var ICON_PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+var ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>';
+// kind is 'task' or 'episode' - same comments/links/attachments UI, just
+// pointed at a different set of tables. Rewritten (Phase 1 final fixes) to
+// feel like an actual chat/discussion tool instead of a flat list: grouped
+// author/avatar rows, inline edit-in-place with an "(edited)" tag, delete
+// with confirmation, and hover-revealed actions - closer to Slack/ClickUp
+// than the plain stacked-text version this replaced. Edit is author-only;
+// delete is the author or a Manager/Admin (moderation), matching how those
+// same apps split the two permissions - see supabase/schema_v5.sql.
 function loadCollab(kind, id, panel){
   var cfg = COLLAB_TABLES[kind];
   panel.innerHTML = '<div class="skeleton" style="height:40px;"></div>';
@@ -1047,90 +1110,213 @@ function loadCollab(kind, id, panel){
     var comments = res[0].data||[], links = res[1].data||[], attachments = res[2].data||[];
     var ids = comments.map(function(c){return c.authorId;}).concat(links.map(function(l){return l.addedBy;})).concat(attachments.map(function(a){return a.uploadedBy;})).filter(Boolean);
     return fetchProfiles(ids).then(function(ps){
+      var editingComment = null, editingLink = null; // id of the row currently in inline-edit mode, if any
       function who(uid){ return (ps[uid]&&ps[uid].name)||'Someone'; }
-      function authorHead(uid, when){
+      function avatarFor(uid){
         var p = ps[uid]||{};
-        var av = p.avatarUrl ? '<span class="avatar" style="background-image:url(\''+escapeHtml(p.avatarUrl)+'\')"></span>' : '<span class="avatar" style="background:'+(p.color||'#888')+'">'+escapeHtml(p.initial||'?')+'</span>';
-        return '<div class="comment-row-head">'+av+'<span class="comment-author">'+escapeHtml(who(uid))+'</span><span class="comment-time">'+fmtDateTime(when)+'</span></div>';
+        return p.avatarUrl ? '<span class="avatar" style="background-image:url(\''+escapeHtml(p.avatarUrl)+'\')"></span>' : '<span class="avatar" style="background:'+(p.color||'#888')+'">'+escapeHtml(p.initial||'?')+'</span>';
       }
-      panel.innerHTML =
-        (comments.length?'<div class="collab-list">'+comments.map(function(c){
-          return '<div class="comment-row">'+authorHead(c.authorId, c.createdAt)+'<div class="comment-body">'+escapeHtml(c.body)+'</div></div>';
-        }).join('')+'</div>':'')+
-        (links.length?'<div class="collab-list">'+links.map(function(l){ return '<div class="link-row">🔗 <a href="'+escapeHtml(l.url)+'" target="_blank" rel="noopener">'+escapeHtml(l.label||l.url)+'</a></div>'; }).join('')+'</div>':'')+
-        (attachments.length?'<div class="attachment-grid">'+attachments.map(function(a){
-          if(isImageAttachment(a)) return '<div class="attachment-thumb" data-img-key="'+escapeHtml(a.r2Key)+'" data-img-name="'+escapeHtml(a.fileName)+'"><img loading="lazy"><span class="attachment-name">'+escapeHtml(a.fileName)+'</span></div>';
-          return '<div class="attachment-file"><a href="#" data-download-key="'+escapeHtml(a.r2Key)+'" data-download-name="'+escapeHtml(a.fileName)+'"><span class="attachment-file-icon">'+attachmentIcon(a)+'</span>'+escapeHtml(a.fileName)+'</a></div>';
-        }).join('')+'</div>':'')+
-        '<div class="collab-input-row"><input type="text" id="commentInput_'+id+'" placeholder="Add a comment…"><button type="button" class="btn btn-sm" id="commentSend_'+id+'">Send</button></div>'+
-        '<div class="collab-input-row"><input type="url" id="linkInput_'+id+'" placeholder="Paste a link…"><button type="button" class="btn btn-sm" id="linkSend_'+id+'">Add</button></div>'+
-        '<div class="collab-input-row"><label class="btn btn-sm" style="cursor:pointer;">Attach file<input type="file" id="fileInput_'+id+'" style="display:none;"></label><span id="fileStatus_'+id+'" style="font-size:11.5px;color:var(--muted);"></span></div>';
+      function canEditRow(authorUid){ return authorUid===myUid; }
+      function canDeleteRow(authorUid){ return authorUid===myUid || canManage(); }
+      function actionButtons(editAttr, deleteAttr, authorUid){
+        var edit = canEditRow(authorUid) ? '<button type="button" class="icon-btn" data-'+editAttr+' title="Edit">'+ICON_PENCIL+'</button>' : '';
+        var del = canDeleteRow(authorUid) ? '<button type="button" class="icon-btn" data-'+deleteAttr+' title="Delete">'+ICON_TRASH+'</button>' : '';
+        return (edit||del) ? '<span class="comment-actions">'+edit+del+'</span>' : '';
+      }
 
-      document.getElementById('commentSend_'+id).addEventListener('click', function(){
-        var input = document.getElementById('commentInput_'+id);
-        var body = input.value.trim();
-        if(!body) return;
-        var row = { id:'cm_'+uid8(), authorId: myUid, body: body };
-        row[cfg.idField] = id;
-        supabase.from(cfg.comments).insert(row).then(function(res2){
-          if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-          input.value=''; loadCollab(kind, id, panel);
-        });
-      });
-      document.getElementById('linkSend_'+id).addEventListener('click', function(){
-        var input = document.getElementById('linkInput_'+id);
-        var url = input.value.trim();
-        if(!url) return;
-        var row = { id:'lk_'+uid8(), addedBy: myUid, url: url };
-        row[cfg.idField] = id;
-        supabase.from(cfg.links).insert(row).then(function(res2){
-          if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-          input.value=''; loadCollab(kind, id, panel);
-        });
-      });
-      Array.prototype.forEach.call(panel.querySelectorAll('[data-img-key]'), function(thumb){
-        var key = thumb.getAttribute('data-img-key');
-        var name = thumb.getAttribute('data-img-name');
-        var img = thumb.querySelector('img');
-        fetchProtectedUrl(key).then(function(url){
-          img.src = url;
-          thumb.addEventListener('click', function(){ showImageLightbox(url, name); });
-        }).catch(function(){ thumb.style.opacity='.4'; });
-      });
-      Array.prototype.forEach.call(panel.querySelectorAll('[data-download-key]'), function(a){
-        a.addEventListener('click', function(ev){
-          ev.preventDefault();
-          if(a.dataset.downloading) return; // ignore rapid double-clicks while one is already in flight
-          a.dataset.downloading = '1';
-          var originalText = a.textContent;
-          a.textContent = 'Downloading…';
-          downloadProtectedFile(a.getAttribute('data-download-key'), a.getAttribute('data-download-name'))
-            .then(function(saved){
-              a.textContent = originalText;
-              delete a.dataset.downloading;
-              if(saved) showToast('success', 'Downloaded '+(a.getAttribute('data-download-name')||'file'));
-            })
-            .catch(function(err){
-              a.textContent = originalText;
-              delete a.dataset.downloading;
-              showToast('error', errMsg(err));
-            });
-        });
-      });
-      document.getElementById('fileInput_'+id).addEventListener('change', function(ev){
-        var file = ev.target.files[0]; if(!file) return;
-        var statusEl = document.getElementById('fileStatus_'+id);
-        statusEl.textContent = 'Uploading…';
-        var key = cfg.keyPrefix+id+'/'+Date.now()+'_'+file.name;
-        uploadFile(file, key).then(function(){
-          var row = { id:'att_'+uid8(), uploadedBy: myUid, r2Key:key, fileName:file.name, fileType:file.type, fileSize:file.size };
+      function renderComment(c){
+        if(editingComment===c.id){
+          return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
+            '<div class="comment-main"><div class="comment-row-head"><span class="comment-author">'+escapeHtml(who(c.authorId))+'</span></div>'+
+            '<div class="comment-edit-box"><textarea class="comment-edit-input" data-comment-edit-input>'+escapeHtml(c.body)+'</textarea>'+
+            '<div class="comment-edit-actions"><button type="button" class="btn btn-sm" data-save-comment="'+c.id+'">Save</button><button type="button" class="btn btn-sm btn-ghost" data-cancel-comment>Cancel</button></div></div></div></div>';
+        }
+        return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
+          '<div class="comment-main"><div class="comment-row-head">'+
+          '<span class="comment-author">'+escapeHtml(who(c.authorId))+'</span>'+
+          '<span class="comment-time">'+fmtDateTime(c.createdAt)+'</span>'+
+          (c.editedAt?'<span class="comment-edited-tag">(edited)</span>':'')+
+          actionButtons('edit-comment="'+c.id+'"', 'delete-comment="'+c.id+'"', c.authorId)+
+          '</div><div class="comment-body">'+linkifyHtml(escapeHtml(c.body))+'</div></div></div>';
+      }
+      function renderLink(l){
+        if(editingLink===l.id){
+          return '<div class="link-row" data-id="'+l.id+'"><span class="link-icon">🔗</span>'+
+            '<div class="link-edit-box"><input type="url" class="link-edit-url" data-link-edit-url value="'+escapeHtml(l.url)+'" placeholder="URL">'+
+            '<input type="text" class="link-edit-label" data-link-edit-label value="'+escapeHtml(l.label||'')+'" placeholder="Label (optional)">'+
+            '<button type="button" class="btn btn-sm" data-save-link="'+l.id+'">Save</button><button type="button" class="btn btn-sm btn-ghost" data-cancel-link>Cancel</button></div></div>';
+        }
+        return '<div class="link-row" data-id="'+l.id+'"><span class="link-icon">🔗</span>'+
+          '<a href="'+escapeHtml(l.url)+'" target="_blank" rel="noopener">'+escapeHtml(l.label||l.url)+'</a>'+
+          (l.editedAt?'<span class="comment-edited-tag">(edited)</span>':'')+
+          actionButtons('edit-link="'+l.id+'"', 'delete-link="'+l.id+'"', l.addedBy)+
+          '</div>';
+      }
+      function attachmentDeleteBtn(a){
+        return canDeleteRow(a.uploadedBy) ? '<button type="button" class="icon-btn attachment-delete" data-delete-attachment="'+a.id+'" data-key="'+escapeHtml(a.r2Key)+'" title="Delete">'+ICON_TRASH+'</button>' : '';
+      }
+
+      function render(){
+        panel.innerHTML =
+          '<div class="collab-list">'+
+            (comments.length ? comments.map(renderComment).join('') : '<div class="collab-empty">No comments yet - start the discussion below.</div>') +
+          '</div>'+
+          (links.length?'<div class="collab-list collab-links">'+links.map(renderLink).join('')+'</div>':'')+
+          (attachments.length?'<div class="attachment-grid">'+attachments.map(function(a){
+            if(isImageAttachment(a)) return '<div class="attachment-thumb" data-img-key="'+escapeHtml(a.r2Key)+'" data-img-name="'+escapeHtml(a.fileName)+'"><img loading="lazy"><span class="attachment-name">'+escapeHtml(a.fileName)+'</span>'+attachmentDeleteBtn(a)+'</div>';
+            return '<div class="attachment-file"><a href="#" data-download-key="'+escapeHtml(a.r2Key)+'" data-download-name="'+escapeHtml(a.fileName)+'"><span class="attachment-file-icon">'+attachmentIcon(a)+'</span>'+escapeHtml(a.fileName)+'</a>'+attachmentDeleteBtn(a)+'</div>';
+          }).join('')+'</div>':'')+
+          '<div class="collab-composer">'+
+          '<div class="collab-input-row"><input type="text" id="commentInput_'+id+'" placeholder="Message the team…"><button type="button" class="btn btn-sm" id="commentSend_'+id+'">Send</button></div>'+
+          '<div class="collab-input-row"><input type="url" id="linkInput_'+id+'" placeholder="Paste a link…"><button type="button" class="btn btn-sm" id="linkSend_'+id+'">Add</button></div>'+
+          '<div class="collab-input-row"><label class="btn btn-sm" style="cursor:pointer;">Attach file<input type="file" id="fileInput_'+id+'" style="display:none;"></label><span id="fileStatus_'+id+'" style="font-size:11.5px;color:var(--muted);"></span></div>'+
+          '</div>';
+        wire();
+      }
+
+      function wire(){
+        document.getElementById('commentSend_'+id).addEventListener('click', function(){
+          var input = document.getElementById('commentInput_'+id);
+          var body = input.value.trim();
+          if(!body) return;
+          var row = { id:'cm_'+uid8(), authorId: myUid, body: body };
           row[cfg.idField] = id;
-          return supabase.from(cfg.attachments).insert(row);
-        }).then(function(res2){
-          if(res2 && res2.error) throw res2.error;
-          loadCollab(kind, id, panel);
-        }).catch(function(err){ statusEl.textContent=''; showToast('error', errMsg(err)); });
-      });
+          supabase.from(cfg.comments).insert(row).then(function(res2){
+            if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+            input.value=''; loadCollab(kind, id, panel);
+          });
+        });
+        document.getElementById('commentInput_'+id).addEventListener('keydown', function(ev){
+          if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); document.getElementById('commentSend_'+id).click(); }
+        });
+        document.getElementById('linkSend_'+id).addEventListener('click', function(){
+          var input = document.getElementById('linkInput_'+id);
+          var url = input.value.trim();
+          if(!url) return;
+          var row = { id:'lk_'+uid8(), addedBy: myUid, url: url };
+          row[cfg.idField] = id;
+          supabase.from(cfg.links).insert(row).then(function(res2){
+            if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+            input.value=''; loadCollab(kind, id, panel);
+          });
+        });
+        document.getElementById('fileInput_'+id).addEventListener('change', function(ev){
+          var file = ev.target.files[0]; if(!file) return;
+          var statusEl = document.getElementById('fileStatus_'+id);
+          statusEl.textContent = 'Uploading…';
+          var key = cfg.keyPrefix+id+'/'+Date.now()+'_'+file.name;
+          uploadFile(file, key).then(function(){
+            var row = { id:'att_'+uid8(), uploadedBy: myUid, r2Key:key, fileName:file.name, fileType:file.type, fileSize:file.size };
+            row[cfg.idField] = id;
+            return supabase.from(cfg.attachments).insert(row);
+          }).then(function(res2){
+            if(res2 && res2.error) throw res2.error;
+            loadCollab(kind, id, panel);
+          }).catch(function(err){ statusEl.textContent=''; showToast('error', errMsg(err)); });
+        });
+
+        // ---- comment edit / delete ----
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-edit-comment]'), function(btn){
+          btn.addEventListener('click', function(){ editingComment = btn.getAttribute('data-edit-comment'); render(); });
+        });
+        var cancelCommentBtn = panel.querySelector('[data-cancel-comment]');
+        if(cancelCommentBtn) cancelCommentBtn.addEventListener('click', function(){ editingComment = null; render(); });
+        var saveCommentBtn = panel.querySelector('[data-save-comment]');
+        if(saveCommentBtn) saveCommentBtn.addEventListener('click', function(){
+          var cid = saveCommentBtn.getAttribute('data-save-comment');
+          var newBody = panel.querySelector('[data-comment-edit-input]').value.trim();
+          if(!newBody) return;
+          supabase.from(cfg.comments).update({ body: newBody, editedAt: new Date().toISOString() }).eq('id', cid).then(function(res2){
+            if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+            editingComment = null; loadCollab(kind, id, panel);
+          });
+        });
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-delete-comment]'), function(btn){
+          btn.addEventListener('click', function(){
+            if(!confirm('Delete this comment?')) return;
+            supabase.from(cfg.comments).delete().eq('id', btn.getAttribute('data-delete-comment')).then(function(res2){
+              if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+              loadCollab(kind, id, panel);
+            });
+          });
+        });
+
+        // ---- link edit / delete ----
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-edit-link]'), function(btn){
+          btn.addEventListener('click', function(){ editingLink = btn.getAttribute('data-edit-link'); render(); });
+        });
+        var cancelLinkBtn = panel.querySelector('[data-cancel-link]');
+        if(cancelLinkBtn) cancelLinkBtn.addEventListener('click', function(){ editingLink = null; render(); });
+        var saveLinkBtn = panel.querySelector('[data-save-link]');
+        if(saveLinkBtn) saveLinkBtn.addEventListener('click', function(){
+          var lid = saveLinkBtn.getAttribute('data-save-link');
+          var newUrl = panel.querySelector('[data-link-edit-url]').value.trim();
+          var newLabel = panel.querySelector('[data-link-edit-label]').value.trim();
+          if(!newUrl) return;
+          supabase.from(cfg.links).update({ url: newUrl, label: newLabel, editedAt: new Date().toISOString() }).eq('id', lid).then(function(res2){
+            if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+            editingLink = null; loadCollab(kind, id, panel);
+          });
+        });
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-delete-link]'), function(btn){
+          btn.addEventListener('click', function(){
+            if(!confirm('Delete this link?')) return;
+            supabase.from(cfg.links).delete().eq('id', btn.getAttribute('data-delete-link')).then(function(res2){
+              if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+              loadCollab(kind, id, panel);
+            });
+          });
+        });
+
+        // ---- attachment delete ----
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-delete-attachment]'), function(btn){
+          btn.addEventListener('click', function(ev){
+            ev.stopPropagation();
+            if(!confirm('Delete this attachment?')) return;
+            var attId = btn.getAttribute('data-delete-attachment');
+            var key = btn.getAttribute('data-key');
+            supabase.from(cfg.attachments).delete().eq('id', attId).then(function(res2){
+              if(res2.error){ showToast('error', errMsg(res2.error)); return; }
+              // Best-effort - the row is already gone either way, so a failure
+              // here just means an orphaned object in the bucket, not a stuck UI.
+              deleteRemoteFile(key).catch(function(){});
+              loadCollab(kind, id, panel);
+            });
+          });
+        });
+
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-img-key]'), function(thumb){
+          var key = thumb.getAttribute('data-img-key');
+          var name = thumb.getAttribute('data-img-name');
+          var img = thumb.querySelector('img');
+          fetchProtectedUrl(key).then(function(url){
+            img.src = url;
+            img.addEventListener('click', function(){ showImageLightbox(url, name); });
+          }).catch(function(){ thumb.style.opacity='.4'; });
+        });
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-download-key]'), function(a){
+          a.addEventListener('click', function(ev){
+            ev.preventDefault();
+            if(a.dataset.downloading) return; // ignore rapid double-clicks while one is already in flight
+            a.dataset.downloading = '1';
+            var originalText = a.textContent;
+            a.textContent = 'Downloading…';
+            downloadProtectedFile(a.getAttribute('data-download-key'), a.getAttribute('data-download-name'))
+              .then(function(saved){
+                a.textContent = originalText;
+                delete a.dataset.downloading;
+                if(saved) showToast('success', 'Downloaded '+(a.getAttribute('data-download-name')||'file'));
+              })
+              .catch(function(err){
+                a.textContent = originalText;
+                delete a.dataset.downloading;
+                showToast('error', errMsg(err));
+              });
+          });
+        });
+      }
+
+      render();
     });
   }).catch(function(err){ panel.innerHTML = '<div class="empty-state" style="padding:10px;">Could not load discussion.</div>'; });
 }
@@ -1190,14 +1376,14 @@ function renderBoard(){
 
 // ---------- TIMELOG ----------
 // Full-size screenshot + whatever activity (keys/mouse) was recorded in the
-// window overlapping when it was taken — activity is flushed every 5
+// window overlapping when it was taken - activity is flushed every 5
 // minutes while screenshots land every 5-15, so this looks for the window
 // that actually contains the screenshot's timestamp, falling back to the
 // closest one if none lines up exactly (e.g. right at clock-in/out).
 function showScreenshotDetail(s, imgUrl){
   var root = document.getElementById('modalRoot');
   root.innerHTML = '<div class="modal-backdrop" id="modalBackdrop"><div class="modal modal-lg">'+
-    '<div class="modal-head"><h3>Screenshot — '+escapeHtml(fmtDateTime(s.takenAt))+'</h3><button type="button" class="modal-close" id="modalClose">✕</button></div>'+
+    '<div class="modal-head"><h3>Screenshot - '+escapeHtml(fmtDateTime(s.takenAt))+'</h3><button type="button" class="modal-close" id="modalClose">✕</button></div>'+
     '<div style="padding:17px 19px;display:flex;flex-direction:column;gap:14px;max-height:78vh;overflow-y:auto;">'+
     '<img src="'+escapeHtml(imgUrl)+'" style="width:100%;border-radius:10px;border:1px solid var(--line);display:block;">'+
     '<div id="shotActivityBox"><div class="skeleton" style="height:50px;"></div></div>'+
@@ -1222,7 +1408,7 @@ function showScreenshotDetail(s, imgUrl){
     if(!match){ box.innerHTML = '<div class="empty-state">No activity recorded around this time.</div>'; return; }
     box.innerHTML =
       '<h3 style="font-size:14px;margin-bottom:2px;">Activity '+(approximate?'near ':'')+escapeHtml(fmtDateTime(match.windowStart))+' – '+escapeHtml(fmtDateTime(match.windowEnd))+'</h3>'+
-      (approximate?'<div class="field-hint" style="margin-bottom:8px;">No activity window lined up exactly with this screenshot — showing the closest one recorded.</div>':'')+
+      (approximate?'<div class="field-hint" style="margin-bottom:8px;">No activity window lined up exactly with this screenshot - showing the closest one recorded.</div>':'')+
       '<div class="field-row" style="margin:8px 0;">'+
       '<div class="panel" style="flex:1;text-align:center;padding:12px;"><div style="font-size:22px;font-weight:700;">'+(match.keyCount||0)+'</div><div style="font-size:11.5px;color:var(--muted);">Keys pressed</div></div>'+
       '<div class="panel" style="flex:1;text-align:center;padding:12px;"><div style="font-size:22px;font-weight:700;">'+(match.mouseDistance||0)+'</div><div style="font-size:11.5px;color:var(--muted);">Mouse distance (px)</div></div>'+
@@ -1231,15 +1417,46 @@ function showScreenshotDetail(s, imgUrl){
   }).catch(function(){ box.innerHTML = '<div class="empty-state">Could not load activity for this window.</div>'; });
 }
 
+// A crude but useful "how busy were they" heuristic for one 5-minute
+// activitySamples window: keystrokes and mouse movement don't share a
+// scale, so each is normalized against a rough "clearly active" threshold
+// and the bar shows whichever one is higher (someone deep in a mouse-only
+// tool like an editor timeline shouldn't read as idle just because they
+// aren't typing). This is intentionally approximate - it's for an
+// at-a-glance bar, like Kimai/Upwork's timeline, not a precise metric.
+function activityScore(sample){
+  var keyScore = Math.min(1, (sample.keyCount||0) / 80);
+  var mouseScore = Math.min(1, (sample.mouseDistance||0) / 6000);
+  return Math.max(keyScore, mouseScore);
+}
+function activityLevelClass(score){
+  if(score >= 0.55) return 'high';
+  if(score >= 0.12) return 'med';
+  return 'low';
+}
+function sessionDurationLabel(e){
+  var start = new Date(e.clockInAt).getTime();
+  var end = e.clockOutAt ? new Date(e.clockOutAt).getTime() : Date.now();
+  var mins = Math.max(0, Math.round((end-start)/60000));
+  var h = Math.floor(mins/60), m = mins%60;
+  return (h?h+'h ':'')+m+'m'+(e.clockOutAt?'':' so far');
+}
+function sessionWhenLabel(e){
+  var start = new Date(e.clockInAt);
+  var dateLabel = start.toLocaleDateString(undefined,{weekday:'short',month:'short',day:'numeric'});
+  var startTime = start.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  var endTime = e.clockOutAt ? new Date(e.clockOutAt).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}) : 'now';
+  return dateLabel+' · '+startTime+' – '+endTime;
+}
+
 function renderTimeLog(){
   paint(
     '<div class="page-head"><div><div class="eyebrow">TimeLog</div><h1 class="page-title">Your time & activity</h1>'+
-    '<div class="page-sub">Screenshots and activity are recorded automatically while you\'re clocked in. You can view your own history here, but not delete it.</div></div>'+
-    '<button type="button" class="timelog-badge'+(timelog.isClockedIn()?'':' off')+'" id="clockToggleBtn">'+(timelog.isClockedIn()?'● Clocked in — stop':'Clock in')+'</button>'+
+    '<div class="page-sub">Screenshots and activity are recorded automatically while you\'re clocked in, organized below by clock-in session. You can view your own history here, but not delete it.</div></div>'+
+    '<button type="button" class="timelog-badge'+(timelog.isClockedIn()?'':' off')+'" id="clockToggleBtn">'+(timelog.isClockedIn()?'● Clocked in - stop':'Clock in')+'</button>'+
     '</div>'+
     (canManage()?'<div class="field" style="max-width:320px;margin-bottom:20px;"><label>Viewing</label><select id="timelogWho"></select></div>':'')+
-    '<div class="section-head"><h2 class="section-title">Recent screenshots</h2></div>'+
-    '<div id="shotGrid" class="shot-grid"><div class="skeleton" style="height:100px;"></div></div>'
+    '<div id="sessionList"><div class="skeleton" style="height:120px;margin-bottom:12px;"></div><div class="skeleton" style="height:120px;"></div></div>'
   );
   document.getElementById('clockToggleBtn').addEventListener('click', function(){
     if(timelog.isClockedIn()) timelog.clockOut().then(route).catch(function(err){ showToast('error', errMsg(err)); });
@@ -1247,29 +1464,69 @@ function renderTimeLog(){
   });
 
   function loadFor(uid){
-    var grid = document.getElementById('shotGrid');
-    grid.innerHTML = '<div class="skeleton" style="height:100px;"></div>';
-    timelog.listScreenshots(uid, 60).then(function(shots){
-      if(!shots.length){ grid.innerHTML = '<div class="empty-state">No screenshots recorded yet.</div>'; return; }
-      grid.innerHTML = shots.map(function(s,i){
-        return '<div class="shot-thumb" data-shot-key="'+escapeHtml(s.r2Key)+'" data-shot-i="'+i+'"><img loading="lazy"><span class="shot-time">'+fmtDateTime(s.takenAt)+'</span></div>';
+    var box = document.getElementById('sessionList');
+    box.innerHTML = '<div class="skeleton" style="height:120px;margin-bottom:12px;"></div><div class="skeleton" style="height:120px;"></div>';
+    timelog.listTimeEntries(uid, 25).then(function(entries){
+      if(!entries.length){ box.innerHTML = '<div class="empty-state">No clock-in sessions recorded yet.</div>'; return; }
+      box.innerHTML = entries.map(function(e,i){
+        return '<div class="session-card" id="session_'+i+'">'+
+          '<div class="session-head">'+
+          '<div class="session-when">'+(!e.clockOutAt?'<span class="session-live-dot"></span>':'')+'<strong>'+escapeHtml(sessionWhenLabel(e))+'</strong></div>'+
+          '<div class="session-duration">'+escapeHtml(sessionDurationLabel(e))+'</div>'+
+          '</div>'+
+          '<div class="session-activity" id="sessionActivity_'+i+'"><div class="skeleton" style="height:26px;"></div></div>'+
+          '<div class="session-shots" id="sessionShots_'+i+'"></div>'+
+          '</div>';
       }).join('');
-      // Screenshots require an authenticated fetch (see r2.js), so each
-      // thumbnail's real image loads in after the fact rather than via a
-      // plain src= URL. Clicking a thumbnail used to do nothing at all —
-      // no click handler was ever attached — this is what actually fixes
-      // that, opening the full-size image plus whatever activity was
-      // recorded in the window around when it was taken.
-      Array.prototype.forEach.call(grid.querySelectorAll('[data-shot-key]'), function(thumb){
-        var key = thumb.getAttribute('data-shot-key');
-        var idx = +thumb.getAttribute('data-shot-i');
-        var img = thumb.querySelector('img');
-        fetchProtectedUrl(key).then(function(url){
-          img.src = url;
-          thumb.addEventListener('click', function(){ showScreenshotDetail(shots[idx], url); });
-        }).catch(function(){ thumb.style.opacity='.4'; });
-      });
-    }).catch(function(err){ grid.innerHTML = '<div class="empty-state">Could not load screenshots.</div>'; });
+      entries.forEach(function(e,i){ loadSessionDetail(e,i); });
+    }).catch(function(){ box.innerHTML = '<div class="empty-state">Could not load your TimeLog history.</div>'; });
+  }
+
+  function loadSessionDetail(e, i){
+    Promise.all([
+      timelog.listActivityForEntry(e.id).catch(function(){ return []; }),
+      timelog.listScreenshotsForEntry(e.id, 40).catch(function(){ return []; }),
+    ]).then(function(res){
+      var samples = res[0], shots = res[1];
+      var activityBox = document.getElementById('sessionActivity_'+i);
+      var shotsBox = document.getElementById('sessionShots_'+i);
+      if(!activityBox || !shotsBox) return; // navigated away before this resolved
+
+      if(!samples.length){
+        activityBox.innerHTML = '<div class="session-activity-empty">No activity recorded yet for this session.</div>';
+      } else {
+        var totalKeys = samples.reduce(function(sum,s){ return sum+(s.keyCount||0); }, 0);
+        var totalMouse = samples.reduce(function(sum,s){ return sum+(s.mouseDistance||0); }, 0);
+        activityBox.innerHTML =
+          '<div class="activity-bar">'+samples.map(function(s){
+            var score = activityScore(s);
+            var level = activityLevelClass(score);
+            var title = fmtDateTime(s.windowStart)+' – '+fmtDateTime(s.windowEnd)+': '+(s.keyCount||0)+' keys, '+Math.round(s.mouseDistance||0)+'px mouse';
+            return '<div class="activity-seg activity-'+level+'" title="'+escapeHtml(title)+'"></div>';
+          }).join('')+'</div>'+
+          '<div class="session-activity-stats"><span>'+totalKeys+' keys pressed</span><span>'+Math.round(totalMouse)+'px mouse movement</span></div>';
+      }
+
+      if(!shots.length){
+        shotsBox.innerHTML = '';
+      } else {
+        shotsBox.innerHTML = '<div class="shot-grid compact">'+shots.map(function(s,si){
+          return '<div class="shot-thumb" data-shot-key="'+escapeHtml(s.r2Key)+'" data-shot-i="'+si+'"><img loading="lazy"><span class="shot-time">'+fmtDateTime(s.takenAt)+'</span></div>';
+        }).join('')+'</div>';
+        // Screenshots require an authenticated fetch (see r2.js), so each
+        // thumbnail's real image loads in after the fact rather than via a
+        // plain src= URL.
+        Array.prototype.forEach.call(shotsBox.querySelectorAll('[data-shot-key]'), function(thumb){
+          var key = thumb.getAttribute('data-shot-key');
+          var idx = +thumb.getAttribute('data-shot-i');
+          var img = thumb.querySelector('img');
+          fetchProtectedUrl(key).then(function(url){
+            img.src = url;
+            thumb.addEventListener('click', function(){ showScreenshotDetail(shots[idx], url); });
+          }).catch(function(){ thumb.style.opacity='.4'; });
+        });
+      }
+    });
   }
 
   if(canManage()){
@@ -1287,11 +1544,11 @@ function renderTimeLog(){
 
 // ---------- CONNECT: call state ----------
 // Wires the previously-unverified media layer (src/lib/connect.js) up to an
-// actual button and a real two-way signaling handshake. 1:1 only — group
+// actual button and a real two-way signaling handshake. 1:1 only - group
 // Connect is still a separate, not-yet-built stub (the "Start a group
 // Connect" button below still just shows a toast on purpose). This has
 // been checked against Cloudflare's current API reference but NOT run
-// end-to-end against a live call yet — that needs Humayun to actually try
+// end-to-end against a live call yet - that needs Humayun to actually try
 // it on two machines/accounts once worker-realtime is deployed.
 var activeCall = null; // { pc, localStream, sessionId, remoteUid, remoteName, answered, muted, remoteAudioEl }
 
@@ -1342,8 +1599,8 @@ function hangupCall(notifyOther){
 
 // Caller side: click "Connect" on someone online.
 function startCall(targetUid, targetName){
-  if(activeCall){ showToast('error','You\'re already on a call — hang up first.'); return; }
-  if(!connectConfigured){ showToast('error','Connect isn\'t configured yet — see README.md.'); return; }
+  if(activeCall){ showToast('error','You\'re already on a call - hang up first.'); return; }
+  if(!connectConfigured){ showToast('error','Connect isn\'t configured yet - see README.md.'); return; }
   activeCall = { remoteUid: targetUid, remoteName: targetName, answered:false, muted:false };
   renderCallBar();
   startLocalSession().then(function(session){
@@ -1358,9 +1615,9 @@ function startCall(targetUid, targetName){
 }
 
 // Callee side: someone rang us. Per spec there's no accept/decline for a
-// 1:1 when we're online — we join immediately.
+// 1:1 when we're online - we join immediately.
 function handleIncomingRing(payload){
-  if(activeCall) return; // already on a call — no call-waiting yet
+  if(activeCall) return; // already on a call - no call-waiting yet
   var fromUid = payload.from && payload.from.id;
   var fromName = payload.from && payload.from.name;
   if(!fromUid) return;
@@ -1379,7 +1636,7 @@ function handleIncomingRing(payload){
   });
 }
 
-// Caller side: the person we rang has their own session up now — pull
+// Caller side: the person we rang has their own session up now - pull
 // their audio so the call is two-way, not just us broadcasting to them.
 function handleConnectAnswer(payload){
   if(!activeCall || !activeCall.pc) return;
@@ -1394,25 +1651,25 @@ function handleConnectAnswer(payload){
 
 function handleRemoteHangup(){
   if(!activeCall) return;
-  hangupCall(false); // they already know — don't send it back to them
+  hangupCall(false); // they already know - don't send it back to them
 }
 
 // ---------- CONNECT ----------
 function renderConnect(){
   paint(
     '<div class="page-head"><div><div class="eyebrow">Connect</div><h1 class="page-title">Who\'s around</h1>'+
-    '<div class="page-sub">Online teammates can be reached instantly — no ringing, it just connects.</div></div>'+
+    '<div class="page-sub">Online teammates can be reached instantly - no ringing, it just connects.</div></div>'+
     '<button type="button" class="btn btn-primary btn-sm" id="groupConnectBtn" style="width:auto;">Start a group Connect</button></div>'+
-    (connectConfigured?'':'<div class="empty-state" style="margin-bottom:20px;"><strong>Connect isn\'t wired up yet</strong>This needs a Cloudflare Realtime App ID/Token — see README.md. The roster and online/offline status below already work.</div>')+
+    (connectConfigured?'':'<div class="empty-state" style="margin-bottom:20px;"><strong>Connect isn\'t wired up yet</strong>This needs a Cloudflare Realtime App ID/Token - see README.md. The roster and online/offline status below already work.</div>')+
     '<div id="roster"><div class="skeleton" style="height:50px;"></div></div>'
   );
   document.getElementById('groupConnectBtn').addEventListener('click', function(){
-    showToast(connectConfigured?'success':'error', connectConfigured ? 'Starting a group Connect…' : 'Connect isn\'t configured yet — see README.md.');
+    showToast(connectConfigured?'success':'error', connectConfigured ? 'Starting a group Connect…' : 'Connect isn\'t configured yet - see README.md.');
   });
 
   // Root cause of "employee doesn't see admin online" (one-directional
   // presence): this used to filter non-admins down to `.where('teamId','==',
-  // myTeamId)`, which always excludes Admin — Admin's own profile has no
+  // myTeamId)`, which always excludes Admin - Admin's own profile has no
   // teamId at all. Presence itself was never one-directional; the roster
   // *query* just never asked for Admin's row in the first place. Dropping
   // the explicit filter and letting RLS scope the result (own team + any
@@ -1433,7 +1690,7 @@ function renderConnect(){
       }).join('');
       Array.prototype.forEach.call(roster.querySelectorAll('[data-connect]:not([disabled])'), function(btn){
         btn.addEventListener('click', function(){
-          if(!connectConfigured){ showToast('error', 'Connect isn\'t configured yet — see README.md.'); return; }
+          if(!connectConfigured){ showToast('error', 'Connect isn\'t configured yet - see README.md.'); return; }
           var targetUid = btn.getAttribute('data-connect');
           var nameEl = btn.parentElement && btn.parentElement.querySelector('.roster-name');
           startCall(targetUid, nameEl ? nameEl.textContent : 'them');
@@ -1465,7 +1722,7 @@ function renderTeamSettings(){
       var p = d.data(); var r = roleOf(p.role);
       return '<div class="roster-row"><span class="presence-dot'+(isOnline(d.id)?' online':'')+'"></span>'+
         '<div><div class="roster-name">'+escapeHtml(p.displayName||p.email)+'</div><div class="roster-role">'+(r?escapeHtml(r.label):p.role)+'</div></div></div>';
-    }).join('') || '<div class="empty-state">No teammates yet — invite your first one.</div>';
+    }).join('') || '<div class="empty-state">No teammates yet - invite your first one.</div>';
   });
 
   listInvites(myTeamId).then(function(invites){
@@ -1488,7 +1745,7 @@ function renderTeamSettings(){
 }
 
 // A plain alert() box was the old way of showing a freshly-created invite
-// code — its text isn't reliably selectable/copyable in a webview, which is
+// code - its text isn't reliably selectable/copyable in a webview, which is
 // exactly what was reported. This shows the code in a real input with a
 // Copy button instead, using the clipboard API with an execCommand
 // fallback for older webview builds.
@@ -1496,7 +1753,7 @@ function showInviteCodeModal(email, roleLabel, code){
   openModal('Invite created',
     '<div class="field"><label>Invite code for '+escapeHtml(email)+(roleLabel?' ('+escapeHtml(roleLabel)+')':'')+'</label>'+
     '<div style="display:flex;gap:8px;"><input type="text" id="inviteCodeField" value="'+escapeHtml(code)+'" readonly style="flex:1;font-family:monospace;font-size:15px;letter-spacing:.5px;"><button type="button" class="btn btn-sm" id="copyInviteBtn" style="width:auto;flex-shrink:0;">Copy</button></div></div>'+
-    '<p style="font-size:12.5px;color:var(--muted);margin-top:10px;">Send this to them along with the sign-up screen — they\'ll need this exact code plus this exact email to create their account.</p>',
+    '<p style="font-size:12.5px;color:var(--muted);margin-top:10px;">Send this to them along with the sign-up screen - they\'ll need this exact code plus this exact email to create their account.</p>',
     function(){ closeModal(); }, 'Done');
   var field = document.getElementById('inviteCodeField');
   var copyBtn = document.getElementById('copyInviteBtn');
@@ -1507,7 +1764,7 @@ function showInviteCodeModal(email, roleLabel, code){
     } else { fallbackCopy(); }
     function fallbackCopy(){
       try{ field.focus(); field.select(); document.execCommand('copy'); copied(); }
-      catch(e){ showToast('error', 'Could not copy — select the code and copy it manually.'); }
+      catch(e){ showToast('error', 'Could not copy - select the code and copy it manually.'); }
     }
   });
 }
@@ -1529,7 +1786,7 @@ function openInviteModal(){
 
 // Admin-only: same idea as openInviteModal above, but Admin isn't scoped to
 // one Team, so this one also asks which Team and allows Manager as a role
-// (a Manager, per RLS, can never invite someone in as 'manager' — only
+// (a Manager, per RLS, can never invite someone in as 'manager' - only
 // Admin can, which is exactly what this modal is for).
 function openAdminInviteModal(){
   openModal('Invite someone', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
@@ -1555,7 +1812,7 @@ function renderAdmin(){
     '<button type="button" class="btn btn-primary btn-sm" id="newTeamBtn" style="width:auto;">+ New Team</button></div>'+
     '<div id="teamsBox"><div class="skeleton" style="height:80px;"></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">All employees</h2><button type="button" class="btn btn-sm" id="adminInviteBtn">+ Invite someone</button></div>'+
-    '<div class="page-sub" style="margin:-6px 0 12px;">Change anyone\'s role or team here — this is also how you move someone off a team they\'re stuck on, or make more than one person a Manager on the same team.</div>'+
+    '<div class="page-sub" style="margin:-6px 0 12px;">Change anyone\'s role or team here - this is also how you move someone off a team they\'re stuck on, or make more than one person a Manager on the same team.</div>'+
     '<div id="employeesBox"><div class="skeleton" style="height:80px;"></div></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'
   );
@@ -1576,11 +1833,11 @@ function renderAdmin(){
     var profiles = res[1].docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
     var box = document.getElementById('teamsBox');
     // Anyone (including Admin) who's picked here as a team's Manager/point
-    // of contact — but an Admin picked here keeps their Admin role as-is
+    // of contact - but an Admin picked here keeps their Admin role as-is
     // (they already have full access everywhere; this just labels them as
     // this team's contact). A non-admin picked here is actually promoted:
     // role becomes 'manager' with this teamId, same as before. Multiple
-    // people can hold 'manager' on the same team at once — RLS only ever
+    // people can hold 'manager' on the same team at once - RLS only ever
     // checks role+teamId, never this single managerId field, so this was
     // already technically possible; "Managers" below just makes it visible.
     box.innerHTML = teams.map(function(t){
@@ -1588,12 +1845,12 @@ function renderAdmin(){
       var actualManagers = profiles.filter(function(p){ return p.role==='manager' && p.teamId===t.id; });
       var memberOpts = profiles.map(function(p){ return '<option value="'+p.id+'"'+(p.id===t.managerId?' selected':'')+'>'+escapeHtml(p.displayName||p.email)+(p.role==='admin'?' (Admin)':(p.teamId?' ('+escapeHtml(teamName(p.teamId))+')':''))+'</option>'; }).join('');
       return '<div class="panel" style="margin-bottom:12px;"><h3>'+escapeHtml(t.name)+'</h3>'+
-        '<div style="font-size:13px;color:var(--muted);margin-bottom:4px;">Point of contact: '+(manager?escapeHtml(manager.displayName||manager.email):'— none assigned —')+'</div>'+
-        '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Managers on this team: '+(actualManagers.length?actualManagers.map(function(m){return escapeHtml(m.displayName||m.email);}).join(', '):'— none yet —')+'</div>'+
-        '<div class="field-row"><div class="field"><label>Assign/change point of contact (promotes a non-admin to Manager)</label><select data-assign-mgr="'+t.id+'"><option value="">— choose —</option>'+memberOpts+'</select></div>'+
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:4px;">Point of contact: '+(manager?escapeHtml(manager.displayName||manager.email):'- none assigned -')+'</div>'+
+        '<div style="font-size:13px;color:var(--muted);margin-bottom:10px;">Managers on this team: '+(actualManagers.length?actualManagers.map(function(m){return escapeHtml(m.displayName||m.email);}).join(', '):'- none yet -')+'</div>'+
+        '<div class="field-row"><div class="field"><label>Assign/change point of contact (promotes a non-admin to Manager)</label><select data-assign-mgr="'+t.id+'"><option value="">- choose -</option>'+memberOpts+'</select></div>'+
         '<div class="field"><label>Or invite a new Manager by email</label><input type="email" placeholder="name@bluekitemedia.com" data-invite-mgr="'+t.id+'"></div></div>'+
         '</div>';
-    }).join('') || '<div class="empty-state">No teams yet — create your first one.</div>';
+    }).join('') || '<div class="empty-state">No teams yet - create your first one.</div>';
 
     Array.prototype.forEach.call(box.querySelectorAll('[data-assign-mgr]'), function(sel){
       sel.addEventListener('change', function(){
@@ -1601,7 +1858,7 @@ function renderAdmin(){
         var teamId = sel.getAttribute('data-assign-mgr');
         var picked = profiles.filter(function(p){ return p.id===sel.value; })[0];
         var task = (picked && picked.role==='admin')
-          // Admin picked: just point teams.managerId at them for display —
+          // Admin picked: just point teams.managerId at them for display -
           // never touch an Admin's own role/team.
           ? db.doc('teams/'+teamId).update({managerId: sel.value})
           : assignTeamManager(teamId, sel.value);
@@ -1633,7 +1890,7 @@ function renderAdmin(){
         '<select data-emp-role="'+p.id+'" style="width:auto;">'+roleOpts+'</select>'+
         '<select data-emp-team="'+p.id+'" style="width:auto;">'+teamOptionsHtml(p.teamId, true)+'</select>'+
         '</div></div>';
-    }).join('')+'</div>' : '<div class="empty-state">No employees yet — invite your first one.</div>';
+    }).join('')+'</div>' : '<div class="empty-state">No employees yet - invite your first one.</div>';
 
     function saveEmployeeField(uid, patch){
       db.doc('profiles/'+uid).update(patch).then(function(){ showToast('success','Updated'); }).catch(function(err){ showToast('error', errMsg(err)); });
@@ -1671,7 +1928,7 @@ function renderAuthScreen(mode){
     '<div class="login-card">'+
     '<div class="login-brand"><div class="brand-mark"><img src="/logo-mark.png" alt="Blue Kite Media"></div><div><div class="brand-name">Blue Kite Media</div><div class="brand-sub">Production Ops</div></div></div>'+
     '<div class="login-title">'+(isSignup?'Create your account':'Sign in')+'</div>'+
-    '<div class="login-sub">'+(isSignup?'You\'ll need the invite code your manager or admin sent you — unless you\'re the very first person setting this up.':'Use your Blue Kite Ops account.')+'</div>'+
+    '<div class="login-sub">'+(isSignup?'You\'ll need the invite code your manager or admin sent you - unless you\'re the very first person setting this up.':'Use your Blue Kite Ops account.')+'</div>'+
     '<div class="login-error" id="authError"></div>'+
     '<form id="authForm">'+
     (isSignup?'<div class="login-field"><label>Your name</label><input name="displayName" type="text" placeholder="Jane Doe" required></div>':'')+
@@ -1713,14 +1970,14 @@ function renderAuthScreen(mode){
       var hint = document.getElementById('avatarHint');
       hint.textContent = 'Checking for a face…';
       imageHasFace(file).then(function(ok){
-        if(!ok){ hint.textContent = 'No face detected — please choose a clear photo of yourself.'; pendingAvatarBlob=null; return; }
+        if(!ok){ hint.textContent = 'No face detected - please choose a clear photo of yourself.'; pendingAvatarBlob=null; return; }
         return compressImage(file, {maxWidth:400,maxHeight:400,quality:.85}).then(function(blob){
           pendingAvatarBlob = blob;
           var url = URL.createObjectURL(blob);
-          avatarDrop.innerHTML = '<img src="'+url+'"><div class="avatar-drop-hint">Looks good — click to change</div>';
+          avatarDrop.innerHTML = '<img src="'+url+'"><div class="avatar-drop-hint">Looks good - click to change</div>';
           avatarDrop.appendChild(avatarInput);
         });
-      }).catch(function(){ hint.textContent = 'Could not check this photo — click to try another.'; });
+      }).catch(function(){ hint.textContent = 'Could not check this photo - click to try another.'; });
     });
   }
 
@@ -1744,7 +2001,7 @@ function renderAuthScreen(mode){
         var key = 'avatars/'+uid+'/photo.jpg';
         // These two used to be chained (mood-save only ran after the avatar
         // upload succeeded), so a single failed/slow upload silently took
-        // both down with it and the error never surfaced anywhere — just a
+        // both down with it and the error never surfaced anywhere - just a
         // console.warn nobody sees. Now they're independent: each saves on
         // its own and reports its own failure via a toast once the app has
         // loaded, instead of quietly leaving the profile half-filled-in.
@@ -1788,7 +2045,7 @@ function showClockInOverlay(){
     '<button type="button" class="clockin-close" id="clockinCloseBtn">✕</button>'+
     '<div class="clockin-icon">⏱</div>'+
     '<div class="clockin-title">Ready to start your day?</div>'+
-    '<div class="clockin-sub">Clocking in starts your hourly timer. While you\'re clocked in, Blue Kite Ops takes occasional screenshots and tracks keyboard/mouse activity — you can review your own history under TimeLog any time.</div>'+
+    '<div class="clockin-sub">Clocking in starts your hourly timer. While you\'re clocked in, Blue Kite Ops takes occasional screenshots and tracks keyboard/mouse activity - you can review your own history under TimeLog any time.</div>'+
     '<button type="button" class="btn btn-primary" id="clockinStartBtn">Clock in</button>'+
     '<div id="clockinStatus"></div>'+
     '</div>';
@@ -1796,7 +2053,7 @@ function showClockInOverlay(){
   document.getElementById('clockinCloseBtn').addEventListener('click', function(){ el.remove(); });
   document.getElementById('clockinStartBtn').addEventListener('click', function(){
     timelog.clockIn(myUid).then(function(){
-      document.getElementById('clockinStatus').innerHTML = '<div class="clockin-status"><span class="pulse-dot"></span> Clocked in — you can close this.</div>';
+      document.getElementById('clockinStatus').innerHTML = '<div class="clockin-status"><span class="pulse-dot"></span> Clocked in - you can close this.</div>';
       setTimeout(function(){ el.remove(); if(location.hash.replace('#','')==='/timelog') route(); }, 1400);
     }).catch(function(err){ showToast('error', errMsg(err)); });
   });
@@ -1805,10 +2062,11 @@ function showClockInOverlay(){
 // ---------- BOOT ----------
 (function boot(){
   initTheme();
-  // See src/lib/timelog.js — screenshot/activity capture failures used to
+  // See src/lib/timelog.js - screenshot/activity capture failures used to
   // be swallowed silently (console.warn at best), which is exactly why
   // testing showed no visible symptom at all. Now they surface as a toast.
   timelog.setCaptureErrorHandler(function(message){ showToast('error', message); });
+  timelog.setScreenshotTakenHandler(function(){ showScreenshotNotice(); });
   if(!supabaseConfigured){
     document.getElementById('shell').style.display = 'none';
     var el = document.createElement('div');
@@ -1822,7 +2080,7 @@ function showClockInOverlay(){
 
   var themeToggle = document.getElementById('themeToggle');
   if(themeToggle) themeToggle.addEventListener('click', toggleTheme);
-  // A plain full reload — the simplest fix for the case where something
+  // A plain full reload - the simplest fix for the case where something
   // changed in a table Realtime doesn't push (e.g. an Admin moves a client
   // or an employee to a different Team: that's a write to `clients`/
   // `profiles`, not to `tasks`, so a task list already subscribed elsewhere
@@ -1870,7 +2128,16 @@ function showClockInOverlay(){
         myRole = p ? p.role : null;
         myTeamId = p ? p.teamId : null;
         document.getElementById('navAddClient').hidden = !canManage();
-        var teamNav = document.getElementById('navTeam'); if(teamNav) teamNav.hidden = myRole!=='manager';
+        // Admin never had a "Team" nav item before, on purpose - but the
+        // page it pointed to (a Manager's own roster/invites) never had an
+        // Admin-appropriate equivalent either. Rather than leave Admin
+        // without a working link at all, this now points Admin at the same
+        // Admin page that has the real cross-team roster/invite tools.
+        var teamNav = document.getElementById('navTeam');
+        if(teamNav){
+          teamNav.hidden = !(myRole==='manager' || isAdmin());
+          teamNav.setAttribute('href', isAdmin() ? '#/admin' : '#/team');
+        }
         var adminNav = document.getElementById('navAdmin'); if(adminNav) adminNav.hidden = !isAdmin();
         renderIdentityCard();
         Promise.all([refreshTeamsCache(), refreshServicesCache()]).then(route);
@@ -1882,7 +2149,15 @@ function showClockInOverlay(){
             onHangup: handleRemoteHangup,
           });
           if(p.musicMood && p.musicMood!=='none'){ mountMusicPlayer(); musicPlayer.initPlayer('ytMusicMount', p.musicMood); }
-          setTimeout(showClockInOverlay, 600);
+          // Reconnect to an already-open clock-in (e.g. after a reload)
+          // before ever deciding whether to show the "ready to start your
+          // day?" prompt - showing that prompt to someone who's already
+          // clocked in was the visible symptom of the reload/clock-out
+          // desync bug (a reload used to silently stop capture without
+          // actually clocking anyone out server-side).
+          timelog.resumeIfClockedIn(myUid).then(function(){
+            if(!timelog.isClockedIn()) setTimeout(showClockInOverlay, 600);
+          });
         }
       }, function(){ renderRoleBoxFallback(); route(); });
     }
@@ -1902,7 +2177,7 @@ function mountMusicPlayer(){
     box.innerHTML =
       '<div class="music-player">'+
         '<div class="music-frame" id="ytMusicMount"></div>'+
-        '<div class="music-meta" id="musicMeta">—</div>'+
+        '<div class="music-meta" id="musicMeta">-</div>'+
         '<div class="music-row">'+
           '<button type="button" class="music-btn" id="musicToggleBtn" title="Play/pause">▶</button>'+
           '<button type="button" class="music-btn" id="musicSkipBtn" title="Change track">⏭</button>'+
@@ -1923,7 +2198,7 @@ function mountMusicPlayer(){
     var muteBtn = document.getElementById('musicMuteBtn');
     var volume = document.getElementById('musicVolume');
     var moodSelect = document.getElementById('musicMoodSelect');
-    if(!meta) return; // widget got torn down (e.g. sign-out) — nothing to update
+    if(!meta) return; // widget got torn down (e.g. sign-out) - nothing to update
     if(!s.hasTracks){
       meta.textContent = 'No tracks in "'+(s.moodLabel||s.mood||'')+'" yet';
       return;
