@@ -39,15 +39,27 @@ async function verifySession(request, env) {
   return res.ok;
 }
 
+// `body` is optional and, when omitted, this sends NO body and NO
+// Content-Type header at all - not even `{}`. Found 2026-09-21 via a real
+// `wrangler tail` log: Cloudflare's own `/sessions/new` rejects an empty
+// JSON object body outright ({"errorCode":"decoding_error","errorDescription":
+// "Body JSON validation error: sessionDescription"}) - its schema apparently
+// specifies NO body for that call, and `{}` still fails its validator (this
+// matches a documented issue in another project hitting the exact same
+// error against the same endpoint). Passing `{}` used to be truthy in JS,
+// which is exactly how the old code below always sent a body even when the
+// caller intended "no body" - see the /sessions/new call site, which now
+// passes no second argument at all instead of `{}`.
 function cf(env, path, body) {
-  return fetch(CF_BASE + '/apps/' + env.CF_REALTIME_APP_ID + path, {
+  const opts = {
     method: 'POST',
-    headers: {
-      Authorization: 'Bearer ' + env.CF_REALTIME_APP_TOKEN,
-      'Content-Type': 'application/json',
-    },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+    headers: { Authorization: 'Bearer ' + env.CF_REALTIME_APP_TOKEN },
+  };
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  return fetch(CF_BASE + '/apps/' + env.CF_REALTIME_APP_ID + path, opts);
 }
 
 function cors(resp) {
@@ -102,7 +114,7 @@ export default {
         const { offer } = await request.json();
         if (!offer || !offer.sdp) return cors(json({ error: 'Missing offer.sdp' }, 400));
 
-        const newSessionRes = await cf(env, '/sessions/new', {});
+        const newSessionRes = await cf(env, '/sessions/new');
         if (!newSessionRes.ok) {
           const detail = await newSessionRes.text();
           // Logged (not just returned in the response body) so `npx wrangler
