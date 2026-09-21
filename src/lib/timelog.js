@@ -359,4 +359,3 @@ export async function listActivityForEntry(timeEntryId) {
   const snap = await db.collection('activitySamples').where('timeEntryId', '==', timeEntryId).orderBy('windowStart', 'asc').get();
   return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
 }
-round 6 fixes
