@@ -28,3 +28,4 @@ comment on column public.tasks."dependsOnStepId" is
 
 comment on column public.tasks."dependsOnLabel" is
   'Superseded 2026-09-21 by "dependsOnStepId" - no longer written or read by the app. Left in place rather than dropped to avoid a destructive migration.';
+round 6 fixes
