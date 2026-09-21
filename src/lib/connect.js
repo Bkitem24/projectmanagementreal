@@ -274,4 +274,3 @@ export function endSession(session) {
   try { session.pc.close(); } catch (e) {}
   try { session.localStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
 }
-round 6 fixes
