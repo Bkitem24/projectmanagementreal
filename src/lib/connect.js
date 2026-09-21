@@ -209,6 +209,22 @@ async function parseJsonResponse(res, what) {
   return res.json();
 }
 
+// Any error status other than 404 from worker-realtime already carries WHY
+// in its JSON body (the `error`/`detail` fields set in worker-realtime/
+// src/index.js) - added 2026-09-21 so a failure shows the actual reason
+// (e.g. Cloudflare rejecting a bad App ID/Token) instead of a bare status
+// code the person then has to guess at. Safe to call on a response whose
+// body hasn't been read yet; swallows the case where the body isn't JSON.
+async function describeWorkerError(res) {
+  try {
+    const errBody = await res.json();
+    const parts = [errBody && errBody.error, errBody && errBody.detail].filter(Boolean);
+    return parts.length ? ' - ' + parts.join(': ') : '';
+  } catch (e) {
+    return '';
+  }
+}
+
 // Starts a new SFU session for the local mic, returns { sessionId, pc }.
 export async function startLocalSession() {
   if (!connectConfigured) throw new Error('Connect is not configured yet - see README.md (needs Cloudflare Realtime credentials).');
@@ -229,7 +245,7 @@ export async function startLocalSession() {
     // specific worker after a round that touched other things too).
     const detail = res.status === 404
       ? ' - the request reached ' + REALTIME_WORKER_URL.replace(/\/$/, '') + '/session/new but got a 404. Check VITE_REALTIME_WORKER_URL has no extra path or typo, and that worker-realtime has been redeployed (`cd worker-realtime && npx wrangler deploy`) since its code last changed.'
-      : '';
+      : await describeWorkerError(res);
     throw new Error('Could not start Connect session (' + res.status + ')' + detail);
   }
   const body = await parseJsonResponse(res, 'a new session');
@@ -253,7 +269,7 @@ export async function pullRemoteTrack(localSessionId, remoteSessionId, trackName
   const res = await authedFetch('/session/' + localSessionId + '/pull', {
     method: 'POST', body: JSON.stringify({ remoteSessionId, trackName }),
   });
-  if (!res.ok) throw new Error('Could not join remote audio (' + res.status + ')');
+  if (!res.ok) throw new Error('Could not join remote audio (' + res.status + ')' + await describeWorkerError(res));
   const body = await parseJsonResponse(res, 'remote-audio details');
 
   if (body.requiresRenegotiation) {
@@ -263,7 +279,7 @@ export async function pullRemoteTrack(localSessionId, remoteSessionId, trackName
     const renegRes = await authedFetch('/session/' + localSessionId + '/renegotiate', {
       method: 'POST', body: JSON.stringify({ answer: pc.localDescription }),
     });
-    if (!renegRes.ok) throw new Error('Could not complete remote audio renegotiation (' + renegRes.status + ')');
+    if (!renegRes.ok) throw new Error('Could not complete remote audio renegotiation (' + renegRes.status + ')' + await describeWorkerError(renegRes));
   } else if (body.answer) {
     await pc.setRemoteDescription(body.answer);
   }
