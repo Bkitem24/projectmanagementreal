@@ -9,7 +9,7 @@ import { uploadFile, fileUrl, fetchProtectedUrl, downloadProtectedFile, r2Config
 import * as timelog from './lib/timelog.js';
 import * as musicPlayer from './lib/music.js';
 import { MOODS } from './lib/music.js';
-import { connectConfigured, listenForConnects, ring, startLocalSession, endSession } from './lib/connect.js';
+import { connectConfigured, listenForConnects, ring, answerRing, sendHangup, startLocalSession, pullRemoteTrack, endSession } from './lib/connect.js';
 
 // ---------- constants ----------
 var ROLES = [
@@ -1089,6 +1089,118 @@ function renderTimeLog(){
   }
 }
 
+// ---------- CONNECT: call state ----------
+// Wires the previously-unverified media layer (src/lib/connect.js) up to an
+// actual button and a real two-way signaling handshake. 1:1 only — group
+// Connect is still a separate, not-yet-built stub (the "Start a group
+// Connect" button below still just shows a toast on purpose). This has
+// been checked against Cloudflare's current API reference but NOT run
+// end-to-end against a live call yet — that needs Humayun to actually try
+// it on two machines/accounts once worker-realtime is deployed.
+var activeCall = null; // { pc, localStream, sessionId, remoteUid, remoteName, answered, muted, remoteAudioEl }
+
+function wireRemoteAudio(call){
+  call.pc.ontrack = function(ev){
+    if(!call.remoteAudioEl){
+      call.remoteAudioEl = document.createElement('audio');
+      call.remoteAudioEl.autoplay = true;
+      document.body.appendChild(call.remoteAudioEl);
+    }
+    call.remoteAudioEl.srcObject = ev.streams[0];
+  };
+}
+
+function renderCallBar(){
+  // Uses the pre-existing .connect-bar CSS (style.css) rather than
+  // inventing a new class, so this actually renders styled instead of
+  // looking like unstyled plain text/buttons.
+  var bar = document.getElementById('connectBar');
+  if(!activeCall){ if(bar) bar.remove(); return; }
+  if(!bar){
+    bar = document.createElement('div');
+    bar.id = 'connectBar';
+    bar.className = 'connect-bar';
+    document.body.appendChild(bar);
+  }
+  bar.innerHTML = '<span class="connect-bar-status">'+(activeCall.answered?'On a call with ':'Calling ')+escapeHtml(activeCall.remoteName||'…')+'</span>'+
+    '<button type="button" class="btn btn-sm" id="callMuteBtn">'+(activeCall.muted?'Unmute':'Mute')+'</button>'+
+    '<button type="button" class="btn btn-sm btn-danger" id="callHangupBtn">Hang up</button>';
+  document.getElementById('callMuteBtn').addEventListener('click', function(){
+    if(!activeCall || !activeCall.localStream) return;
+    activeCall.muted = !activeCall.muted;
+    activeCall.localStream.getAudioTracks().forEach(function(t){ t.enabled = !activeCall.muted; });
+    renderCallBar();
+  });
+  document.getElementById('callHangupBtn').addEventListener('click', function(){ hangupCall(true); });
+}
+
+function hangupCall(notifyOther){
+  if(!activeCall) return;
+  var remoteUid = activeCall.remoteUid;
+  if(activeCall.remoteAudioEl){ try{ activeCall.remoteAudioEl.remove(); }catch(e){} }
+  endSession(activeCall);
+  activeCall = null;
+  renderCallBar();
+  if(notifyOther && remoteUid) sendHangup(remoteUid).catch(function(){});
+}
+
+// Caller side: click "Connect" on someone online.
+function startCall(targetUid, targetName){
+  if(activeCall){ showToast('error','You\'re already on a call — hang up first.'); return; }
+  if(!connectConfigured){ showToast('error','Connect isn\'t configured yet — see README.md.'); return; }
+  activeCall = { remoteUid: targetUid, remoteName: targetName, answered:false, muted:false };
+  renderCallBar();
+  startLocalSession().then(function(session){
+    if(!activeCall || activeCall.remoteUid!==targetUid){ endSession(session); return; } // hung up before this resolved
+    activeCall.pc = session.pc; activeCall.localStream = session.localStream; activeCall.sessionId = session.sessionId;
+    wireRemoteAudio(activeCall);
+    return ring(targetUid, { id: myUid, name: (myProfile&&myProfile.displayName)||'' }, session.sessionId, false);
+  }).catch(function(err){
+    showToast('error', errMsg(err));
+    activeCall = null; renderCallBar();
+  });
+}
+
+// Callee side: someone rang us. Per spec there's no accept/decline for a
+// 1:1 when we're online — we join immediately.
+function handleIncomingRing(payload){
+  if(activeCall) return; // already on a call — no call-waiting yet
+  var fromUid = payload.from && payload.from.id;
+  var fromName = payload.from && payload.from.name;
+  if(!fromUid) return;
+  activeCall = { remoteUid: fromUid, remoteName: fromName, answered:true, muted:false };
+  renderCallBar();
+  startLocalSession().then(function(session){
+    if(!activeCall || activeCall.remoteUid!==fromUid){ endSession(session); return; }
+    activeCall.pc = session.pc; activeCall.localStream = session.localStream; activeCall.sessionId = session.sessionId;
+    wireRemoteAudio(activeCall);
+    return pullRemoteTrack(session.sessionId, payload.sessionId, 'mic', session.pc).then(function(){
+      return answerRing(fromUid, { id: myUid, name: (myProfile&&myProfile.displayName)||'' }, session.sessionId);
+    });
+  }).catch(function(err){
+    showToast('error', 'Could not join call: '+errMsg(err));
+    if(activeCall && activeCall.remoteUid===fromUid){ activeCall=null; renderCallBar(); }
+  });
+}
+
+// Caller side: the person we rang has their own session up now — pull
+// their audio so the call is two-way, not just us broadcasting to them.
+function handleConnectAnswer(payload){
+  if(!activeCall || !activeCall.pc) return;
+  var fromUid = payload.from && payload.from.id;
+  if(activeCall.remoteUid !== fromUid) return;
+  activeCall.answered = true;
+  renderCallBar();
+  pullRemoteTrack(activeCall.sessionId, payload.sessionId, 'mic', activeCall.pc).catch(function(err){
+    showToast('error', errMsg(err));
+  });
+}
+
+function handleRemoteHangup(){
+  if(!activeCall) return;
+  hangupCall(false); // they already know — don't send it back to them
+}
+
 // ---------- CONNECT ----------
 function renderConnect(){
   paint(
@@ -1125,7 +1237,10 @@ function renderConnect(){
       }).join('');
       Array.prototype.forEach.call(roster.querySelectorAll('[data-connect]:not([disabled])'), function(btn){
         btn.addEventListener('click', function(){
-          showToast(connectConfigured?'success':'error', connectConfigured ? 'Connecting…' : 'Connect isn\'t configured yet — see README.md.');
+          if(!connectConfigured){ showToast('error', 'Connect isn\'t configured yet — see README.md.'); return; }
+          var targetUid = btn.getAttribute('data-connect');
+          var nameEl = btn.parentElement && btn.parentElement.querySelector('.roster-name');
+          startCall(targetUid, nameEl ? nameEl.textContent : 'them');
         });
       });
     }
@@ -1456,6 +1571,7 @@ function showClockInOverlay(){
       if(profileUnsub){ profileUnsub(); profileUnsub = null; }
       myUid = null; myRole = null; myProfile = null; myTeamId = null; lastUid = null; boundOnce = false;
       stopPresence();
+      hangupCall(true);
       renderAuthScreen('signin');
       return;
     }
@@ -1491,8 +1607,10 @@ function showClockInOverlay(){
         Promise.all([refreshTeamsCache(), refreshServicesCache()]).then(route);
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
-          listenForConnects(myUid, function(payload){
-            showToast('success', (payload.from&&payload.from.name||'Someone')+' is connecting with you…');
+          listenForConnects(myUid, {
+            onRing: handleIncomingRing,
+            onAnswer: handleConnectAnswer,
+            onHangup: handleRemoteHangup,
           });
           if(p.musicMood && p.musicMood!=='none'){ mountMusicPlayer(); musicPlayer.initPlayer('ytMusicMount', p.musicMood); }
           setTimeout(showClockInOverlay, 600);

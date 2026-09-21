@@ -26,15 +26,28 @@ export const connectConfigured = !!REALTIME_WORKER_URL;
 
 let ringChannel = null;
 let onIncoming = null;
+let onAnswered = null;
+let onHangup = null;
 
 // ---------------------------------------------------------------------------
 // Signaling (working today)
 // ---------------------------------------------------------------------------
-export function listenForConnects(myUid, handler) {
-  onIncoming = handler;
+// Three messages, one channel per user (their own uid), listened to once at
+// boot: 'ring' (someone wants to call you), 'answer' (the person you rang
+// has set up their own session and is telling you its id, so you can pull
+// their audio back), 'hangup' (either side ending the call — this is what
+// lets the OTHER side's UI clean up too, not just the one who clicked hang
+// up). Call this once per app session; main.js wires all three handlers up
+// at boot alongside the existing presence/timelog setup.
+export function listenForConnects(myUid, handlers) {
+  onIncoming = handlers && handlers.onRing;
+  onAnswered = handlers && handlers.onAnswer;
+  onHangup = handlers && handlers.onHangup;
   if (ringChannel) supabase.removeChannel(ringChannel);
   ringChannel = supabase.channel('connect:' + myUid)
     .on('broadcast', { event: 'ring' }, (msg) => { if (onIncoming) onIncoming(msg.payload); })
+    .on('broadcast', { event: 'answer' }, (msg) => { if (onAnswered) onAnswered(msg.payload); })
+    .on('broadcast', { event: 'hangup' }, (msg) => { if (onHangup) onHangup(msg.payload); })
     .subscribe();
   return () => { if (ringChannel) { supabase.removeChannel(ringChannel); ringChannel = null; } };
 }
@@ -42,12 +55,30 @@ export function listenForConnects(myUid, handler) {
 // Because "online" already means "connectable" per Humayun's spec (no
 // accept/decline step for a 1:1 when the other side is online), ringing a
 // single online person immediately proceeds to media setup on both ends —
-// this broadcast is really just "here's the session id, join it now."
+// this broadcast is really just "here's my session id, come pull my audio."
 export async function ring(targetUid, fromProfile, sessionId, isGroup) {
   await supabase.channel('connect:' + targetUid).send({
     type: 'broadcast', event: 'ring',
     payload: { from: fromProfile, sessionId, isGroup: !!isGroup, at: new Date().toISOString() },
   });
+}
+
+// The callee sends this back once THEY have their own session up and have
+// pulled the caller's audio — it's what lets the original caller learn the
+// callee's session id and pull audio the other direction, completing a
+// real two-way call instead of one-way.
+export async function answerRing(callerUid, fromProfile, sessionId) {
+  await supabase.channel('connect:' + callerUid).send({
+    type: 'broadcast', event: 'answer',
+    payload: { from: fromProfile, sessionId, at: new Date().toISOString() },
+  });
+}
+
+// Either side can send this when ending the call, so the other side's UI
+// and local session get torn down too instead of thinking the call is
+// still live.
+export async function sendHangup(targetUid) {
+  await supabase.channel('connect:' + targetUid).send({ type: 'broadcast', event: 'hangup', payload: {} });
 }
 
 // ---------------------------------------------------------------------------
