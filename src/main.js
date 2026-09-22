@@ -1030,7 +1030,7 @@ function renderClient(clientId){
       (mgr?'<button type="button" class="btn btn-primary btn-sm" id="genEpisodesBtn">Generate upcoming episodes</button>':'')+
       '</div>'+
       '</div>'+
-      '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="margin-bottom:18px;border-radius:14px;height:150px;position:relative;'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\');background-size:cover;background-position:center;':'background:linear-gradient(135deg,var(--blue-soft),var(--line-soft));')+'">'+
+      '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="margin-bottom:18px;border-radius:var(--radius);height:168px;position:relative;box-shadow:var(--shadow);'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\');background-size:cover;background-position:center;':'background:linear-gradient(135deg,var(--blue-soft),var(--line-soft));')+'">'+
       (mgr?'<label class="btn btn-sm" style="position:absolute;bottom:10px;right:10px;cursor:pointer;">Change photo<input type="file" accept="image/*" id="clientImageInput" style="display:none;"></label>':'')+
       '</div>'+
       '<div class="overview-grid">'+
@@ -4215,7 +4215,7 @@ function renderAuthScreen(mode){
   var isSignup = mode === 'signup';
   var html =
     '<div class="login-card">'+
-    '<div class="login-brand"><div class="brand-mark"><img src="/logo-mark.png" alt="Blue Kite Media"></div><div><div class="brand-name">Blue Kite Media</div><div class="brand-sub">Production Ops</div></div></div>'+
+    '<div class="login-brand"><div class="brand-mark"><img src="/logo-mark.png" alt="Blue Kite Media"></div><div><div class="brand-name">Blue Kite Media</div><div class="brand-sub">Take Flight</div></div></div>'+
     '<div class="login-title">'+(isSignup?'Create your account':'Sign in')+'</div>'+
     '<div class="login-sub">'+(isSignup?'You\'ll need the invite code your manager or admin sent you - unless you\'re the very first person setting this up.':'Use your Blue Kite Ops account.')+'</div>'+
     '<div class="login-error" id="authError"></div>'+
@@ -4490,7 +4490,7 @@ function hideIdleWarningOverlay(){
     document.getElementById('shell').style.display = 'none';
     var el = document.createElement('div');
     el.id = 'authScreen';
-    el.innerHTML = '<div class="login-card"><div class="login-brand"><div class="brand-mark"><img src="/logo-mark.png" alt="Blue Kite Media"></div><div><div class="brand-name">Blue Kite Media</div><div class="brand-sub">Production Ops</div></div></div>'+
+    el.innerHTML = '<div class="login-card"><div class="login-brand"><div class="brand-mark"><img src="/logo-mark.png" alt="Blue Kite Media"></div><div><div class="brand-name">Blue Kite Media</div><div class="brand-sub">Take Flight</div></div></div>'+
       '<div class="login-title">Not configured yet</div>'+
       '<div class="login-sub">Copy <code>.env.example</code> to <code>.env</code>, fill in your Supabase project URL and anon key, then restart the app. See README.md for the full setup.</div></div>';
     document.body.appendChild(el);
