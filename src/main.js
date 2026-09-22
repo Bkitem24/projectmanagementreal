@@ -372,11 +372,13 @@ function showScreenshotNotice(){
   el.className = 'screenshot-notice';
   el.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z"/><circle cx="12" cy="13" r="4"/></svg><span>Screenshot captured</span>';
   document.body.appendChild(el);
-  try{
-    var audio = new Audio(SCREENSHOT_BEEP);
-    audio.volume = 0.5;
-    audio.play().catch(function(){});
-  }catch(e){}
+  if(!soundsMuted){
+    try{
+      var audio = new Audio(SCREENSHOT_BEEP);
+      audio.volume = 0.5;
+      audio.play().catch(function(){});
+    }catch(e){}
+  }
   setTimeout(function(){
     el.classList.add('leaving');
     setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); }, 300);
@@ -2286,6 +2288,8 @@ function loadTaskCollab(taskId, panel){ return loadCollab('task', taskId, panel)
 var ICON_PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
 var ICON_BACK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>';
 var ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>';
+var ICON_SOUND_ON = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="4 9 9 9 13 5 13 19 9 15 4 15 4 9"/><path d="M17.5 8.5a5 5 0 0 1 0 7"/><path d="M20.3 6a9 9 0 0 1 0 12"/></svg>';
+var ICON_SOUND_OFF = '<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="4 9 9 9 13 5 13 19 9 15 4 15 4 9"/><line x1="17" y1="9" x2="23" y2="15"/><line x1="23" y1="9" x2="17" y2="15"/></svg>';
 var ICON_REPLY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17 4 12l5-5"/><path d="M4 12h10a4 4 0 0 1 4 4v2"/></svg>';
 var ICON_CHECK_CIRCLE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4 12 14.01l-3-3"/></svg>';
 // kind is 'task' or 'episode' - same comments/links/attachments UI, just
@@ -3205,6 +3209,24 @@ var activeCall = null;
 var pendingRingCall = null;
 var RING_TIMEOUT_MS = 30000; // confirmed with Humayun 2026-09-23
 
+// ---------- SOUND MUTE (Phase 5, per Humayun's own brainstormed idea: "an
+// in-app sound-effects mute/unmute toggle") - covers every synthesized
+// sound this app plays: the ringtone, the call-connected beep, the mention
+// ping, and the TimeLog screenshot-captured beep. Persisted to
+// localStorage so it survives a reload/relaunch, per-device (not synced -
+// there's no natural "account setting" home for this, and a per-device
+// mute is what someone actually wants if e.g. they're in a shared office).
+var soundsMuted = (function(){ try { return localStorage.getItem('bko_soundsMuted')==='1'; } catch(e){ return false; } })();
+function setSoundsMuted(muted){
+  soundsMuted = !!muted;
+  try { localStorage.setItem('bko_soundsMuted', soundsMuted?'1':'0'); } catch(e){}
+  var btn = document.getElementById('soundMuteBtn');
+  if(btn){
+    btn.innerHTML = soundsMuted ? ICON_SOUND_OFF : ICON_SOUND_ON;
+    btn.title = soundsMuted ? 'Sound effects muted - click to unmute' : 'Mute sound effects';
+  }
+}
+
 // ---------- RINGTONE (soft, synthesized - no bundled audio file, so
 // nothing to source/license/ship) ----------
 // A gentle two-note chime (Web Audio oscillators, not a sample), repeating
@@ -3217,6 +3239,7 @@ var RING_TIMEOUT_MS = 30000; // confirmed with Humayun 2026-09-23
 var ringtoneCtx = null, ringtoneTimer = null;
 function startRingtone(){
   stopRingtone();
+  if(soundsMuted) return; // ring silently - the incoming-call popup itself still shows
   try { ringtoneCtx = new (window.AudioContext || window.webkitAudioContext)(); }
   catch(e){ return; } // no Web Audio support - ring silently rather than error
   // Some webviews create a fresh AudioContext already suspended until a user
@@ -3257,6 +3280,7 @@ function stopRingtone(){
 // one-shot context (not shared/reused like the ringtone's) since this can
 // fire several times in quick succession in a group call as people join.
 function playCallConnectedBeep(){
+  if(soundsMuted) return;
   try {
     var ctx = new (window.AudioContext || window.webkitAudioContext)();
     var now = ctx.currentTime;
@@ -3284,6 +3308,7 @@ function playCallConnectedBeep(){
 // deliberately shorter and higher than the call-connected beep so the two
 // are never confused.
 function playMentionPing(){
+  if(soundsMuted) return;
   try {
     var ctx = new (window.AudioContext || window.webkitAudioContext)();
     var now = ctx.currentTime;
@@ -4509,6 +4534,11 @@ function hideIdleWarningOverlay(){
   if(reloadBtn) reloadBtn.addEventListener('click', function(){ location.reload(); });
   var notifBellBtn = document.getElementById('notifBellBtn');
   if(notifBellBtn) notifBellBtn.addEventListener('click', openNotificationsPanel);
+  var soundMuteBtn = document.getElementById('soundMuteBtn');
+  if(soundMuteBtn){
+    setSoundsMuted(soundsMuted); // paints the right icon/title for whatever localStorage already said
+    soundMuteBtn.addEventListener('click', function(){ setSoundsMuted(!soundsMuted); });
+  }
 
   var boundOnce = false;
   var lastUid = null;
