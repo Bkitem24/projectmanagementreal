@@ -143,7 +143,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .theme-toggle{background:none;border:1px solid var(--line);border-radius:8px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-soft);transition:border-color .15s ease,transform .12s ease,background .15s ease;}
 .theme-toggle:hover{border-color:var(--blue);transform:translateY(-1px) rotate(8deg);background:var(--blue-soft);}
 #main{flex:1;min-width:0;height:100vh;overflow-y:auto;scroll-behavior:smooth;}
-#app{max-width:1080px;margin:0 auto;padding:34px 30px 90px;}
+#app{max-width:1200px;margin:0 auto;padding:34px 30px 90px;}
 #app.anim{animation:viewIn .32s var(--ease);}
 @keyframes viewIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}
 .nav-toggle{display:none;position:fixed;top:14px;left:14px;z-index:40;background:var(--surface);border:1px solid var(--line);border-radius:9px;width:38px;height:38px;font-size:16px;cursor:pointer;box-shadow:var(--shadow);}
@@ -162,8 +162,10 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
    bottom) so the composer is always reachable without hunting for it. */
 .episode-layout{display:flex;align-items:flex-start;gap:24px;}
 .episode-main-col{flex:1;min-width:0;}
-.episode-side-col{width:360px;flex:0 0 auto;}
-.episode-side-panel{position:sticky;top:20px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:19px;max-height:calc(100vh - 40px);display:flex;flex-direction:column;}
+/* Round 12: widened (360->440) and given a real minimum height - flagged
+   as "too small" alongside the general chat redesign below. */
+.episode-side-col{width:440px;flex:0 0 auto;}
+.episode-side-panel{position:sticky;top:20px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;min-height:min(640px,calc(100vh - 40px));max-height:calc(100vh - 40px);display:flex;flex-direction:column;}
 .episode-side-scroll{flex:1;min-height:0;display:flex;flex-direction:column;}
 .episode-side-scroll .collab-list{flex:1;overflow-y:auto;}
 .episode-side-scroll .composer{flex:0 0 auto;}
@@ -246,7 +248,12 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .episode-sub{font-size:12px;color:var(--muted);margin-top:2px;}
 .checklist-group{margin-bottom:24px;}
 .checklist-completed{padding-top:14px;border-top:1px dashed var(--line);}
-.checklist-completed .checklist-group-title{color:var(--muted);opacity:.8;}
+/* A muted/low-opacity label read as "disabled", not "done" - a completed
+   list should look like an accomplishment, not a faded-out one (flagged
+   2026-09-28). Green check-circle icon + the same --good green already
+   used for a checked task's checkbox, full opacity. */
+.checklist-completed .checklist-group-title{color:var(--good);display:inline-flex;align-items:center;gap:5px;}
+.checklist-completed .checklist-group-title svg{flex:0 0 auto;}
 .checklist-group-head{display:flex;align-items:center;gap:8px;margin-bottom:9px;}
 .checklist-group-title{font-size:13px;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;}
 .task-row{display:flex;align-items:flex-start;gap:12px;background:var(--surface);border:1px solid var(--line);border-left:3px solid var(--role-color,var(--line));border-radius:9px;padding:12px 14px;margin-bottom:8px;transition:opacity .2s ease,transform .15s ease,box-shadow .15s ease;}
@@ -256,7 +263,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .task-check:hover:not([disabled]){border-color:var(--good);}
 .task-check:active:not([disabled]){transform:scale(.88);}
 .task-check:checked{background:var(--good);border-color:var(--good);}
-.task-check:checked::after{content:'';position:absolute;left:6.5px;top:2.5px;width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);animation:checkPop .18s cubic-bezier(.34,1.56,.64,1);}
+.task-check:checked::after{content:'';position:absolute;left:7px;top:5px;width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);animation:checkPop .18s cubic-bezier(.34,1.56,.64,1);}
 .task-check[disabled]{cursor:default;opacity:.65;}
 @keyframes checkPop{from{transform:rotate(45deg) scale(0);}to{transform:rotate(45deg) scale(1);}}
 .task-body{flex:1;min-width:0;}
@@ -274,35 +281,52 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .task-custom-badge{font-size:10.5px;color:var(--blue-2);background:var(--blue-soft);padding:2.5px 8px;border-radius:6px;font-weight:600;}
 .task-expand-btn{font-size:11.5px;color:var(--blue-2);background:none;border:none;cursor:pointer;padding:0;font-weight:600;margin-top:6px;}
 .task-expand-btn:hover{text-decoration:underline;}
-.task-collab{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line);display:flex;flex-direction:column;gap:10px;}
+/* Round 12: a dashed top border on an otherwise bare box read as an
+   afterthought and felt cramped ("too small") - now a proper card with its
+   own background/border/padding and a real minimum height so it presents
+   as a genuine discussion panel even with only one or two messages in it. */
+.task-collab{margin-top:12px;padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:12px;min-height:200px;display:flex;flex-direction:column;gap:10px;}
 /* Phase 2.5 batch A: a class selector like .task-collab{display:flex} beats
    the browser's own [hidden]{display:none} rule on specificity, so setting
    the `hidden` attribute (which the JS "Hide discussion" handler already
    did correctly) had no visible effect - the panel just kept rendering as
    a flex box. This one rule is what actually makes hiding it work. */
 .task-collab[hidden]{display:none;}
-/* Discussion/comments - restyled (Phase 1 final fixes) to read like an
-   actual chat thread (Slack/ClickUp) instead of a flat stack of text:
-   avatar + grouped header per message, hover-revealed edit/delete, an
-   "(edited)" tag, and a distinct composer area at the bottom. */
-.collab-list{display:flex;flex-direction:column;gap:2px;}
-.collab-empty{font-size:12.5px;color:var(--muted);padding:10px 2px;}
-.comment-row{font-size:13px;display:flex;gap:9px;padding:6px 8px;border-radius:8px;transition:background .1s ease;}
+/* Discussion/comments - rebuilt (round 12, 2026-09-28, flagged as looking
+   "like IRC" and cramped) into an actual modern chat UI
+   (Slack/Discord/Linear-style): consecutive messages from the same person
+   within a few minutes GROUP together - avatar/name/timestamp only on the
+   first one, the rest just show the text with a hover-reveal timestamp in
+   the gutter, same as every mainstream chat app does it and the single
+   biggest reason a flat "name: message" repeated on every line reads as
+   dated. Hover actions are now a small floating toolbar card overlapping
+   the message (top-right) instead of a row that pushes layout around. See
+   loadCollab()'s isContinuation()/renderComment() in main.js. */
+.collab-list{display:flex;flex-direction:column;gap:10px;padding:4px 2px;}
+.collab-empty{font-size:13px;color:var(--muted);padding:14px 2px;}
+.comment-row{font-size:13.5px;display:flex;gap:11px;padding:5px 10px;border-radius:10px;transition:background .1s ease;position:relative;}
 .comment-row:hover{background:var(--paper);}
-.comment-row .avatar{flex:0 0 auto;width:28px;height:28px;font-size:11.5px;}
-.comment-main{flex:1;min-width:0;}
-.comment-row-head{display:flex;align-items:center;gap:7px;}
-.comment-author{font-weight:600;}
-.comment-time{color:var(--muted);font-size:11px;}
+.comment-row .avatar{flex:0 0 auto;width:32px;height:32px;font-size:12.5px;}
+.comment-row-grouped{margin-top:-4px;padding-top:1px;padding-bottom:1px;}
+.comment-gutter-time{flex:0 0 auto;width:32px;padding-top:3px;text-align:center;font-size:10px;color:var(--muted);opacity:0;transition:opacity .1s ease;}
+.comment-row:hover .comment-gutter-time{opacity:1;}
+.comment-main{flex:1;min-width:0;position:relative;}
+.comment-row-head{display:flex;align-items:baseline;gap:8px;margin-bottom:1px;}
+.comment-author{font-weight:700;font-size:13.5px;}
+.comment-time{color:var(--muted);font-size:11.5px;}
 .comment-edited-tag{color:var(--muted);font-size:11px;font-style:italic;}
-.comment-actions{display:flex;gap:2px;margin-left:auto;opacity:0;transition:opacity .1s ease;}
-.comment-row:hover .comment-actions,.link-row:hover .comment-actions{opacity:1;}
-.icon-btn{border:none;background:none;color:var(--muted);cursor:pointer;padding:3px;border-radius:5px;display:inline-flex;align-items:center;justify-content:center;}
+/* Floating hover toolbar (replaces the old inline "pushes the header over"
+   actions row) - a small elevated card, same idea as Slack/Notion/Linear's
+   own per-message hover controls, so it works identically whether the
+   message has a visible header (first in a group) or not (grouped). */
+.comment-actions{display:flex;gap:1px;position:absolute;top:-14px;right:4px;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:2px;box-shadow:var(--shadow-sm);opacity:0;transition:opacity .1s ease,transform .1s ease;transform:translateY(2px);z-index:2;}
+.comment-row:hover .comment-actions,.link-row:hover .comment-actions{opacity:1;transform:none;}
+.icon-btn{border:none;background:none;color:var(--muted);cursor:pointer;padding:5px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;}
 .icon-btn:hover{background:var(--line);color:var(--ink);}
-.comment-body{white-space:pre-wrap;word-break:break-word;line-height:1.45;margin-top:1px;}
+.comment-body{white-space:pre-wrap;word-break:break-word;line-height:1.5;}
 .comment-body a{color:var(--blue-2);}
 .comment-edit-box,.link-edit-box{display:flex;flex-direction:column;gap:6px;margin-top:3px;}
-.comment-edit-input{width:100%;min-height:52px;border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:7px 9px;font-size:13px;font-family:inherit;resize:vertical;}
+.comment-edit-input{width:100%;min-height:60px;border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:9px 11px;font-size:13.5px;font-family:inherit;resize:vertical;}
 .comment-edit-actions{display:flex;gap:8px;}
 .link-edit-box{flex-direction:row;flex-wrap:wrap;align-items:center;flex:1;}
 .link-edit-url,.link-edit-label{border:1px solid var(--line);background:var(--surface);border-radius:8px;padding:6px 9px;font-size:12.5px;}
@@ -312,32 +336,37 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 /* Reply-to-comment threading (Phase 2.5 batch C, one level deep) - a
    thread's replies sit indented under their parent, with a thin left rule
    so the grouping reads clearly without a full nested-avatar tree. */
-.comment-thread{margin-left:28px;padding-left:11px;border-left:2px solid var(--line);display:flex;flex-direction:column;gap:2px;}
-.composer-reply-banner{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:6px 8px;}
+.comment-thread{margin-left:32px;padding-left:13px;margin-top:2px;border-left:2px solid var(--line);display:flex;flex-direction:column;gap:10px;}
+.composer-reply-banner{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:7px 10px;}
 .composer-reply-banner strong{color:var(--ink);}
-.composer-reply-banner button{margin-left:auto;border:none;background:var(--line-soft);color:var(--muted);width:17px;height:17px;border-radius:50%;cursor:pointer;font-size:10px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;}
+.composer-reply-banner button{margin-left:auto;border:none;background:var(--line-soft);color:var(--muted);width:18px;height:18px;border-radius:50%;cursor:pointer;font-size:10px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;}
 .composer-reply-banner button:hover{background:var(--overdue);color:#fff;}
-.link-row,.attachment-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 8px;border-radius:8px;}
+.link-row,.attachment-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 8px;border-radius:8px;position:relative;}
 .link-row:hover{background:var(--paper);}
 .link-row a,.attachment-row a{color:var(--blue-2);text-decoration:none;}
 .link-row a:hover,.attachment-row a:hover{text-decoration:underline;}
+/* Links are a single compact line, not a stacked header+body block like a
+   chat message - the floating hover-toolbar card (.comment-actions above)
+   would hover awkwardly above a one-line row, so links keep the simpler
+   inline-at-the-end-of-the-row treatment they always had. */
+.link-row .comment-actions{position:static;background:none;border:none;box-shadow:none;padding:0;margin-left:auto;transform:none;}
 .link-icon{flex:0 0 auto;}
-/* Composer (2026-09-21 overhaul): one auto-growing textarea (like this
-   chat box) instead of a fixed single-line input, a paperclip that stages
-   a file as a chip rather than firing an upload the instant it's picked,
-   and one Send that posts whichever combination of text/file is staged. */
-.composer{display:flex;flex-direction:column;gap:7px;margin-top:4px;padding-top:9px;border-top:1px solid var(--line);}
+/* Composer - rebuilt into a real bordered "card" (2026-09-28) instead of a
+   thin top border with a plain pill input, to match modern chat apps'
+   compose bars and to fix "too small" - a taller minimum height, more
+   internal padding, and bigger attach/send buttons. */
+.composer{display:flex;flex-direction:column;gap:8px;margin-top:8px;padding:10px;background:var(--paper);border:1px solid var(--line);border-radius:14px;}
 .composer-chip-row:not([hidden]){display:flex;flex-wrap:wrap;gap:6px;}
-.composer-file-chip{display:inline-flex;align-items:center;gap:6px;background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 10px;font-size:12px;color:var(--ink);animation:chipIn .15s var(--ease);}
+.composer-file-chip{display:inline-flex;align-items:center;gap:6px;background:var(--surface);border:1px solid var(--line);border-radius:999px;padding:4px 6px 4px 10px;font-size:12px;color:var(--ink);animation:chipIn .15s var(--ease);}
 .composer-file-chip button{border:none;background:var(--line-soft);color:var(--muted);width:17px;height:17px;border-radius:50%;cursor:pointer;font-size:10px;line-height:1;display:inline-flex;align-items:center;justify-content:center;}
 .composer-file-chip button:hover{background:var(--overdue);color:#fff;}
 @keyframes chipIn{from{opacity:0;transform:translateY(3px) scale(.94);}to{opacity:1;transform:none;}}
 .composer-input-row{display:flex;align-items:flex-end;gap:8px;}
-.composer-attach-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:1px solid var(--line);background:var(--paper);border-radius:50%;cursor:pointer;font-size:15px;transition:background .12s ease,border-color .12s ease;}
+.composer-attach-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border:1px solid var(--line);background:var(--surface);border-radius:50%;cursor:pointer;font-size:16px;transition:background .12s ease,border-color .12s ease;}
 .composer-attach-btn:hover{background:var(--line-soft);border-color:var(--ink-soft);}
-.composer-textarea{flex:1;border:1px solid var(--line);background:var(--paper);border-radius:18px;padding:8px 14px;font-size:12.5px;font-family:inherit;line-height:1.4;resize:none;max-height:160px;overflow-y:auto;transition:border-color .12s ease;}
+.composer-textarea{flex:1;border:1px solid var(--line);background:var(--surface);border-radius:16px;padding:10px 15px;font-size:13.5px;font-family:inherit;line-height:1.45;resize:none;min-height:40px;max-height:200px;overflow-y:auto;transition:border-color .12s ease;}
 .composer-textarea:focus{outline:none;border-color:var(--accent);}
-.composer-send-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:34px;height:34px;border:none;background:var(--accent);color:#fff;border-radius:50%;cursor:pointer;transition:transform .1s var(--ease),background .12s ease;}
+.composer-send-btn{flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;border:none;background:var(--accent);color:#fff;border-radius:50%;cursor:pointer;transition:transform .1s var(--ease),background .12s ease;}
 .composer-send-btn:hover{background:var(--accent-2);transform:scale(1.06);}
 .composer-send-btn:active{transform:scale(.94);}
 .composer-send-btn:disabled{opacity:.5;cursor:default;transform:none;}
@@ -441,6 +470,16 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .toast.error{background:var(--overdue);color:#fff;}
 .toast.success{background:var(--good);color:#fff;}
 .toast.info{background:var(--accent-2);color:#fff;}
+.toast-msg{flex:1;}
+/* Undo toast action button (Phase 2.5 batch D) - a small pill that reads
+   clearly against any of the three toast colors above. */
+.toast-action{flex:0 0 auto;border:none;background:rgba(255,255,255,.22);color:inherit;font-weight:700;font-size:12px;padding:5px 11px;border-radius:7px;cursor:pointer;transition:background .12s ease;}
+.toast-action:hover{background:rgba(255,255,255,.34);}
+/* Optimistic hide for a row whose delete was just clicked (Phase 2.5 batch
+   D) - the actual delete is delayed behind the undo toast above, but a row
+   still sitting in a list the user is looking at needs to vanish right
+   away, not up to 6 seconds later. */
+.pending-remove{display:none;}
 @keyframes toastIn{from{opacity:0;transform:translateY(10px) scale(.96);}to{opacity:1;transform:translateY(0) scale(1);}}
 .toast.leaving{animation:toastOut .18s ease forwards;}
 @keyframes toastOut{to{opacity:0;transform:translateY(6px);}}
@@ -505,11 +544,26 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 @keyframes pulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.4;transform:scale(1.4);}}
 .timelog-badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;padding:5px 11px;border-radius:99px;background:var(--good-soft);color:var(--good);cursor:pointer;border:none;}
 .timelog-badge.off{background:var(--line-soft);color:var(--muted);}
-/* Persistent clock in/out control, visible on every page (not just TimeLog) -
-   fixed bottom-right so it never collides with the Connect call bar
-   (bottom-center) or the mobile nav-toggle hamburger (top-left). */
-.global-clock-badge{position:fixed;bottom:18px;right:18px;z-index:55;padding:9px 16px;font-size:13px;box-shadow:var(--shadow-lg);}
-@media (max-width:900px){ .global-clock-badge{bottom:14px;right:14px;} }
+/* Persistent clock in/out + Standby controls, visible on every page (not
+   just TimeLog) - fixed bottom-right so they never collide with the
+   Connect call bar (bottom-center) or the mobile nav-toggle hamburger
+   (top-left). Both badges now sit in one flex group instead of the clock
+   badge alone being fixed-positioned. */
+.global-clock-group{position:fixed;bottom:18px;right:18px;z-index:55;display:flex;align-items:center;gap:8px;}
+.global-clock-group .timelog-badge{padding:9px 16px;font-size:13px;box-shadow:var(--shadow-lg);}
+@media (max-width:900px){ .global-clock-group{bottom:14px;right:14px;} }
+/* Standby (Phase 2.5 batch D, item #8, Humayun's confirmed 2026-09-26
+   scope: a manual 3rd state, "orange light", next to clock-in/out, for
+   whenever someone's kicked off something external they're waiting on - a
+   Premiere render, an AI job - that the app has no way to detect on its
+   own). NOT a clock-out: the session stays open, just pauses screenshot/
+   activity capture - see src/lib/timelog.js's enterStandby()/exitStandby().
+   Reuses the existing --waiting amber already used for "waiting on"
+   elsewhere rather than inventing a new color. Disabled/hidden while
+   clocked out - there's nothing to pause yet. */
+.standby-badge{background:var(--waiting-soft);color:var(--waiting);}
+.standby-badge.on{background:var(--waiting);color:var(--accent-ink);}
+.standby-badge[disabled]{opacity:.35;cursor:not-allowed;}
 
 /* ---------- TimeLog screenshot grid ---------- */
 .shot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:12px;}
@@ -538,6 +592,11 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .activity-seg.activity-high{background:var(--good);}
 .session-activity-empty{font-size:12px;color:var(--muted);padding:4px 0;}
 .session-activity-stats{display:flex;gap:14px;font-size:11px;color:var(--muted);margin-top:5px;}
+/* Standby windows (Phase 2.5 batch D) - shown above the activity bar so a
+   gap in it reads as self-reported waiting time, not as broken capture. */
+.session-standby{display:flex;flex-wrap:wrap;gap:6px;}
+.session-standby:not(:empty){margin-bottom:8px;}
+.standby-pill{font-size:11px;font-weight:600;color:var(--waiting);background:var(--waiting-soft);padding:3px 9px;border-radius:999px;}
 .session-shots{margin-top:10px;}
 
 /* ---------- Connect (presence + calling) ---------- */

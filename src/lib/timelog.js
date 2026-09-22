@@ -118,6 +118,7 @@ function randomScreenshotDelay() {
 }
 
 export function isClockedIn() { return !!state; }
+export function isOnStandby() { return !!(state && state.standby); }
 
 // Rust's rdev::listen() can fail to actually install the global hook (e.g.
 // blocked by security software, or a Windows API mismatch) - before this,
@@ -199,10 +200,27 @@ export async function resumeIfClockedIn(uid) {
   state = { uid, timeEntryId: open.id, windowStart: new Date().toISOString() };
   warnedThisSession = false;
   idleWarningActive = false;
-  scheduleScreenshot();
-  scheduleActivityFlush();
-  scheduleHeartbeat();
-  scheduleIdlePoll();
+  // A reload while on Standby shouldn't silently drop back into active
+  // capture - check for a standbyPeriods row that's still open (no
+  // endedAt) for this session and, if there is one, resume paused instead
+  // of scheduling screenshot/activity/idle-poll below, same as
+  // enterStandby() leaves things.
+  let openStandby;
+  try {
+    const sbSnap = await db.collection('standbyPeriods').where('timeEntryId', '==', open.id).orderBy('startedAt', 'desc').limit(1).get();
+    const latest = sbSnap.docs[0] && Object.assign({ id: sbSnap.docs[0].id }, sbSnap.docs[0].data());
+    if (latest && !latest.endedAt) openStandby = latest;
+  } catch (e) {}
+  if (openStandby) {
+    state.standby = true;
+    state.standbyPeriodId = openStandby.id;
+    scheduleHeartbeat();
+  } else {
+    scheduleScreenshot();
+    scheduleActivityFlush();
+    scheduleHeartbeat();
+    scheduleIdlePoll();
+  }
   try {
     // Safe to call again even if the native hook is already running -
     // timelog_start() only resets the activity buffer the first time
@@ -225,9 +243,59 @@ export async function clockOut() {
   if (s.heartbeatTimer) clearTimeout(s.heartbeatTimer);
   if (s.idleTimer) clearTimeout(s.idleTimer);
   idleWarningActive = false;
+  // Standby (see enterStandby() below) doesn't survive a clock-out - close
+  // out whatever period is still open so it doesn't sit open forever.
+  if (s.standbyPeriodId) {
+    await db.doc('standbyPeriods/' + s.standbyPeriodId).update({ endedAt: new Date().toISOString() }).catch(() => {});
+  }
   await flushActivity(s).catch(() => {});
   await db.doc('timeEntries/' + s.timeEntryId).update({ clockOutAt: new Date().toISOString() });
   try { await tauriInvoke('timelog_stop'); } catch (e) {}
+}
+
+// ---------------------------------------------------------------------------
+// Standby (Phase 2.5 batch D, item #8) - a manual, self-declared third state
+// for "I've kicked off something external I'm waiting on" (a Premiere
+// render, an AI job) that the app has no way to detect on its own. NOT a
+// clock-out: the timeEntries row stays open (this time still counts as
+// worked/paid), only screenshot/activity capture pauses, and idle-detection
+// is suspended too - the whole point is being away from the keyboard on
+// purpose, so the idle force-pause warning would otherwise fire and clock
+// the person out entirely, defeating it. Heartbeat keeps running regardless
+// so a long Standby wait doesn't get mistaken for an abandoned session.
+//
+// The native keyboard/mouse hook itself is NOT stopped (timelog_stop isn't
+// called - that would also end screen capture ability and isn't needed just
+// to pause), so it keeps silently accumulating in Rust's own buffer the
+// whole time Standby is on. exitStandby() below drains and DISCARDS that
+// buffer rather than saving it - it was never meant to be tracked activity,
+// and saving it would otherwise bleed into whatever the next real activity
+// sample records after Standby ends.
+export async function enterStandby() {
+  if (!state || state.standby) return;
+  const s = state;
+  if (s.screenshotTimer) { clearTimeout(s.screenshotTimer); s.screenshotTimer = null; }
+  if (s.activityTimer) { clearTimeout(s.activityTimer); s.activityTimer = null; }
+  if (s.idleTimer) { clearTimeout(s.idleTimer); s.idleTimer = null; }
+  idleWarningActive = false;
+  await flushActivity(s).catch(() => {}); // save whatever accumulated before Standby began - that part was real work
+  s.standby = true;
+  const id = 'sb_' + randomId().slice(0, 10);
+  s.standbyPeriodId = id;
+  await db.doc('standbyPeriods/' + id).set({ timeEntryId: s.timeEntryId, userId: s.uid, startedAt: new Date().toISOString(), endedAt: null });
+}
+
+export async function exitStandby() {
+  if (!state || !state.standby) return;
+  const s = state;
+  s.standby = false;
+  const periodId = s.standbyPeriodId; s.standbyPeriodId = null;
+  try { await tauriInvoke('timelog_drain_activity'); } catch (e) {} // discard, not save - see the design note above
+  s.windowStart = new Date().toISOString();
+  scheduleScreenshot();
+  scheduleActivityFlush();
+  scheduleIdlePoll();
+  if (periodId) await db.doc('standbyPeriods/' + periodId).update({ endedAt: new Date().toISOString() }).catch(() => {});
 }
 
 // Keeps lastHeartbeatAt fresh while genuinely clocked in and running - this
@@ -357,5 +425,13 @@ export async function listTimeEntries(userId, limitN) {
 // screenshot, see the activity around it" view in main.js.
 export async function listActivityForEntry(timeEntryId) {
   const snap = await db.collection('activitySamples').where('timeEntryId', '==', timeEntryId).orderBy('windowStart', 'asc').get();
+  return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
+}
+
+// Every Standby window during one clock-in session - shown in the TimeLog
+// session detail view so a gap in screenshots/activity reads as "they said
+// they were on Standby here," not as something broken or suspicious.
+export async function listStandbyForEntry(timeEntryId) {
+  const snap = await db.collection('standbyPeriods').where('timeEntryId', '==', timeEntryId).orderBy('startedAt', 'asc').get();
   return snap.docs.map((d) => Object.assign({ id: d.id }, d.data()));
 }

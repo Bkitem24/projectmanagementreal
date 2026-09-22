@@ -110,6 +110,10 @@ function addDaysISO(iso, days){ var p=iso.split('-'); var d=new Date(+p[0],+p[1]
 function fmtDate(iso){ if(!iso) return ''; var p=iso.split('-'); var d=new Date(+p[0],+p[1]-1,+p[2]); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
 function fmtDateFull(iso){ if(!iso) return ''; var p=iso.split('-'); var d=new Date(+p[0],+p[1]-1,+p[2]); return d.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric',year:'numeric'}); }
 function fmtDateTime(iso){ if(!iso) return ''; var d=new Date(iso); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' · '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
+// Time only, no date - the hover-reveal gutter timestamp on a "grouped"
+// chat message (round 12) that already sits right under its own group's
+// full author+date header, so repeating the date would be redundant.
+function fmtTimeShort(iso){ if(!iso) return ''; var d=new Date(iso); return d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
 function daysUntil(iso){ var p=iso.split('-'); var d=new Date(+p[0],+p[1]-1,+p[2]); var t=new Date(); t.setHours(0,0,0,0); return Math.round((d-t)/86400000); }
 function nthWeekdayOfMonth(year, monthIdx, weekOfMonth, weekday){
   if(weekOfMonth===-1){
@@ -152,16 +156,64 @@ function toggleTheme(){
 }
 
 // ---------- toast ----------
-function showToast(type, message){
+function showToast(type, message, opts){
+  opts = opts || {};
   var root = document.getElementById('toastRoot');
   var el = document.createElement('div');
   el.className = 'toast '+(type||'');
-  el.textContent = message;
-  root.appendChild(el);
-  setTimeout(function(){
+  var msgEl = document.createElement('span');
+  msgEl.className = 'toast-msg';
+  msgEl.textContent = message;
+  el.appendChild(msgEl);
+  function dismiss(){
     el.classList.add('leaving');
     setTimeout(function(){ if(el.parentNode) el.parentNode.removeChild(el); }, 200);
-  }, 3400);
+  }
+  if(opts.actionLabel && opts.onAction){
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'toast-action';
+    btn.textContent = opts.actionLabel;
+    btn.addEventListener('click', function(){ opts.onAction(); dismiss(); });
+    el.appendChild(btn);
+  }
+  root.appendChild(el);
+  setTimeout(dismiss, opts.duration||3400);
+}
+
+// Undo toast for destructive actions (Phase 2.5 batch D, item #7: "a brief
+// toast with an Undo button appears right after a destructive/consequential
+// action" - Humayun's confirmed scope, 2026-09-26. Deliberately NOT "do the
+// write, then try to reverse it if Undo is clicked" - for a cascading
+// delete (deleting a client takes its templates/episodes/tasks/comments
+// down with it via the database's own "on delete cascade" foreign keys,
+// see schema.sql) that would mean snapshotting and faithfully restoring an
+// entire subtree, a much bigger and riskier feature than "I clicked the
+// wrong delete button" calls for. Instead the actual write is DELAYED:
+// nothing happens until the window passes with no click, so clicking Undo
+// just means the write never runs at all - correct by construction,
+// regardless of how deep whatever it's deleting cascades. This replaces
+// the old confirm()/prompt() dialogs on every destructive action they were
+// asked to cover; the client permanent-delete flow keeps ITS OWN stronger
+// "type the name back" gate in front of this on top, since that one is
+// singled out as needing more friction than a plain click.
+var UNDO_WINDOW_MS = 6000;
+// onUndo (optional) is for callers that optimistically hid something in
+// the DOM directly - a row still sitting right there in a list the user is
+// actively looking at needs to disappear the instant they click delete,
+// not up to 6 seconds later when the real write finally happens, so those
+// callers hide the element themselves and pass a callback to un-hide it if
+// Undo is clicked. Callers where the user has already navigated away from
+// whatever they deleted (episode/client delete) don't need this - there's
+// nothing left on screen to restore.
+function actionWithUndo(message, commitFn, onUndo){
+  var cancelled = false;
+  var timer = setTimeout(function(){ if(!cancelled) commitFn(); }, UNDO_WINDOW_MS);
+  showToast('success', message, {
+    duration: UNDO_WINDOW_MS,
+    actionLabel: 'Undo',
+    onAction: function(){ cancelled = true; clearTimeout(timer); if(onUndo) onUndo(); showToast('info', 'Undone'); }
+  });
 }
 
 // A short beep, embedded as base64 so a screenshot notice never depends on
@@ -837,10 +889,10 @@ function renderClient(clientId){
       var typed = prompt('This permanently deletes "'+c.name+'" and ALL of its episodes, tasks, comments and attachments. This cannot be undone.\n\nType the client\'s name to confirm:');
       if(typed===null) return;
       if(typed.trim()!==c.name){ showToast('error','Name didn\'t match - nothing was deleted.'); return; }
-      db.doc('clients/'+clientId).delete().then(function(){
-        showToast('success', c.name+' deleted');
-        location.hash = '#/';
-      }).catch(function(err){ showToast('error', errMsg(err)); });
+      actionWithUndo(c.name+' deleted (with everything under it)', function(){
+        db.doc('clients/'+clientId).delete().catch(function(err){ showToast('error', errMsg(err)); });
+      });
+      location.hash = '#/';
     });
 
     var imgInput = document.getElementById('clientImageInput');
@@ -919,8 +971,10 @@ function renderClient(clientId){
       }).join('');
       Array.prototype.forEach.call(box.querySelectorAll('[data-rule]'), function(btn){
         btn.addEventListener('click', function(){
-          if(!confirm('Remove this schedule rule? Episodes already generated from it are kept.')) return;
-          db.doc('scheduleRules/'+btn.getAttribute('data-rule')).delete().then(function(){ showToast('success','Rule removed'); }).catch(function(err){ showToast('error', errMsg(err)); });
+          var ruleId = btn.getAttribute('data-rule');
+          actionWithUndo('Rule removed (episodes already generated from it are kept)', function(){
+            db.doc('scheduleRules/'+ruleId).delete().catch(function(err){ showToast('error', errMsg(err)); });
+          });
         });
       });
     }, function(){});
@@ -966,7 +1020,7 @@ function renderClient(clientId){
       // same as the open rows above, to keep that spacing consistent
       // instead of collapsing to 0 inside one wrapped block.
       list.innerHTML = open.map(rowHtml).join('') +
-        (done.length ? '<div class="checklist-group-head checklist-completed" style="margin-top:6px;"><span class="checklist-group-title">Completed ('+done.length+')</span></div>'+done.map(rowHtml).join('') : '');
+        (done.length ? '<div class="checklist-group-head checklist-completed" style="margin-top:6px;"><span class="checklist-group-title">'+ICON_CHECK_CIRCLE+' Completed ('+done.length+')</span></div>'+done.map(rowHtml).join('') : '');
     }
     var unsubEp = db.collection('episodes').where('clientId','==',clientId).orderBy('dueDate','asc').limit(30).onSnapshot(function(es){
       lastEpSnap = es;
@@ -1563,11 +1617,10 @@ function renderEpisode(episodeId){
     });
     var deleteEpBtn = document.getElementById('deleteEpisodeBtn');
     if(deleteEpBtn) deleteEpBtn.addEventListener('click', function(){
-      if(!confirm('Permanently delete "'+e.title+'" and all of its tasks, comments and attachments? This cannot be undone.')) return;
-      db.doc('episodes/'+episodeId).delete().then(function(){
-        showToast('success', 'Episode deleted');
-        location.hash = '#/client/'+e.clientId;
-      }).catch(function(err){ showToast('error', errMsg(err)); });
+      actionWithUndo('"'+e.title+'" deleted (with all its tasks, comments and attachments)', function(){
+        db.doc('episodes/'+episodeId).delete().catch(function(err){ showToast('error', errMsg(err)); });
+      });
+      location.hash = '#/client/'+e.clientId;
     });
     loadCollab('episode', episodeId, document.getElementById('epCollab'));
 
@@ -1765,10 +1818,11 @@ function renderEpisode(episodeId){
         btn.addEventListener('click', function(){
           var taskId = btn.getAttribute('data-delete-task');
           var label = btn.getAttribute('data-label');
-          if(!confirm('Delete "'+label+'"? Its comments, links and attachments go with it. This cannot be undone.')) return;
-          db.doc('tasks/'+taskId).delete().then(function(){
-            showToast('success','Task deleted');
-          }).catch(function(err){ showToast('error', errMsg(err)); });
+          var row = btn.closest('.task-row');
+          if(row) row.classList.add('pending-remove');
+          actionWithUndo('"'+label+'" deleted', function(){
+            db.doc('tasks/'+taskId).delete().catch(function(err){ showToast('error', errMsg(err)); if(row) row.classList.remove('pending-remove'); });
+          }, function(){ if(row) row.classList.remove('pending-remove'); });
         });
       });
       Array.prototype.forEach.call(box.querySelectorAll('[data-collab]'), function(btn){
@@ -1987,6 +2041,7 @@ var ICON_PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" s
 var ICON_BACK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>';
 var ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>';
 var ICON_REPLY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17 4 12l5-5"/><path d="M4 12h10a4 4 0 0 1 4 4v2"/></svg>';
+var ICON_CHECK_CIRCLE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><path d="M22 4 12 14.01l-3-3"/></svg>';
 // kind is 'task' or 'episode' - same comments/links/attachments UI, just
 // pointed at a different set of tables. Rewritten (Phase 1 final fixes) to
 // feel like an actual chat/discussion tool instead of a flat list: grouped
@@ -2085,7 +2140,21 @@ function loadCollab(kind, id, panel){
           '</div>';
       }
 
-      function renderComment(c, isReply){
+      // Consecutive-message grouping (round 12): the single biggest reason
+      // a plain comment list reads as dated/"IRC-like" is repeating the
+      // same avatar+name+timestamp on every line even when one person
+      // just sent three messages in a row. Same author, within 5 minutes
+      // of the previous message, in the same list (top-level feed or one
+      // reply thread - callers reset prev between the two) -> grouped: no
+      // avatar/name/date header, just the text, with the exact time
+      // available on hover in the gutter where the avatar would be.
+      var GROUP_WINDOW_MS = 5*60*1000;
+      function isContinuation(prev, cur){
+        if(!prev || prev.authorId!==cur.authorId) return false;
+        var dt = new Date(cur.createdAt) - new Date(prev.createdAt);
+        return dt>=0 && dt<GROUP_WINDOW_MS;
+      }
+      function renderComment(c, isReply, grouped){
         if(editingComment===c.id){
           return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
             '<div class="comment-main"><div class="comment-row-head"><span class="comment-author">'+escapeHtml(who(c.authorId))+'</span></div>'+
@@ -2097,14 +2166,27 @@ function loadCollab(kind, id, panel){
         // replying to a reply just joins the same thread instead of
         // nesting further, see the note above `replyingTo`.
         var replyBtn = !isReply ? '<button type="button" class="icon-btn" data-reply-comment="'+c.id+'" title="Reply">'+ICON_REPLY+'</button>' : '';
-        return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
-          '<div class="comment-main"><div class="comment-row-head">'+
+        // Built directly (not via the shared actionButtons() links also
+        // use) so the reply button can live in the same floating toolbar
+        // as edit/delete instead of a separate control.
+        var editBtn = canEditRow(c.authorId) ? '<button type="button" class="icon-btn" data-edit-comment="'+c.id+'" title="Edit">'+ICON_PENCIL+'</button>' : '';
+        var delBtn = canDeleteRow(c.authorId) ? '<button type="button" class="icon-btn" data-delete-comment="'+c.id+'" title="Delete">'+ICON_TRASH+'</button>' : '';
+        var actions = (replyBtn||editBtn||delBtn) ? '<span class="comment-actions">'+replyBtn+editBtn+delBtn+'</span>' : '';
+        var gutter = grouped
+          ? '<span class="comment-gutter-time" title="'+escapeHtml(fmtDateTime(c.createdAt))+'">'+fmtTimeShort(c.createdAt)+'</span>'
+          : avatarFor(c.authorId);
+        var head = grouped ? '' :
+          '<div class="comment-row-head">'+
           '<span class="comment-author">'+escapeHtml(who(c.authorId))+'</span>'+
           '<span class="comment-time">'+fmtDateTime(c.createdAt)+'</span>'+
           (c.editedAt?'<span class="comment-edited-tag">(edited)</span>':'')+
-          replyBtn+
-          actionButtons('edit-comment="'+c.id+'"', 'delete-comment="'+c.id+'"', c.authorId)+
-          '</div>'+(c.body?'<div class="comment-body">'+linkifyHtml(escapeHtml(c.body))+'</div>':'')+
+          '</div>';
+        // A grouped message has no header to hang "(edited)" off of - put
+        // it inline after the body instead, so that info still shows up.
+        var editedInline = (grouped && c.editedAt) ? ' <span class="comment-edited-tag">(edited)</span>' : '';
+        return '<div class="comment-row'+(grouped?' comment-row-grouped':'')+'" data-id="'+c.id+'">'+gutter+
+          '<div class="comment-main">'+actions+head+
+          (c.body?'<div class="comment-body">'+linkifyHtml(escapeHtml(c.body))+editedInline+'</div>':'')+
           attHtml+renderReactions(c.id)+
           '</div></div>';
       }
@@ -2133,11 +2215,25 @@ function loadCollab(kind, id, panel){
         comments.forEach(function(c){ if(c.parentId) (repliesByParent[c.parentId]=repliesByParent[c.parentId]||[]).push(c); });
         var replyTarget = replyingTo ? comments.filter(function(c){ return c.id===replyingTo; })[0] : null;
         if(replyingTo && !replyTarget) replyingTo = null; // its parent got deleted from under us - fails open, back to an ordinary top-level message
+        // Consecutive-message grouping (round 12) - see isContinuation():
+        // tracked per list, reset between the top-level feed and each
+        // individual reply thread, so a thread's first reply is never
+        // "grouped" against whatever the last top-level message happened
+        // to be.
+        var prevTop = null;
         panel.innerHTML =
           '<div class="collab-list">'+
             (topLevelComments.length ? topLevelComments.map(function(c){
+              var topGrouped = isContinuation(prevTop, c);
+              prevTop = c;
               var replies = repliesByParent[c.id]||[];
-              return renderComment(c,false) + (replies.length ? '<div class="comment-thread">'+replies.map(function(r){ return renderComment(r,true); }).join('')+'</div>' : '');
+              var prevReply = null;
+              var repliesHtml = replies.map(function(r){
+                var rGrouped = isContinuation(prevReply, r);
+                prevReply = r;
+                return renderComment(r,true,rGrouped);
+              }).join('');
+              return renderComment(c,false,topGrouped) + (replies.length ? '<div class="comment-thread">'+repliesHtml+'</div>' : '');
             }).join('') : '<div class="collab-empty">No comments yet - start the discussion below.</div>') +
           '</div>'+
           (links.length?'<div class="collab-list collab-links">'+links.map(renderLink).join('')+'</div>':'')+
@@ -2260,11 +2356,15 @@ function loadCollab(kind, id, panel){
         });
         Array.prototype.forEach.call(panel.querySelectorAll('[data-delete-comment]'), function(btn){
           btn.addEventListener('click', function(){
-            if(!confirm('Delete this comment?')) return;
-            supabase.from(cfg.comments).delete().eq('id', btn.getAttribute('data-delete-comment')).then(function(res2){
-              if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-              loadCollab(kind, id, panel);
-            });
+            var cid = btn.getAttribute('data-delete-comment');
+            var row = btn.closest('.comment-row');
+            if(row) row.classList.add('pending-remove');
+            actionWithUndo('Comment deleted', function(){
+              supabase.from(cfg.comments).delete().eq('id', cid).then(function(res2){
+                if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
+                loadCollab(kind, id, panel);
+              });
+            }, function(){ if(row) row.classList.remove('pending-remove'); });
           });
         });
 
@@ -2287,11 +2387,15 @@ function loadCollab(kind, id, panel){
         });
         Array.prototype.forEach.call(panel.querySelectorAll('[data-delete-link]'), function(btn){
           btn.addEventListener('click', function(){
-            if(!confirm('Delete this link?')) return;
-            supabase.from(cfg.links).delete().eq('id', btn.getAttribute('data-delete-link')).then(function(res2){
-              if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-              loadCollab(kind, id, panel);
-            });
+            var lid = btn.getAttribute('data-delete-link');
+            var row = btn.closest('.link-row');
+            if(row) row.classList.add('pending-remove');
+            actionWithUndo('Link deleted', function(){
+              supabase.from(cfg.links).delete().eq('id', lid).then(function(res2){
+                if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
+                loadCollab(kind, id, panel);
+              });
+            }, function(){ if(row) row.classList.remove('pending-remove'); });
           });
         });
 
@@ -2299,16 +2403,19 @@ function loadCollab(kind, id, panel){
         Array.prototype.forEach.call(panel.querySelectorAll('[data-delete-attachment]'), function(btn){
           btn.addEventListener('click', function(ev){
             ev.stopPropagation();
-            if(!confirm('Delete this attachment?')) return;
             var attId = btn.getAttribute('data-delete-attachment');
             var key = btn.getAttribute('data-key');
-            supabase.from(cfg.attachments).delete().eq('id', attId).then(function(res2){
-              if(res2.error){ showToast('error', errMsg(res2.error)); return; }
-              // Best-effort - the row is already gone either way, so a failure
-              // here just means an orphaned object in the bucket, not a stuck UI.
-              deleteRemoteFile(key).catch(function(){});
-              loadCollab(kind, id, panel);
-            });
+            var row = btn.closest('.attachment-thumb, .attachment-file');
+            if(row) row.classList.add('pending-remove');
+            actionWithUndo('Attachment deleted', function(){
+              supabase.from(cfg.attachments).delete().eq('id', attId).then(function(res2){
+                if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
+                // Best-effort - the row is already gone either way, so a failure
+                // here just means an orphaned object in the bucket, not a stuck UI.
+                deleteRemoteFile(key).catch(function(){});
+                loadCollab(kind, id, panel);
+              });
+            }, function(){ if(row) row.classList.remove('pending-remove'); });
           });
         });
 
@@ -2561,12 +2668,16 @@ function renderTimeLog(){
   paint(
     '<div class="page-head"><div><div class="eyebrow">TimeLog</div><h1 class="page-title">Your time & activity</h1>'+
     '<div class="page-sub">Screenshots and activity are recorded automatically while you\'re clocked in, organized below by clock-in session. You can view your own history here, but not delete it.</div></div>'+
+    '<div style="display:flex;gap:8px;">'+
     '<button type="button" class="timelog-badge'+(timelog.isClockedIn()?'':' off')+'" id="clockToggleBtn">'+(timelog.isClockedIn()?'● Clocked in - stop':'Clock in')+'</button>'+
+    '<button type="button" class="timelog-badge standby-badge'+(timelog.isOnStandby()?' on':'')+'" id="standbyToggleBtn"'+(timelog.isClockedIn()?'':' hidden')+' title="Waiting on something external (a render, an export, etc.) - pauses screenshots/activity without clocking out">'+(timelog.isOnStandby()?'● Standby - resume':'Standby')+'</button>'+
+    '</div>'+
     '</div>'+
     (canManage()?'<div class="field" style="max-width:320px;margin-bottom:20px;"><label>Viewing</label><select id="timelogWho"></select></div>':'')+
     '<div id="sessionList"><div class="skeleton" style="height:120px;margin-bottom:12px;"></div><div class="skeleton" style="height:120px;"></div></div>'
   );
   document.getElementById('clockToggleBtn').addEventListener('click', toggleClock);
+  document.getElementById('standbyToggleBtn').addEventListener('click', toggleStandby);
 
   function loadFor(uid){
     var box = document.getElementById('sessionList');
@@ -2579,6 +2690,7 @@ function renderTimeLog(){
           '<div class="session-when">'+(!e.clockOutAt?'<span class="session-live-dot"></span>':'')+'<strong>'+escapeHtml(sessionWhenLabel(e))+'</strong></div>'+
           '<div class="session-duration">'+escapeHtml(sessionDurationLabel(e))+'</div>'+
           '</div>'+
+          '<div class="session-standby" id="sessionStandby_'+i+'"></div>'+
           '<div class="session-activity" id="sessionActivity_'+i+'"><div class="skeleton" style="height:26px;"></div></div>'+
           '<div class="session-shots" id="sessionShots_'+i+'"></div>'+
           '</div>';
@@ -2591,11 +2703,24 @@ function renderTimeLog(){
     Promise.all([
       timelog.listActivityForEntry(e.id).catch(function(){ return []; }),
       timelog.listScreenshotsForEntry(e.id, 40).catch(function(){ return []; }),
+      timelog.listStandbyForEntry(e.id).catch(function(){ return []; }),
     ]).then(function(res){
-      var samples = res[0], shots = res[1];
+      var samples = res[0], shots = res[1], standbyPeriods = res[2];
       var activityBox = document.getElementById('sessionActivity_'+i);
       var shotsBox = document.getElementById('sessionShots_'+i);
+      var standbyBox = document.getElementById('sessionStandby_'+i);
       if(!activityBox || !shotsBox) return; // navigated away before this resolved
+
+      // Standby windows (Phase 2.5 batch D) - shown so a gap in the
+      // activity bar/screenshots below reads as "self-reported waiting on
+      // something external," not as something broken or worth questioning.
+      if(standbyBox){
+        standbyBox.innerHTML = standbyPeriods.length ? standbyPeriods.map(function(sb){
+          var startLabel = new Date(sb.startedAt).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+          var endLabel = sb.endedAt ? new Date(sb.endedAt).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}) : 'now';
+          return '<span class="standby-pill">On Standby '+escapeHtml(startLabel)+' – '+escapeHtml(endLabel)+'</span>';
+        }).join('') : '';
+      }
 
       if(!samples.length){
         activityBox.innerHTML = '<div class="session-activity-empty">No activity recorded yet for this session.</div>';
@@ -3091,9 +3216,11 @@ function wireCancelInviteButtons(box){
     btn.addEventListener('click', function(){
       var id = btn.getAttribute('data-cancel-invite');
       var email = btn.getAttribute('data-email');
-      if(!confirm('Cancel the invite for '+email+'? Its code stops working immediately - they will need a brand new invite if you change your mind.')) return;
-      btn.disabled = true;
-      cancelInvite(id).then(function(){ showToast('success','Invite canceled'); route(); }).catch(function(err){ btn.disabled=false; showToast('error', errMsg(err)); });
+      var row = btn.closest('.roster-row');
+      if(row) row.classList.add('pending-remove');
+      actionWithUndo('Invite for '+email+' canceled', function(){
+        cancelInvite(id).then(function(){ route(); }).catch(function(err){ if(row) row.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
+      }, function(){ if(row) row.classList.remove('pending-remove'); });
     });
   });
 }
@@ -3143,8 +3270,12 @@ function renderTeamSettings(){
   svcBox.innerHTML = mine.length ? mine.map(function(s){ return '<span class="tag">'+escapeHtml(s.name)+' <button type="button" class="tag-remove" data-del-svc="'+s.id+'">✕</button></span>'; }).join('') : '<div class="empty-state">No team-specific services yet.</div>';
   Array.prototype.forEach.call(svcBox.querySelectorAll('[data-del-svc]'), function(btn){
     btn.addEventListener('click', function(){
-      if(!confirm('Delete this service from the vocabulary?')) return;
-      deleteService(btn.getAttribute('data-del-svc')).then(function(){ refreshServicesCache().then(function(){ route(); }); }).catch(function(err){ showToast('error', errMsg(err)); });
+      var svcId = btn.getAttribute('data-del-svc');
+      var tag = btn.closest('.tag');
+      if(tag) tag.classList.add('pending-remove');
+      actionWithUndo('Service deleted', function(){
+        deleteService(svcId).then(function(){ refreshServicesCache().then(function(){ route(); }); }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
+      }, function(){ if(tag) tag.classList.remove('pending-remove'); });
     });
   });
 }
@@ -3310,8 +3441,12 @@ function renderAdmin(){
     // not just from that one team's own Manager-facing Team page.
     Array.prototype.forEach.call(box.querySelectorAll('[data-del-svc]'), function(btn){
       btn.addEventListener('click', function(){
-        if(!confirm('Delete this service from the vocabulary?')) return;
-        deleteService(btn.getAttribute('data-del-svc')).then(function(){ refreshServicesCache().then(route); }).catch(function(err){ showToast('error', errMsg(err)); });
+        var svcId = btn.getAttribute('data-del-svc');
+        var tag = btn.closest('.tag');
+        if(tag) tag.classList.add('pending-remove');
+        actionWithUndo('Service deleted', function(){
+          deleteService(svcId).then(function(){ refreshServicesCache().then(route); }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
+        }, function(){ if(tag) tag.classList.remove('pending-remove'); });
       });
     });
 
@@ -3383,7 +3518,15 @@ function renderAdmin(){
         cb.addEventListener('change', function(){
           var checked = Array.prototype.filter.call(rolesBox.querySelectorAll('input[type=checkbox]'), function(c){ return c.checked; }).map(function(c){ return c.value; });
           if(!checked.length){ cb.checked = true; showToast('error','Must keep at least one role.'); return; }
-          assignRoles(uid, checked).then(function(){ showToast('success','Updated'); }).catch(function(err){ cb.checked = !cb.checked; showToast('error', errMsg(err)); });
+          // Role change (Phase 2.5 batch D, item #7 - named explicitly as
+          // an undo-toast candidate) - the checkbox already flips instantly
+          // (native browser behavior, before this handler even runs), so
+          // undo here means reverting IT specifically back, not re-deriving
+          // anything from the write.
+          var justChecked = cb.checked;
+          actionWithUndo('Role updated', function(){
+            assignRoles(uid, checked).catch(function(err){ cb.checked = !justChecked; showToast('error', errMsg(err)); });
+          }, function(){ cb.checked = !justChecked; });
         });
       });
     });
@@ -3397,8 +3540,12 @@ function renderAdmin(){
   gBox.innerHTML = globals.length ? globals.map(function(s){ return '<span class="tag tag-global">'+escapeHtml(s.name)+' <button type="button" class="tag-remove" data-del-svc="'+s.id+'">✕</button></span>'; }).join('') : '<div class="empty-state">No global services yet.</div>';
   Array.prototype.forEach.call(gBox.querySelectorAll('[data-del-svc]'), function(btn){
     btn.addEventListener('click', function(){
-      if(!confirm('Delete this global service?')) return;
-      deleteService(btn.getAttribute('data-del-svc')).then(function(){ refreshServicesCache().then(route); }).catch(function(err){ showToast('error', errMsg(err)); });
+      var svcId = btn.getAttribute('data-del-svc');
+      var tag = btn.closest('.tag');
+      if(tag) tag.classList.add('pending-remove');
+      actionWithUndo('Global service deleted', function(){
+        deleteService(svcId).then(function(){ refreshServicesCache().then(route); }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
+      }, function(){ if(tag) tag.classList.remove('pending-remove'); });
     });
   });
 }
@@ -3537,30 +3684,55 @@ function toggleClock(){
   if(timelog.isClockedIn()) timelog.clockOut().then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
   else timelog.clockIn(myUid).then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
 }
+// Standby (Phase 2.5 batch D, item #8) - only meaningful while clocked in;
+// the button itself is hidden/disabled otherwise (see updateClockUI), but
+// guard here too in case this ever fires from somewhere else.
+function toggleStandby(){
+  if(!timelog.isClockedIn()) return;
+  if(timelog.isOnStandby()) timelog.exitStandby().then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
+  else timelog.enterStandby().then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
+}
 function updateClockUI(){
   var clockedIn = timelog.isClockedIn();
+  var onStandby = timelog.isOnStandby();
   var label = clockedIn ? '● Clocked in - stop' : 'Clock in';
+  var standbyLabel = onStandby ? '● Standby - resume' : 'Standby';
   var badge = document.getElementById('globalClockBadge');
   if(badge){ badge.classList.toggle('off', !clockedIn); badge.textContent = label; }
   var pageBtn = document.getElementById('clockToggleBtn');
   if(pageBtn){ pageBtn.classList.toggle('off', !clockedIn); pageBtn.textContent = label; }
+  var sBadge = document.getElementById('globalStandbyBadge');
+  if(sBadge){ sBadge.hidden = !clockedIn; sBadge.disabled = !clockedIn; sBadge.classList.toggle('on', onStandby); sBadge.textContent = standbyLabel; }
+  var sPageBtn = document.getElementById('standbyToggleBtn');
+  if(sPageBtn){ sPageBtn.hidden = !clockedIn; sPageBtn.disabled = !clockedIn; sPageBtn.classList.toggle('on', onStandby); sPageBtn.textContent = standbyLabel; }
   // Refresh the TimeLog page's own session list immediately if it's open,
   // rather than only after the next manual reload.
   if(location.hash.replace(/^#/,'')==='/timelog') route();
 }
 function ensureGlobalClockBadge(){
-  if(document.getElementById('globalClockBadge')) { updateClockUI(); return; }
+  if(document.getElementById('globalClockGroup')) { updateClockUI(); return; }
+  var group = document.createElement('div');
+  group.id = 'globalClockGroup';
+  group.className = 'global-clock-group';
   var btn = document.createElement('button');
   btn.type = 'button';
   btn.id = 'globalClockBadge';
-  btn.className = 'timelog-badge global-clock-badge';
+  btn.className = 'timelog-badge';
   btn.addEventListener('click', toggleClock);
-  document.body.appendChild(btn);
+  var sBtn = document.createElement('button');
+  sBtn.type = 'button';
+  sBtn.id = 'globalStandbyBadge';
+  sBtn.className = 'timelog-badge standby-badge';
+  sBtn.title = 'Waiting on something external (a render, an export, etc.) - pauses screenshots/activity without clocking out';
+  sBtn.addEventListener('click', toggleStandby);
+  group.appendChild(btn);
+  group.appendChild(sBtn);
+  document.body.appendChild(group);
   updateClockUI();
 }
 function removeGlobalClockBadge(){
-  var badge = document.getElementById('globalClockBadge');
-  if(badge) badge.remove();
+  var group = document.getElementById('globalClockGroup');
+  if(group) group.remove();
 }
 
 // ---------- CLOCK-IN OVERLAY ----------
