@@ -9,7 +9,7 @@ import { uploadFile, fileUrl, fetchProtectedUrl, downloadProtectedFile, deleteRe
 import * as timelog from './lib/timelog.js';
 import * as musicPlayer from './lib/music.js';
 import { MOODS } from './lib/music.js';
-import { connectConfigured, listenForConnects, newCallId, ring, joinCallRoom, startLocalSession, pullRemoteTrack, endSession } from './lib/connect.js';
+import { connectConfigured, listenForConnects, newCallId, ring, declineRing, joinCallRoom, startLocalSession, pullRemoteTrack, endSession } from './lib/connect.js';
 
 // ---------- constants ----------
 var ROLES = [
@@ -2293,6 +2293,86 @@ var activeCall = null;
 //   participants: { [uid]: { uid, name, sessionId, audioEl } },
 //   pendingPullUids: [], // FIFO - see wireRemoteAudio's comment
 // }
+// An incoming ring waiting on Accept/Decline - only ever set for someone
+// who's clocked out (see handleIncomingRing). { callId, fromUid, timer }.
+// Kept separate from activeCall since it's the pre-answer state, not a call
+// we've actually joined yet.
+var pendingRingCall = null;
+var RING_TIMEOUT_MS = 30000; // confirmed with Humayun 2026-09-23
+
+// ---------- RINGTONE (soft, synthesized - no bundled audio file, so
+// nothing to source/license/ship) ----------
+// A gentle two-note chime (Web Audio oscillators, not a sample), repeating
+// every ~2.2s while a call is ringing and someone's not yet accepted or
+// declined it. Kept deliberately quiet/soft per Humayun's ask, not a loud
+// alarm-style ring. Each ring gets its own fresh AudioContext, closed again
+// in stopRingtone() - simplest way to guarantee nothing keeps playing (or
+// keeps a context alive) after the popup is gone, without having to track
+// a shared context's lifecycle across unrelated calls.
+var ringtoneCtx = null, ringtoneTimer = null;
+function startRingtone(){
+  stopRingtone();
+  try { ringtoneCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+  catch(e){ return; } // no Web Audio support - ring silently rather than error
+  // Some webviews create a fresh AudioContext already suspended until a user
+  // gesture resumes it; by the time any ring can arrive here someone has
+  // already signed in and clicked around, so this should already be
+  // allowed, but resume() is the standard, harmless way to ask anyway.
+  try { ringtoneCtx.resume(); } catch(e){}
+  function chime(){
+    if(!ringtoneCtx) return;
+    var now = ringtoneCtx.currentTime;
+    [523.25, 659.25].forEach(function(freq, i){ // soft two-note chime (C5, E5)
+      var osc = ringtoneCtx.createOscillator();
+      var gain = ringtoneCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      var t = now + i*0.18;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.12, t+0.03); // soft attack, modest volume
+      gain.gain.exponentialRampToValueAtTime(0.0001, t+0.5); // gentle decay
+      osc.connect(gain); gain.connect(ringtoneCtx.destination);
+      osc.start(t); osc.stop(t+0.55);
+    });
+  }
+  chime();
+  ringtoneTimer = setInterval(chime, 2200);
+}
+function stopRingtone(){
+  if(ringtoneTimer){ clearInterval(ringtoneTimer); ringtoneTimer = null; }
+  if(ringtoneCtx){ try{ ringtoneCtx.close(); }catch(e){} ringtoneCtx = null; }
+}
+
+// ---------- INCOMING CALL POPUP (Accept/Decline, only shown when the
+// person being rung is clocked out - see handleIncomingRing) ----------
+// A standalone fixed-position card appended straight to document.body,
+// same pattern as renderCallBar()'s #connectBar - it needs to appear
+// un-asked-for on top of whatever page is currently showing, which the
+// generic openModal() isn't built for (it expects an explicit user action
+// to open it, and its backdrop-click-to-dismiss would let a ring be
+// swallowed by an accidental click).
+function showIncomingCallPopup(fromProfile, onAccept, onDecline){
+  hideIncomingCallPopup();
+  var el = document.createElement('div');
+  el.id = 'incomingCallPopup';
+  el.className = 'incoming-call-popup';
+  el.innerHTML =
+    '<div><div class="incoming-call-name">'+escapeHtml((fromProfile&&fromProfile.name)||'Someone')+'</div>'+
+    '<div class="incoming-call-sub">is calling…</div></div>'+
+    '<div class="incoming-call-actions">'+
+      '<button type="button" class="btn btn-sm btn-danger" id="incomingCallDecline">Decline</button>'+
+      '<button type="button" class="btn btn-sm incoming-call-accept" id="incomingCallAccept">Accept</button>'+
+    '</div>';
+  document.body.appendChild(el);
+  document.getElementById('incomingCallAccept').addEventListener('click', function(){ onAccept(); });
+  document.getElementById('incomingCallDecline').addEventListener('click', function(){ onDecline('declined'); });
+  startRingtone();
+}
+function hideIncomingCallPopup(){
+  var el = document.getElementById('incomingCallPopup');
+  if(el) el.remove();
+  stopRingtone();
+}
 
 function wireRemoteAudio(call){
   // One RTCPeerConnection, one /pull per remote participant - each pull
@@ -2417,6 +2497,24 @@ function startCall(targetUids, names){
     activeCall.pc = session.pc; activeCall.localStream = session.localStream; activeCall.sessionId = session.sessionId;
     wireRemoteAudio(activeCall);
     enterCallRoom(activeCall);
+    // Fallback safety net for a genuine 1:1 ring, on top of the explicit
+    // declineRing()/'ring-missed' signal handled by handleRingMissed above -
+    // that signal only ever arrives if the other side's app is actually
+    // open and running to send it. If it never shows up at all (their app
+    // isn't running, crashed, lost network mid-ring...) this is what stops
+    // us waiting on "Calling…" forever: give their own ~30s ring window a
+    // several-second head start, then give up too if still nobody's here.
+    // Deliberately only for a single target - a multi-person ring shouldn't
+    // auto-abandon itself just because one of several people hasn't picked
+    // up yet.
+    if(targetUids.length===1){
+      setTimeout(function(){
+        if(activeCall && activeCall.callId===newId && Object.keys(activeCall.participants).length===0){
+          showToast('info', (names[targetUids[0]]||'They')+' didn\'t answer.');
+          hangupCall();
+        }
+      }, RING_TIMEOUT_MS + 8000);
+    }
     return Promise.all(targetUids.map(function(uid){ return ring(uid, fromProfile, newId, targetUids.length>1); }));
   }).catch(function(err){
     showToast('error', errMsg(err));
@@ -2426,13 +2524,19 @@ function startCall(targetUids, names){
 
 // Someone rang us - either a brand-new call, an invite into a call already
 // in progress, or (per the no-call-waiting rule below) something we have to
-// ignore because we're busy. Per spec there's no accept/decline step when
-// we're online - joining the room IS answering.
-function handleIncomingRing(payload){
-  var fromUid = payload.from && payload.from.id;
-  var callId = payload.callId;
-  if(!fromUid || !callId) return;
-  if(activeCall) return; // already on a call - no call-waiting yet, same as before
+// ignore because we're busy. Per the original spec there's no accept/
+// decline step while we're online - joining the room IS answering, and
+// that's still exactly what happens here for anyone currently clocked in.
+//
+// 2026-09-23: clocked OUT changes this - Humayun's ask was that someone who
+// clocked out shouldn't have every call just barge straight in on them
+// unannounced. Instead this shows a real Accept/Decline popup with a soft
+// ringtone (see above) and a ~30s window; Accept does exactly what the
+// always-instant path below does, Decline (or the timeout) tells the
+// caller via declineRing()/'ring-missed' (see connect.js) rather than just
+// silently never answering, so the caller isn't left staring at "Calling…"
+// forever with no idea what happened.
+function joinRingedCall(callId){
   activeCall = { callId: callId, participants:{}, pendingPullUids: [], hadOtherParticipant:false, muted:false };
   renderCallBar();
   startLocalSession().then(function(session){
@@ -2444,6 +2548,41 @@ function handleIncomingRing(payload){
     showToast('error', 'Could not join call: '+errMsg(err));
     if(activeCall && activeCall.callId===callId){ if(activeCall.room) activeCall.room.leave(); activeCall=null; renderCallBar(); }
   });
+}
+function handleIncomingRing(payload){
+  var fromUid = payload.from && payload.from.id;
+  var callId = payload.callId;
+  if(!fromUid || !callId) return;
+  if(activeCall || pendingRingCall) return; // already on a call, or already ringing on an unanswered one - no call-waiting, same as before
+  if(timelog.isClockedIn()){ joinRingedCall(callId); return; }
+  var myProfileForDecline = { id: myUid, name: (myProfile&&myProfile.displayName)||'' };
+  function finishRing(reason){
+    if(pendingRingCall && pendingRingCall.timer) clearTimeout(pendingRingCall.timer);
+    pendingRingCall = null;
+    hideIncomingCallPopup();
+    if(reason) declineRing(fromUid, myProfileForDecline, callId, reason).catch(function(){});
+  }
+  pendingRingCall = { callId: callId, fromUid: fromUid, timer: setTimeout(function(){ finishRing('timeout'); }, RING_TIMEOUT_MS) };
+  showIncomingCallPopup(payload.from,
+    function onAccept(){ finishRing(null); joinRingedCall(callId); },
+    function onDecline(reason){ finishRing(reason); }
+  );
+}
+
+// The caller-side half of the 2026-09-23 accept-required-when-clocked-out
+// change - the only way we ever find out a ring we sent was declined or
+// went unanswered, since presence (what tells us someone ACCEPTED) simply
+// never fires for either of those. Only acts on it if that call is still
+// the one we're actually waiting on, and still empty - if other people
+// already joined a group ring, one holdout declining shouldn't end it for
+// everyone else.
+function handleRingMissed(payload){
+  var callId = payload.callId;
+  if(!activeCall || activeCall.callId!==callId) return;
+  if(Object.keys(activeCall.participants).length>0) return; // someone else is already with us - not the whole call falling through
+  var name = (payload.from && payload.from.name) || 'They';
+  showToast('info', name+(payload.reason==='timeout' ? ' didn\'t answer.' : ' declined the call.'));
+  hangupCall();
 }
 
 // Modal: online teammates not already on the current call, to ring in.
@@ -2492,7 +2631,7 @@ function openStartGroupCallModal(){
 function renderConnect(){
   paint(
     '<div class="page-head"><div><div class="eyebrow">Connect</div><h1 class="page-title">Who\'s around</h1>'+
-    '<div class="page-sub">Online teammates can be reached instantly - no ringing, it just connects.</div></div>'+
+    '<div class="page-sub">Online teammates who are clocked in connect instantly - no ringing. Someone clocked out gets a real ring they can accept or decline.</div></div>'+
     '<button type="button" class="btn btn-primary btn-sm" id="groupConnectBtn" style="width:auto;">Start a group Connect</button></div>'+
     (connectConfigured?'':'<div class="empty-state" style="margin-bottom:20px;"><strong>Connect isn\'t wired up yet</strong>This needs a Cloudflare Realtime App ID/Token - see README.md. The roster and online/offline status below already work.</div>')+
     '<div id="roster"><div class="skeleton" style="height:50px;"></div></div>'
@@ -3083,6 +3222,8 @@ function hideIdleWarningOverlay(){
       myUid = null; myRole = null; myProfile = null; myTeamId = null; lastUid = null; boundOnce = false;
       stopPresence();
       hangupCall();
+      if(pendingRingCall){ if(pendingRingCall.timer) clearTimeout(pendingRingCall.timer); pendingRingCall = null; }
+      hideIncomingCallPopup();
       removeGlobalClockBadge();
       navBackStack = []; navSkipPush = false; navCurrentHash = null;
       renderAuthScreen('signin');
@@ -3133,7 +3274,7 @@ function hideIdleWarningOverlay(){
         Promise.all([refreshTeamsCache(), refreshServicesCache()]).then(route);
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
-          listenForConnects(myUid, { onRing: handleIncomingRing });
+          listenForConnects(myUid, { onRing: handleIncomingRing, onRingMissed: handleRingMissed });
           if(p.musicMood && p.musicMood!=='none'){ mountMusicPlayer(); musicPlayer.initPlayer('ytMusicMount', p.musicMood); }
           // Reconnect to an already-open clock-in (e.g. after a reload)
           // before ever deciding whether to show the "ready to start your
