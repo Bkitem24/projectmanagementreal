@@ -623,9 +623,17 @@ function openModal(title, innerHtml, onSubmit, submitLabel, opts){
 // opening on top of, or instead of, an open lightbox) and keep hijacking
 // zoom/Escape keystrokes for a lightbox that isn't showing anymore.
 var activeLightboxKeydown = null;
+// Same idea as activeLightboxKeydown above, for the hero image editor's
+// drag-to-reposition handlers (openHeroEditModal) - those attach to
+// `document` (need to keep tracking the drag even if the mouse leaves the
+// small preview box mid-drag), so they need the same explicit cleanup on
+// close or a second "Edit hero image" open would stack duplicate listeners.
+var activeHeroDragMove = null, activeHeroDragUp = null;
 function closeModal(){
   var root=document.getElementById('modalRoot'); root.classList.remove('open'); root.innerHTML='';
   if(activeLightboxKeydown){ document.removeEventListener('keydown', activeLightboxKeydown); activeLightboxKeydown = null; }
+  if(activeHeroDragMove){ document.removeEventListener('mousemove', activeHeroDragMove); activeHeroDragMove = null; }
+  if(activeHeroDragUp){ document.removeEventListener('mouseup', activeHeroDragUp); activeHeroDragUp = null; }
 }
 function setModalBusy(busy, busyLabel){
   var btn = document.getElementById('modalSubmit');
@@ -852,48 +860,144 @@ document.addEventListener('keydown', function(e){
 })();
 
 // ---------- SPOTLIGHT (Employee of the Month) ----------
+// Hero photo + its pan position (2026-09-29: "I want the hero banner image
+// on the homepage fully editable... admin only privilege") - a single
+// settings row (schema_v20.sql's appSettings/hero), falling back to the
+// built-in /hero-banner.webp at its original position if no admin has
+// customized it yet. Longhand background-* properties (not the `background`
+// shorthand) so this can override just the photo layer while the darkening
+// gradient overlay - kept on purpose, per Humayun's explicit "do retain the
+// opacity filter" - stays as a fixed rule in style.css independently.
+function heroBackgroundStyle(hero){
+  var url = (hero && hero.heroImageUrl) || '/hero-banner.webp';
+  var x = (hero && hero.heroPosX!=null) ? hero.heroPosX : 53;
+  var y = (hero && hero.heroPosY!=null) ? hero.heroPosY : 56;
+  return 'background-image:linear-gradient(100deg,rgba(10,22,48,.55) 0%,rgba(10,22,48,.08) 55%,transparent 80%),url(\''+escapeHtml(url)+'\');'+
+    'background-position:0 0,'+x+'% '+y+'%;background-size:auto,cover;background-repeat:no-repeat,no-repeat;';
+}
+
 function renderSpotlight(container){
   var monthKey = currentMonthKey();
-  // Was a one-time .get() - meaning it only ever loaded when this page was
-  // first opened. If Admin changed the spotlight while an employee already
-  // had Home open, they'd never see it until they navigated away and back.
-  // Switched to .onSnapshot() so it updates live like everything else.
-  var unsub = db.doc('spotlights/'+monthKey).onSnapshot(function(snap){
-    var s = snap.exists ? snap.data() : null;
-    function wireEditBtn(){
-      // This used to run right after the outer .get()/.onSnapshot()
-      // callback fired, but for the "spotlight already set" branch below,
-      // the actual innerHTML write happens one tick later inside
-      // fetchProfiles().then(...) - so the button didn't exist in the DOM
-      // yet when this looked for it, and the click handler silently never
-      // attached. That's the "Edit button does nothing" bug: the button
-      // was real, it just had no listener. Now this only runs after the
-      // HTML that contains the button has actually been written.
+  var latestHero = null; // appSettings/hero row, or null (use the built-in default)
+  var latestSpotlightSnap = 'pending'; // 'pending' until the first snapshot arrives, so neither listener renders before both have a real value at least once
+  var mgr = canManage();
+
+  function render(){
+    if(latestSpotlightSnap==='pending') return; // wait for the spotlight's own first snapshot - the hero photo alone isn't enough to draw the banner (need to know "set" vs "not set yet")
+    var s = latestSpotlightSnap;
+    var heroBtn = mgr ? '<button type="button" class="icon-btn spotlight-hero-edit" id="heroEditBtn" title="Change hero image">'+ICON_PENCIL+'</button>' : '';
+    function wireCommon(){
       var btn = document.getElementById('spotlightEditBtn');
       if(btn) btn.addEventListener('click', function(){ openSpotlightModal(monthKey, s); });
+      var hbtn = document.getElementById('heroEditBtn');
+      if(hbtn) hbtn.addEventListener('click', function(){ openHeroEditModal(latestHero); });
     }
     if(!s || !s.employeeId){
-      if(!canManage()) { container.innerHTML=''; return; }
-      container.innerHTML = '<div class="spotlight-banner">'+
+      if(!mgr){ container.innerHTML=''; return; }
+      container.innerHTML = '<div class="spotlight-banner" style="'+heroBackgroundStyle(latestHero)+'">'+heroBtn+
         '<div class="spotlight-body"><div class="spotlight-eyebrow">Employee of the month</div>'+
         '<div class="spotlight-name">Not set yet</div><div class="spotlight-note">Pick this month\'s spotlight.</div></div>'+
         '<button type="button" class="btn spotlight-edit" id="spotlightEditBtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg> Set spotlight</button></div>';
-      wireEditBtn();
+      wireCommon();
     } else {
       fetchProfiles([s.employeeId]).then(function(ps){
         var p = ps[s.employeeId] || {name:'Someone', initial:'?', color:'#888', avatarUrl:''};
-        container.innerHTML = '<div class="spotlight-banner">'+
+        container.innerHTML = '<div class="spotlight-banner" style="'+heroBackgroundStyle(latestHero)+'">'+heroBtn+
           (p.avatarUrl ? '<img class="spotlight-photo" src="'+escapeHtml(p.avatarUrl)+'">' : '<div class="spotlight-photo" style="display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:28px;font-weight:700;background:'+p.color+';color:#fff;">'+escapeHtml(p.initial)+'</div>')+
           '<div class="spotlight-body"><div class="spotlight-eyebrow">Employee of the month</div>'+
           '<div class="spotlight-name">'+escapeHtml(p.name)+'</div>'+
           (s.note?'<div class="spotlight-note">'+escapeHtml(s.note)+'</div>':'')+'</div>'+
-          (canManage()?'<button type="button" class="btn spotlight-edit" id="spotlightEditBtn">Edit</button>':'')+
+          (mgr?'<button type="button" class="btn spotlight-edit" id="spotlightEditBtn">Edit</button>':'')+
           '</div>';
-        wireEditBtn();
+        wireCommon();
       }).catch(function(){ container.innerHTML=''; });
     }
+  }
+
+  // Was a one-time .get() for the spotlight itself - meaning it only ever
+  // loaded when this page was first opened. If Admin changed the spotlight
+  // (or now, the hero photo) while an employee already had Home open,
+  // they'd never see it until they navigated away and back. Both are now
+  // .onSnapshot()s so either changing re-renders live, same as everything
+  // else in this app.
+  var unsub1 = db.doc('spotlights/'+monthKey).onSnapshot(function(snap){
+    latestSpotlightSnap = snap.exists ? snap.data() : null;
+    render();
   }, function(){ container.innerHTML=''; });
-  activeUnsubs.push(unsub);
+  var unsub2 = db.doc('appSettings/hero').onSnapshot(function(snap){
+    latestHero = snap.exists ? snap.data() : null;
+    render();
+  }, function(){ /* fails open - just keeps the built-in default hero image */ });
+  activeUnsubs.push(unsub1, unsub2);
+}
+
+// Admin-only hero photo editor (2026-09-29) - upload any image, drag to
+// reposition it within the banner, save. Position is stored as a plain
+// background-position percentage pair rather than real pixel coordinates,
+// so it stays correct at any window size the same way background-position
+// always does.
+function openHeroEditModal(existingHero){
+  if(activeHeroDragMove){ document.removeEventListener('mousemove', activeHeroDragMove); activeHeroDragMove = null; }
+  if(activeHeroDragUp){ document.removeEventListener('mouseup', activeHeroDragUp); activeHeroDragUp = null; }
+  var posX = (existingHero && existingHero.heroPosX!=null) ? existingHero.heroPosX : 53;
+  var posY = (existingHero && existingHero.heroPosY!=null) ? existingHero.heroPosY : 56;
+  var imageUrl = (existingHero && existingHero.heroImageUrl) || '/hero-banner.webp';
+  var pendingBlob = null;
+
+  openModal('Edit hero image', '<div class="field">'+
+    '<div class="hero-edit-preview" id="heroEditPreview" style="background-image:url(\''+escapeHtml(imageUrl)+'\');background-position:'+posX+'% '+posY+'%;">'+
+    '<div class="hero-edit-hint">Drag to reposition</div></div>'+
+    '</div>'+
+    '<div class="field"><label>Replace image</label><input type="file" accept="image/*" id="heroImageFileInput"></div>'+
+    '<div class="field-hint">Position is saved automatically when you drag - "Save" just confirms it.</div>',
+    function(){
+      setModalBusy(true);
+      var uploadStep = pendingBlob
+        ? uploadFile(new File([pendingBlob],'hero.jpg',{type:'image/jpeg'}), 'settings/hero_'+Date.now()+'.jpg').then(fileUrl)
+        : Promise.resolve(imageUrl);
+      uploadStep.then(function(url){
+        return db.doc('appSettings/hero').set({ heroImageUrl:url, heroPosX:posX, heroPosY:posY, updatedBy:myUid, updatedAt:new Date().toISOString() });
+      }).then(function(){ closeModal(); showToast('success','Hero image updated'); route(); })
+        .catch(function(err){ showModalError(errMsg(err)); });
+    }, 'Save', {large:true});
+
+  var preview = document.getElementById('heroEditPreview');
+  var fileInput = document.getElementById('heroImageFileInput');
+  fileInput.addEventListener('change', function(){
+    var file = fileInput.files[0]; if(!file) return;
+    // Wide banner crop, not square - kept at generous resolution since,
+    // unlike a small avatar/card thumbnail, this renders at full page
+    // width. No forced aspect crop: background-size:cover handles fitting
+    // whatever shape is uploaded, same as the built-in hero image.
+    compressImage(file, {maxWidth:2400, maxHeight:900, quality:.85}).then(function(blob){
+      pendingBlob = blob;
+      imageUrl = URL.createObjectURL(blob);
+      preview.style.backgroundImage = "url('"+imageUrl+"')";
+    }).catch(function(err){ showToast('error', errMsg(err)); });
+  });
+
+  var dragging = false, startMouseX=0, startMouseY=0, startPosX=posX, startPosY=posY;
+  preview.addEventListener('mousedown', function(ev){
+    dragging = true; startMouseX = ev.clientX; startMouseY = ev.clientY; startPosX = posX; startPosY = posY;
+    preview.classList.add('dragging');
+    ev.preventDefault();
+  });
+  activeHeroDragMove = function(ev){
+    if(!dragging) return;
+    var rect = preview.getBoundingClientRect();
+    // Dragging right/down should visually move the PHOTO right/down (the
+    // way dragging a photo under your finger works everywhere else), which
+    // means revealing more of its opposite edge - background-position
+    // moves the other way from the mouse.
+    var dx = ((ev.clientX-startMouseX)/rect.width)*100;
+    var dy = ((ev.clientY-startMouseY)/rect.height)*100;
+    posX = Math.max(0, Math.min(100, startPosX - dx));
+    posY = Math.max(0, Math.min(100, startPosY - dy));
+    preview.style.backgroundPosition = posX+'% '+posY+'%';
+  };
+  activeHeroDragUp = function(){ if(dragging){ dragging=false; preview.classList.remove('dragging'); } };
+  document.addEventListener('mousemove', activeHeroDragMove);
+  document.addEventListener('mouseup', activeHeroDragUp);
 }
 
 function openSpotlightModal(monthKey, existing){
@@ -4742,34 +4846,33 @@ function profileMoods(p){
   return [];
 }
 var musicPlayerBuilt = false;
+var ICON_PLAY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l14 8-14 8V4z"/></svg>';
+var ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
+var ICON_SKIP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M5 4l12 8-12 8V4z"/><rect x="18" y="4" width="2.5" height="16" rx="1"/></svg>';
+
+// Rebuilt entirely for the Drive-backed player (2026-09-29) - no more
+// visible video frame (#ytMusicMount was the YouTube IFrame API's required
+// minimum-visible-size embed; real <audio> needs no on-screen element at
+// all), restyled to match the app's own icon language instead of emoji
+// glyphs, and the mood dropdown now lists EVERY mood plus Mixed, not just
+// whatever this person happened to pick at signup - see music.js's header
+// comment for why that changed (it was the direct cause of "I can only
+// ever choose Electronic or Mixed").
 function mountMusicPlayer(moods){
   var box = document.getElementById('musicPlayerBox');
   if(!box) return;
   if(!musicPlayerBuilt){
     musicPlayerBuilt = true;
-    // Built once and never replaced wholesale afterward: #ytMusicMount gets
-    // handed to the YouTube IFrame API as a live player instance, and
-    // regenerating this markup on every state change (as the old
-    // self-hosted-<audio> version safely could) would tear that player
-    // down and reconnect it constantly.
-    //
-    // The mood dropdown now lists only the moods THIS person actually
-    // picked (not every mood in the catalog), plus a "Mixed" option first -
-    // Phase 4: "playback shuffles across all selected moods by default,
-    // with ability to pick one specific category or continue mixed
-    // shuffle."
-    var moodOptions = '<option value="">Mixed (all selected)</option>'+(moods||[]).map(function(key){
-      var m = MOODS.filter(function(x){return x.key===key;})[0];
-      return '<option value="'+escapeHtml(key)+'">'+escapeHtml(m?m.label:key)+'</option>';
+    var moodOptions = '<option value="">Mixed (all moods)</option>'+MOODS.filter(function(m){return m.key!=='none';}).map(function(m){
+      return '<option value="'+escapeHtml(m.key)+'">'+escapeHtml(m.label)+'</option>';
     }).join('');
     box.innerHTML =
       '<div class="music-player">'+
-        '<div class="music-frame" id="ytMusicMount"></div>'+
-        '<div class="music-meta" id="musicMeta">-</div>'+
+        '<div class="music-now-playing"><div class="music-note-icon">'+ICON_SOUND_ON+'</div><div class="music-meta" id="musicMeta">-</div></div>'+
         '<div class="music-row">'+
-          '<button type="button" class="music-btn" id="musicToggleBtn" title="Play/pause">▶</button>'+
-          '<button type="button" class="music-btn" id="musicSkipBtn" title="Change track">⏭</button>'+
-          '<button type="button" class="music-btn" id="musicMuteBtn" title="Mute">🔊</button>'+
+          '<button type="button" class="music-btn" id="musicToggleBtn" title="Play/pause">'+ICON_PLAY+'</button>'+
+          '<button type="button" class="music-btn" id="musicSkipBtn" title="Change track">'+ICON_SKIP+'</button>'+
+          '<button type="button" class="music-btn music-btn-ghost" id="musicMuteBtn" title="Mute">'+ICON_SOUND_ON+'</button>'+
           '<input type="range" class="music-volume" id="musicVolume" min="0" max="100" value="70" title="Volume">'+
         '</div>'+
         '<select class="music-mood-select" id="musicMoodSelect">'+moodOptions+'</select>'+
@@ -4788,21 +4891,16 @@ function mountMusicPlayer(moods){
     var moodSelect = document.getElementById('musicMoodSelect');
     if(!meta) return; // widget got torn down (e.g. sign-out) - nothing to update
     if(!s.hasTracks){
-      meta.hidden = false;
       meta.textContent = 'No tracks in "'+(s.moodLabel||'')+'" yet';
       return;
     }
-    // Phase 5: track title text hidden per Humayun's request - the player
-    // still needs SOME feedback while a track is cueing (title not fetched
-    // from YouTube yet), so the "Loading…" state still shows briefly, it's
-    // just the actual song title that stays hidden once playback starts.
-    if(s.track && s.track.title){ meta.hidden = true; return; }
-    meta.hidden = false;
-    meta.textContent = s.moodLabel || 'Loading…';
-    if(toggleBtn) toggleBtn.textContent = s.playing ? '❚❚' : '▶';
-    if(muteBtn) muteBtn.textContent = s.muted ? '🔇' : '🔊';
+    // Track title text stays hidden once something's actually playing
+    // (Phase 5 ask) - only the mood name/"Loading…" status shows.
+    meta.textContent = (s.track && s.track.title) ? (s.moodLabel||'Playing') : (s.moodLabel || 'Loading…');
+    if(toggleBtn) toggleBtn.innerHTML = s.playing ? ICON_PAUSE : ICON_PLAY;
+    if(muteBtn) muteBtn.innerHTML = s.muted ? ICON_SOUND_OFF : ICON_SOUND_ON;
     if(volume && document.activeElement!==volume) volume.value = s.volume;
-    if(moodSelect && document.activeElement!==moodSelect) moodSelect.value = s.filterMood || '';
+    if(moodSelect && document.activeElement!==moodSelect) moodSelect.value = s.moodFilter || '';
   });
 }
 

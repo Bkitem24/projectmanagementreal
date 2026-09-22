@@ -221,33 +221,61 @@ compare that against a fresh pull of the current reference and adjust;
 the comments at the top of `worker-realtime/src/index.js` point at the
 most likely spot for drift.
 
-## 6. Music player
+## 6. Music player — streams from your own Google Drive
 
 Each employee is asked "What do you prefer listening to when working?" at
-signup and picks one of 8 categories (Nature/Ambient Sounds, Film Music,
+signup and picks from 8 categories (Nature/Ambient Sounds, Film Music,
 Lo-fi, Western Classical, Eastern Classical, Electronic, High-BPM
-Instrumental Rock/Pop, Color Noise) or "I'd rather not." The player
-(`src/lib/music.js`) plays from Humayun's own curated YouTube links per
-category — no Cloudflare account, no cost, nothing to upload. This settles
-the earlier open question between a self-hosted-audio approach and YouTube:
-real curated links were provided, so this is the YouTube route.
+Instrumental Rock/Pop, Color Noise) or "I'd rather not" — that pick only
+chooses what plays *first*; every category (plus "Mixed", shuffling across
+all of them) is always selectable afterward from the player's own dropdown.
 
-Within a category, the player shuffles randomly among the curated links
-Humayun sent (two categories are a whole curated YouTube playlist rather
-than individual videos — "change track" steps through those in YouTube's
-own order instead, since there's no supported way to force-shuffle inside
-someone else's playlist). Controls: play/pause, change track, mute, and a
-volume slider — all in `src/lib/music.js`'s public functions, wired up in
-`main.js`'s `mountMusicPlayer()`.
+The player (`src/lib/music.js`) streams real audio files straight out of a
+Google Drive folder you control, via a small Cloudflare Worker
+(`worker-drive-music/`) that authenticates to the Drive API as a Google
+service account — not a public share link, which gets rate-limited under
+real traffic. Nothing gets uploaded anywhere else; your Drive folder stays
+the one copy of your library. (This replaced an earlier YouTube-embed
+version — real `<audio>` streaming needed no video-embed visibility
+requirement and no third-party account/region quirks.)
 
-**One YouTube-specific constraint worth knowing**: YouTube's embed terms
-require the player to stay visible (roughly 200×200px or larger) while
-playing — it can't be hidden the way a plain `<audio>` tag could. The
-sidebar widget keeps a small always-visible video frame for this reason;
-see the top of `src/lib/music.js` for the full explanation. To change or
-add tracks later, edit the `CATALOG` object at the top of that file — no
-YouTube Data API key needed anywhere (track titles come free from the
-embedded player itself).
+**One-time setup on the Google Cloud side:**
+1. Create a Google Cloud project and enable the **Google Drive API** for it.
+2. Create a **Service Account** under that project, then generate a JSON
+   key for it (Keys tab → Add Key → JSON) — keep this file private.
+3. In Google Drive, create one folder (e.g. `Blue Kite Music`) with one
+   subfolder per mood, named **exactly**: `nature`, `film`, `lofi`,
+   `western_classical`, `eastern_classical`, `electronic`, `high_bpm`,
+   `color_noise`. Drop the matching audio files into each.
+4. Share the top-level folder with the service account's email (shown on
+   its Credentials page, looks like `name@project-id.iam.gserviceaccount.com`)
+   — Viewer access is enough, and sharing the top folder covers every
+   subfolder inside it.
+5. Copy the top folder's id from its Drive URL
+   (`drive.google.com/drive/folders/`**`THIS PART`**).
+
+**Deploying the Worker:**
+```
+cd worker-drive-music
+npx wrangler login          # once, if you haven't already for worker-r2
+# put the folder id from step 5 into wrangler.toml's GDRIVE_ROOT_FOLDER_ID
+npx wrangler secret put GDRIVE_SERVICE_ACCOUNT_JSON   # paste the WHOLE downloaded JSON file
+npx wrangler secret put SUPABASE_URL
+npx wrangler secret put SUPABASE_ANON_KEY
+npx wrangler deploy
+```
+Then set `VITE_DRIVE_MUSIC_WORKER_URL` in `.env` to the URL Wrangler prints
+(and rebuild). Leave it blank and the music widget just shows "no tracks"
+instead of erroring.
+
+Playback shuffles randomly within whatever mood is currently selected (or
+across every mood, if "Mixed" is picked), auto-advances to a new random
+track when one ends, and — since browsers block real autoplay before a
+user gesture — starts on the very first click or keypress anywhere in the
+app after signing in, rather than requiring an explicit play button.
+Repeat plays of any track (by anyone) get served from Cloudflare's own edge
+cache after the first time, so the library gets faster to stream the more
+it's actually used.
 
 ## Notes / what's intentionally simple or deferred right now
 

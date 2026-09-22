@@ -1,0 +1,34 @@
+# Cloudflare Worker that streams the music library straight out of a
+# shared Google Drive folder - replaces the old YouTube-embed player
+# (2026-09-29). Nothing about the music files themselves moves or gets
+# uploaded anywhere else; this Worker just authenticates to the Drive API
+# as a service account and proxies the bytes through, with Cloudflare's own
+# edge cache in front so a track that's already been played once by anyone
+# streams instantly for everyone after that.
+#
+# Deploy with: cd worker-drive-music && npx wrangler deploy
+# (npx wrangler login first, once, to connect your Cloudflare account -
+# skip if you've already done this for worker-r2/worker-realtime.)
+
+name = "blue-kite-ops-drive-music"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# The Drive folder ID that contains one subfolder per mood (see the
+# service account setup steps for how this folder is shared). Not
+# sensitive - just an identifier - so it's a plain var, not a secret.
+[vars]
+GDRIVE_ROOT_FOLDER_ID = "PASTE_YOUR_FOLDER_ID_HERE"
+
+# Set these with:
+#   npx wrangler secret put GDRIVE_SERVICE_ACCOUNT_JSON
+#     (paste the ENTIRE contents of the service account's downloaded JSON
+#     key file when prompted - the whole file, as one blob, on one line is
+#     fine, wrangler reads it from stdin)
+#   npx wrangler secret put SUPABASE_URL
+#   npx wrangler secret put SUPABASE_ANON_KEY
+#
+# SUPABASE_URL/ANON_KEY: same purpose as worker-r2's - verifies the request
+# carries a valid, currently-logged-in Supabase session before streaming
+# anything (this worker is reachable from the public internet like any
+# Worker URL, so it needs its own auth check, independent of the app).
