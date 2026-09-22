@@ -38,6 +38,14 @@
 // This is why ring()/joinCallRoom() below no longer need an isGroup branch
 // anywhere in the actual logic - a "group call" is just a callId that more
 // than 2 people ever joined.
+//
+// 2026-09-23 - "online = connectable, no accept step" (this file's design
+// from the start) now only holds while the person being rung is clocked
+// in. Someone clocked out gets a real ring with Accept/Decline and a ~30s
+// timeout instead (see main.js's handleIncomingRing) - this file only had
+// to grow one new signal for it, declineRing()/'ring-missed', to tell the
+// CALLER a ring was turned down or went unanswered; ACCEPTING still needs
+// nothing new, since joining the call room already means exactly that.
 import { supabase } from './supabaseClient.js';
 
 const REALTIME_WORKER_URL = import.meta.env.VITE_REALTIME_WORKER_URL || '';
@@ -56,19 +64,26 @@ export const connectConfigured = /^https?:\/\//i.test(REALTIME_WORKER_URL);
 
 let ringChannel = null;
 let onIncoming = null;
+let onIncomingMissed = null;
 
 // ---------------------------------------------------------------------------
 // Signaling: "you're being invited to call <callId>" (working today)
 // ---------------------------------------------------------------------------
-// One channel per user (their own uid), listened to once at boot. This is
-// now the ONLY message type needed here - answering, mid-call roster
-// changes, and hangup are all handled by the call room's Presence state
-// (see joinCallRoom below) instead of extra broadcast events.
+// One channel per user (their own uid), listened to once at boot. Answering,
+// mid-call roster changes, and hangup are all handled by the call room's
+// Presence state (see joinCallRoom below) instead of extra broadcast events -
+// 'ring' is still the only way a call is OFFERED. 'ring-missed' (added
+// 2026-09-23, see declineRing below) is the one new message type: the
+// caller has no other way to find out a ring was declined or timed out
+// unanswered, since presence only ever tells it "someone joined," never
+// "someone explicitly said no" or "gave up waiting."
 export function listenForConnects(myUid, handlers) {
   onIncoming = handlers && handlers.onRing;
+  onIncomingMissed = handlers && handlers.onRingMissed;
   if (ringChannel) supabase.removeChannel(ringChannel);
   ringChannel = supabase.channel('connect:' + myUid)
     .on('broadcast', { event: 'ring' }, (msg) => { if (onIncoming) onIncoming(msg.payload); })
+    .on('broadcast', { event: 'ring-missed' }, (msg) => { if (onIncomingMissed) onIncomingMissed(msg.payload); })
     .subscribe();
   return () => { if (ringChannel) { supabase.removeChannel(ringChannel); ringChannel = null; } };
 }
@@ -91,6 +106,21 @@ export async function ring(targetUid, fromProfile, callId, isGroup) {
   await supabase.channel('connect:' + targetUid).send({
     type: 'broadcast', event: 'ring',
     payload: { from: fromProfile, callId, isGroup: !!isGroup, at: new Date().toISOString() },
+  });
+}
+
+// Added 2026-09-23: whoever rang someone who's clocked out now gets a real
+// accept/decline step on the other end (see main.js's handleIncomingRing) -
+// this is how that person tells the CALLER what happened, since joining the
+// call room (the only signal that existed before) never fires at all for a
+// decline or an unanswered ring. `reason` is 'declined' (they clicked
+// Decline) or 'timeout' (the ~30s ring window ran out with no response) -
+// the caller's UI treats both the same way (stop waiting, show why) but
+// gets to say something slightly more specific than a generic "no answer."
+export async function declineRing(callerUid, myProfile, callId, reason) {
+  await supabase.channel('connect:' + callerUid).send({
+    type: 'broadcast', event: 'ring-missed',
+    payload: { from: myProfile, callId, reason: reason || 'declined', at: new Date().toISOString() },
   });
 }
 
