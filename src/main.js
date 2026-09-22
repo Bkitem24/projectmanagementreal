@@ -680,6 +680,20 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
               createdAt: new Date().toISOString()
             });
           }));
+        }).then(function(){
+          // One notification per ROLE on this episode, not one per task -
+          // a template with several steps for the same role would
+          // otherwise spam that role's holders with a separate ping for
+          // every single task on the same "Generate upcoming episodes"
+          // click.
+          var link = '#/episode/'+epId;
+          var byRole = {};
+          steps.forEach(function(s){ (byRole[s.role]=byRole[s.role]||[]).push(s.label); });
+          Object.keys(byRole).forEach(function(role){
+            var labels = byRole[role];
+            var taskLabel = labels.length>1 ? labels.length+' new tasks' : labels[0];
+            notifyRoleAssignment(role, taskLabel, rule.label, clientMeta.name, link);
+          });
         });
       })
     );
@@ -1683,6 +1697,8 @@ function openAddStepModal(templateId){
               createdAt: new Date().toISOString()
             }).then(function(){
               return db.doc('episodes/'+epDoc.id).update({ taskCount: (e.taskCount||0) + 1 });
+            }).then(function(){
+              notifyRoleAssignment(newStep.role, newStep.label, e.title, e.clientName, '#/episode/'+epDoc.id);
             });
           }));
         }).then(function(){
@@ -2026,7 +2042,17 @@ function renderEpisode(episodeId){
           var label = btn.getAttribute('data-label');
           var row = btn.closest('.task-row');
           if(row) row.classList.add('pending-remove');
-          var taskData = taskById[taskId];
+          // taskById's entries carry a JS-side-only "_id" field (set above,
+          // for lookups - not a real column) - stripped here before using
+          // this as a restore snapshot, otherwise the shim's upsert sends
+          // it straight through and Postgres rejects the whole write with
+          // "Could not find the '_id' column of 'tasks' in the schema
+          // cache" (confirmed 2026-09-28 - Undo failed for a deleted task/
+          // step specifically, while every other Undo already worked,
+          // because nothing else builds its restore snapshot from this
+          // particular cache).
+          var taskData = taskById[taskId] ? Object.assign({}, taskById[taskId]) : null;
+          if(taskData) delete taskData._id;
           Promise.all([
             db.collection('taskComments').where('taskId','==',taskId).get(),
             db.collection('taskLinks').where('taskId','==',taskId).get(),
@@ -2085,12 +2111,14 @@ function openAddCustomTaskModal(episodeId, episode){
       if(!label){ showModalError('Describe the task.'); return; }
       setModalBusy(true);
       var taskId = episodeId+'_custom_'+uid8();
+      var role = fd.get('role');
       db.doc('tasks/'+taskId).set({
         episodeId: episodeId, episodeTitle: episode.title, clientId: episode.clientId, clientName: episode.clientName,
-        role: fd.get('role'), label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnStepIds: [],
+        role: role, label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnStepIds: [],
         dueDate: episode.dueDate, done:false, doneByUserId:null, doneAt:null, custom:true, createdAt: new Date().toISOString()
       }).then(function(){
         closeModal(); showToast('success','Custom task added');
+        notifyRoleAssignment(role, label, episode.title, episode.clientName, '#/episode/'+episodeId);
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Add task');
 }
@@ -2502,6 +2530,27 @@ function loadCollab(kind, id, panel){
           return t ? '#/episode/'+t.episodeId : '#/';
         }).catch(function(){ return '#/'; });
       }
+      // Whoever was actually CLICKED from the autocomplete is always
+      // included, but that alone turned out to miss real mentions - typing
+      // "@Name" and hitting Enter before the suggestion list finished
+      // loading (or before clicking it) left `pendingMentions` empty, so
+      // nothing was ever recorded and notifyMentions() below had nothing
+      // to do (confirmed 2026-09-28: a real mention sent no notification
+      // at all). Backstop: also scan the final message text for "@Full
+      // Name" matching a real teammate exactly, even if it was never
+      // clicked - catches that case without requiring the click to have
+      // happened.
+      function resolveMentionedIds(body, clickedIds){
+        return getMentionRoster().then(function(roster){
+          var ids = {};
+          clickedIds.forEach(function(uid){ ids[uid] = true; });
+          var lowerBody = body.toLowerCase();
+          roster.forEach(function(p){
+            if(lowerBody.indexOf('@'+p.name.toLowerCase())>-1) ids[p.id] = true;
+          });
+          return Object.keys(ids);
+        }).catch(function(){ return clickedIds; });
+      }
       function notifyMentions(mentionedIds, body){
         if(!mentionedIds.length) return;
         mentionLinkFor().then(function(link){
@@ -2513,7 +2562,13 @@ function loadCollab(kind, id, panel){
               userId: uid, type:'mention',
               message: fromName+' mentioned you: "'+snippet+'"',
               link: link, fromUserId: myUid, readAt: null, createdAt: new Date().toISOString()
-            }).catch(function(){});
+            }).catch(function(err){
+              // Was a silent no-op before - real failures (e.g. schema_v18.sql
+              // not run yet) need to actually surface, not vanish, or a real
+              // bug here looks identical to "nothing happened."
+              console.warn('[blue-kite-ops] mention notification failed:', err);
+              showToast('error', 'A mention notification failed to send - '+errMsg(err));
+            });
           });
         });
       }
@@ -2540,7 +2595,15 @@ function loadCollab(kind, id, panel){
           });
         }).then(function(){
           pendingFile = null;
-          notifyMentions(mentionedIds, body);
+          resolveMentionedIds(body, mentionedIds).then(function(allMentionedIds){
+            notifyMentions(allMentionedIds, body);
+            // Backfill the comment row's own "mentions" column if the text
+            // scan above found more than what was actually clicked - keeps
+            // the stored record consistent with who was actually notified.
+            if(allMentionedIds.length !== mentionedIds.length){
+              supabase.from(cfg.comments).update({mentions: allMentionedIds}).eq('id', commentId).then(function(){});
+            }
+          });
           loadCollab(kind, id, panel);
         }).catch(function(err){
           sendBtn.disabled = false;
@@ -3301,6 +3364,33 @@ function openNotificationsPanel(){
         });
       });
     }});
+}
+
+// New-task-for-your-role notifications (2026-09-28 ask, on top of Phase
+// 4's original @mentions scope): whoever holds `role` gets a notification
+// naming the task, episode and client - not just the mentioning-someone-
+// directly case. Reused by every place a task gets created with a role
+// already attached: generateEpisodesForRule (recurring episodes), the
+// one-off custom task modal, and a new workflow step's backfill onto
+// already-generated episodes. Doesn't exclude whoever triggered the
+// action - this is "a new work item matches your role," not a social
+// mention, so even the person who happened to trigger it should still
+// hear about their own new task the same as anyone else holding that role.
+function notifyRoleAssignment(role, taskLabel, episodeTitle, clientName, link){
+  if(!role || role==='manager' || role==='admin') return; // those two aren't "assigned" job-title work the same way
+  db.collection('profileRoles').where('role','==',role).get().then(function(snap){
+    var uids = snap.docs.map(function(d){ return d.data().userId; });
+    if(!uids.length) return;
+    var r = roleOf(role);
+    var roleLabel = r ? r.label : role;
+    uids.forEach(function(uid){
+      db.doc('notifications/'+('nf_'+uid8())).set({
+        userId: uid, type:'task_assigned',
+        message: 'New '+roleLabel+' task: "'+taskLabel+'" on "'+episodeTitle+'" ('+clientName+')',
+        link: link, fromUserId: null, readAt: null, createdAt: new Date().toISOString()
+      }).catch(function(err){ console.warn('[blue-kite-ops] task-assignment notification failed:', err); });
+    });
+  }).catch(function(err){ console.warn('[blue-kite-ops] could not look up role holders to notify:', err); });
 }
 
 // ---------- INCOMING CALL POPUP (Accept/Decline, only shown when the
