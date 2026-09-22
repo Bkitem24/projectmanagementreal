@@ -951,6 +951,38 @@ function renderClient(clientId){
   activeUnsubs.push(unsub);
 }
 
+// Stable header order for a template's groups (Phase 2.5 batch A follow-up,
+// 2026-09-27). A step's own `order` field is one flat sequence across the
+// WHOLE template - it decides each group's steps' order relative to EACH
+// OTHER, but the episode checklist used to also use it to decide which
+// group's header shows first, by just taking groups in the order their
+// first step was hit while walking that flat sequence. That meant dragging
+// a single step from Group A to a position ahead of Group B's steps (on the
+// Workflows page) could drag Group A's entire header ahead of Group B's on
+// every episode's checklist too - reported 2026-09-26: "if I re-order a
+// step that is from another group, above the step that is from another
+// group, the entire group gets reordered instead of just that one step."
+// groupOrder is a separate, append-only list of this template's group
+// names, touched ONLY when a brand-new group name is introduced (never by
+// reordering existing steps - see wireStepDrag, which only ever writes
+// `steps`), so from now on a step drag can only ever move that one step
+// within its own group - never its group's position relative to others.
+// Falls back to deriving the order from the current steps (today's old
+// behavior) for a template that hasn't been touched since this shipped -
+// mountTemplatesBox below self-heals that onto the template the first time
+// it's viewed, so this fallback path is only ever hit once per template.
+function tplGroupOrder(t){
+  var steps = (t && t.steps) || [];
+  var derived = [];
+  steps.slice().sort(function(a,b){return (a.order||0)-(b.order||0);}).forEach(function(s){
+    var g = (s.group||'').trim() || 'Tasks';
+    if(derived.indexOf(g)===-1) derived.push(g);
+  });
+  var stored = ((t && t.groupOrder) || []).slice();
+  derived.forEach(function(g){ if(stored.indexOf(g)===-1) stored.push(g); });
+  return stored;
+}
+
 // Renders a client's workflow templates + steps into `box`, and keeps it
 // live. Shared by the Client Detail page's own "Workflow templates" section
 // and the centralized Workflows nav page (renderWorkflows) below - added
@@ -960,6 +992,18 @@ function renderClient(clientId){
 function mountTemplatesBox(clientId, box){
   var unsub = db.collection('templates').where('clientId','==',clientId).onSnapshot(function(ts){
     if(ts.empty){ box.innerHTML = '<div class="empty-state"><strong>No templates yet</strong>Templates define the checklist each episode type generates, and the "waits for" links between their steps.</div>'; return; }
+    // Self-heal groupOrder (see tplGroupOrder above) onto any template that
+    // doesn't have one yet, or that picked up a group some other way
+    // without it - a silent, idempotent catch-up write, not something
+    // worth a toast either way.
+    ts.docs.forEach(function(d){
+      var t = d.data();
+      var computed = tplGroupOrder(t);
+      var stored = t.groupOrder||[];
+      if(computed.length!==stored.length || computed.some(function(g,i){return g!==stored[i];})){
+        db.doc('templates/'+d.id).update({groupOrder:computed}).catch(function(){});
+      }
+    });
     var stepById = {};
     ts.docs.forEach(function(d){ (d.data().steps||[]).forEach(function(s){ stepById[s.stepId] = s; }); });
     box.innerHTML = ts.docs.map(function(d){
@@ -1306,7 +1350,14 @@ function openAddStepModal(templateId){
           var maxOrder = freshSteps.reduce(function(m,s){return Math.max(m,s.order||0);},0);
           newStep.order = maxOrder+1;
           freshSteps.push(newStep);
-          return db.doc('templates/'+templateId).update({steps:freshSteps});
+          // Append the group to groupOrder right away if it's a new one -
+          // see tplGroupOrder's comment. A brand-new group lands at the
+          // END of the header order, after every existing group, same as
+          // you'd expect from "just added it."
+          var g = (newStep.group||'').trim() || 'Tasks';
+          var freshGroupOrder = (ft.groupOrder||[]).slice();
+          if(freshGroupOrder.indexOf(g)===-1) freshGroupOrder.push(g);
+          return db.doc('templates/'+templateId).update({steps:freshSteps, groupOrder:freshGroupOrder});
         }).then(function(){
           // Backfill onto episodes already on the board. Before this, a
           // brand-new step only ever affected FUTURE episodes
@@ -1393,13 +1444,25 @@ function renderEpisode(episodeId){
     // a reload to pick up, same as any other template edit.
     var tplStepByIdPromise = e.templateId
       ? db.doc('templates/'+e.templateId).get().then(function(tplSnap){
+          var tplData = (tplSnap.exists && tplSnap.data()) || {};
           var stepById = {};
-          ((tplSnap.exists && tplSnap.data().steps) || []).forEach(function(s){ stepById[s.stepId] = s; });
-          return stepById;
-        }).catch(function(){ return {}; }) // fails open - a template fetch error shouldn't block the checklist from rendering, just means dependencies fall back to each task's own baked-in copy
-      : Promise.resolve({});
+          (tplData.steps||[]).forEach(function(s){ stepById[s.stepId] = s; });
+          // groupOrder (Phase 2.5 batch A follow-up) - see tplGroupOrder's
+          // comment - is what keeps a group's header position on this
+          // checklist stable no matter how its steps get reordered on the
+          // Workflows page.
+          return { stepById: stepById, groupOrder: tplGroupOrder(tplData) };
+        }).catch(function(){ return { stepById: {}, groupOrder: [] }; }) // fails open - a template fetch error shouldn't block the checklist from rendering, just means dependencies fall back to each task's own baked-in copy
+      : Promise.resolve({ stepById: {}, groupOrder: [] });
 
-    tplStepByIdPromise.then(function(liveStepById){
+    tplStepByIdPromise.then(function(tplInfo){
+    var liveStepById = tplInfo.stepById;
+    // Comment-count badge on "Comments, links & files" (Phase 2.5 batch A,
+    // fixed 2026-09-27): refreshCountsNow always points at the CURRENT
+    // tasks-snapshot's own fetch-and-render closure (reassigned every time
+    // the tasks listener below fires) - see the separate taskComments
+    // subscription a little further down for why this indirection exists.
+    var refreshCountsNow = null;
     var unsubTasks = db.collection('tasks').where('episodeId','==',episodeId).orderBy('orderNum','asc').onSnapshot(function(ts){
       var box = document.getElementById('taskGroups');
       if(!box) return;
@@ -1434,11 +1497,22 @@ function renderEpisode(episodeId){
         return liveStep ? (liveStep.order||0) : (t.orderNum||0);
       }
       var liveOrderedDocs = ts.docs.slice().sort(function(a,b){ return liveOrderNum(taskById[a.id]) - liveOrderNum(taskById[b.id]); });
+      // Seed the group HEADER order from the template's stable groupOrder
+      // (Phase 2.5 batch A follow-up) rather than letting it fall out of
+      // whichever task happens to sort first below - see tplGroupOrder's
+      // comment for the bug this fixes (dragging one step past a step from
+      // another group used to drag that group's whole header along with
+      // it). A one-off episode has no template (tplInfo.groupOrder is []),
+      // so its groups still just appear in first-encountered order, same
+      // as before.
+      tplInfo.groupOrder.forEach(function(g){ if(!groups[g]){ groups[g]=[]; order.push(g); } });
       // Second pass: sort each task into its open group, or - added
       // 2026-09-22 - into a separate "Completed" bucket instead, so a
       // finished task moves out of the working checklist rather than
       // staying interleaved (still checked, just no longer where you're
-      // looking for what's left to do).
+      // looking for what's left to do). Within a group, tasks still land in
+      // liveOrderNum order (that part of the reorder fix already worked) -
+      // only the HEADER position is now decoupled from it.
       liveOrderedDocs.forEach(function(d){
         var t = taskById[d.id];
         if(t.done){ completed.push(t); return; }
@@ -1446,6 +1520,10 @@ function renderEpisode(episodeId){
         if(!groups[g]){ groups[g]=[]; order.push(g); }
         groups[g].push(t);
       });
+      // A group seeded from groupOrder but with nothing open right now
+      // (every task in it is done, or it's a brand-new unused group)
+      // shouldn't show an empty header.
+      order = order.filter(function(g){ return groups[g].length>0; });
       // Dependencies are defined on the template step (dependsOnStepIds -
       // see openSetStepDependencyModal) and inherited by every task
       // generated from it, instead of a free-text label typed onto each
@@ -1469,22 +1547,41 @@ function renderEpisode(episodeId){
         var status = pct===100 ? 'done' : dueStatus(e.dueDate,false);
         badge.innerHTML = '<span class="badge badge-'+status+'">'+statusLabel(status)+' · '+doneCount+'/'+ts.size+'</span>';
       }
-      // Comment-count badge on "Comments, links & files" (Phase 2.5 batch
-      // A): one grouped query for every task on this episode, rather than
-      // one query per task row - counted client-side same as
-      // listAllRoles() groups profileRoles by userId. Not a live
-      // subscription of its own: it refreshes whenever this episode's task
-      // list itself re-fires (a task added/checked/deleted), same
-      // "Reload to see the latest" tradeoff the rest of the app already
-      // has for anything not on its own realtime channel.
-      var taskIds = ts.docs.map(function(d){ return d.id; });
-      (taskIds.length ? db.collection('taskComments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}))
-        .then(function(cSnap){
-          var counts = {};
-          cSnap.docs.forEach(function(d){ var row=d.data(); counts[row.taskId]=(counts[row.taskId]||0)+1; });
-          renderChecklist(counts);
-        })
-        .catch(function(){ renderChecklist({}); }); // fails open - still render the checklist without counts if this one query fails
+      // Comment-count badge: one grouped query for every task on this
+      // episode, rather than one query per task row - counted client-side
+      // same as listAllRoles() groups profileRoles by userId.
+      //
+      // Fixed 2026-09-27 (originally shipped batch A, confirmed broken:
+      // "Comments counts still doesn't exist"): this query used to only
+      // ever run when the TASK list itself re-fired (a task added, checked
+      // off, or deleted) - but posting, editing or deleting a COMMENT only
+      // ever writes to the taskComments table, never to tasks, so nothing
+      // told this page to re-fetch counts after the one thing that
+      // actually changes them. From a fresh page load the very first count
+      // fetch below still ran and should have shown existing comments, but
+      // the badge could then never advance again without some unrelated
+      // task change forcing a re-render - which is exactly "count never
+      // shows" from the perspective of someone who opens a discussion,
+      // posts a comment, and closes it again expecting the number to
+      // appear. Fix: a SEPARATE live subscription on taskComments itself
+      // (set up once, right after unsubTasks below) now calls whatever
+      // this constant's current closure is via refreshCountsNow, so any
+      // comment add/edit/delete - anywhere - re-fetches counts and
+      // re-renders this episode's checklist with them, the same "global
+      // table subscription, filtered query on each refetch" pattern the
+      // tasks listener itself already uses.
+      function fetchAndRenderCounts(){
+        var taskIds = ts.docs.map(function(d){ return d.id; });
+        (taskIds.length ? db.collection('taskComments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}))
+          .then(function(cSnap){
+            var counts = {};
+            cSnap.docs.forEach(function(d){ var row=d.data(); counts[row.taskId]=(counts[row.taskId]||0)+1; });
+            renderChecklist(counts);
+          })
+          .catch(function(){ renderChecklist({}); }); // fails open - still render the checklist without counts if this one query fails
+      }
+      refreshCountsNow = fetchAndRenderCounts;
+      fetchAndRenderCounts();
 
       function taskRowHtml(t, commentCounts){
         var r = roleOf(t.role);
@@ -1552,6 +1649,17 @@ function renderEpisode(episodeId){
       } // end renderChecklist
     }, function(){});
     activeUnsubs.push(unsubTasks);
+    // See fetchAndRenderCounts above - this is what actually makes the
+    // comment-count badge move without needing an unrelated task change to
+    // force a re-render. No filter on the channel (same as every other
+    // db.collection(...).onSnapshot() in this file) - any comment change
+    // anywhere just re-runs the CURRENT tasks snapshot's own filtered
+    // count query, which is cheap and already how the rest of this page's
+    // "live" data works.
+    var unsubComments = db.collection('taskComments').onSnapshot(function(){
+      if(refreshCountsNow) refreshCountsNow();
+    }, function(){});
+    activeUnsubs.push(unsubComments);
     }); // end tplStepByIdPromise.then
   }, function(){ paint('<div class="empty-state">Could not load this episode.</div>'); });
   activeUnsubs.push(unsub);
