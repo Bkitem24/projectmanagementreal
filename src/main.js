@@ -91,6 +91,23 @@ function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(
 // Operates on already-escapeHtml()'d text (safe: the pattern below can't
 // match anything that would introduce a tag), so it's fine to inject the
 // resulting <a> markup straight into innerHTML.
+// Highlights "@Full Name" in an already-escaped+linkified comment body with
+// a light background, like every modern chat app (Slack/Discord/Teams) -
+// operates on the real mentioned-id list (the comment's own `mentions`
+// column), not a guess from the text, so it only highlights people who
+// were actually notified. `nameOf(uid)` is the caller's own uid->display-
+// name lookup (renderComment's `who()`, or getMentionRoster()'s map).
+function mentionifyHtml(html, mentionedIds, nameOf){
+  if(!mentionedIds || !mentionedIds.length) return html;
+  mentionedIds.forEach(function(uid){
+    var name = nameOf(uid);
+    if(!name || name==='Someone') return;
+    var esc = escapeHtml('@'+name);
+    var pattern = esc.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    html = html.replace(new RegExp(pattern, 'g'), '<span class="mention-highlight">'+esc+'</span>');
+  });
+  return html;
+}
 function linkifyHtml(escaped){
   return escaped.replace(/((?:https?:\/\/|www\.)[^\s<]+)/gi, function(match){
     // Trim off trailing punctuation that's almost always part of the
@@ -942,16 +959,22 @@ function renderHome(){
     var cards = docs.map(function(d,i){
       var c = d.data();
       var color = c.color || CLIENT_COLORS[i%CLIENT_COLORS.length];
+      // Cover-art card (2026-09-29): the square photo is the whole point of
+      // the card now - podcast/album-cover-art convention, same square
+      // treatment as the client detail page's own cover art. Hosted-by and
+      // overview text are gone per Humayun's explicit ask (services/team/
+      // view-board are the only footer info that remains) - the client's
+      // name stays as a minimal caption directly on the photo itself
+      // (gradient scrim, same idea as a Spotify/Apple Music tile) rather
+      // than disappearing completely, since a card with literally no label
+      // at all would make the grid unusable for actually finding a client.
       return '<a class="client-card" href="#/client/'+d.id+'">'+
-        '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\')':'background:linear-gradient(135deg,'+color+',var(--line-soft))')+'">'+
+        '<div class="client-card-photo'+(c.imageUrl?'':' no-image')+'" style="'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\')':'background:linear-gradient(135deg,'+color+',var(--line-soft))')+'">'+
         (canManage()?'<div class="client-card-actions"><button type="button" class="icon-btn" data-edit-client-card="'+d.id+'" title="Edit name/host">'+ICON_PENCIL+'</button><button type="button" class="icon-btn" data-delete-client-card="'+d.id+'" title="Delete client">'+ICON_TRASH+'</button></div>':'')+
+        '<div class="client-card-caption">'+escapeHtml(c.name)+'</div>'+
         '</div>'+
-        '<div class="client-card-body">'+
-        '<div class="client-card-name">'+escapeHtml(c.name)+'</div>'+
-        '<div class="client-card-host">Hosted by '+escapeHtml(c.hostName||'-')+'</div>'+
-        '<div class="client-card-tagline">'+escapeHtml(c.tagline||'')+'</div>'+
         '<div class="client-card-foot"><span>'+(c.services?c.services.length:0)+' services</span>'+(isAdmin()?'<span class="badge badge-team">'+escapeHtml(teamName(c.teamId))+'</span>':'')+(c.archived?'<span class="badge" style="background:var(--line-soft);">Archived</span>':'')+(c.example?'<span class="badge badge-upcoming">Example</span>':'<span>View board →</span>')+'</div>'+
-        '</div></a>';
+        '</a>';
     }).join('');
     if(canManage()) cards += '<button type="button" class="add-client-card" id="addClientCard">+ Add a client</button>';
     grid.innerHTML = cards || '<div class="empty-state">No clients'+(showArchivedClients?' in your team yet':' - toggle "Show archived" above if you\'re looking for one you archived')+'.</div>';
@@ -1025,15 +1048,21 @@ function renderClient(clientId){
     var c = snap.data();
     var mgr = canManage();
     paint(
-      '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+(c.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+(mgr?' <button type="button" class="icon-btn" id="editClientNameBtn" title="Edit podcast name / host">'+ICON_PENCIL+'</button>':'')+'</h1>'+
-      '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'-')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div>'+
-      '<div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">'+
+      // Cover art (square, podcast-art proportions - 2026-09-29) sits beside
+      // the header instead of a full-width banner strip above it, same
+      // "art beside metadata" layout convention podcast/album pages use.
+      '<div class="client-hero">'+
+      '<div class="client-cover'+(c.imageUrl?'':' no-image')+'" style="'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\')':'')+'">'+
+      (mgr?'<label class="client-cover-change" title="Change photo">'+ICON_PENCIL+'<input type="file" accept="image/*" id="clientImageInput" style="display:none;"></label>':'')+
+      '</div>'+
+      '<div class="client-hero-info">'+
+      '<div class="page-head" style="margin:0;"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+(c.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+(mgr?' <button type="button" class="icon-btn" id="editClientNameBtn" title="Edit podcast name / host">'+ICON_PENCIL+'</button>':'')+'</h1>'+
+      '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'-')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div></div>'+
+      '<div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;margin-top:14px;">'+
       (mgr?'<button type="button" class="btn btn-sm" id="archiveClientBtn">'+(c.archived?'Unarchive':'Archive')+'</button><button type="button" class="btn btn-sm btn-danger" id="deleteClientBtn">Delete permanently</button>':'')+
       (mgr?'<button type="button" class="btn btn-primary btn-sm" id="genEpisodesBtn">Generate upcoming episodes</button>':'')+
       '</div>'+
       '</div>'+
-      '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="margin-bottom:18px;border-radius:var(--radius);height:168px;position:relative;box-shadow:var(--shadow);'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\');background-size:cover;background-position:center;':'background:linear-gradient(135deg,var(--blue-soft),var(--line-soft));')+'">'+
-      (mgr?'<label class="btn btn-sm" style="position:absolute;bottom:10px;right:10px;cursor:pointer;">Change photo<input type="file" accept="image/*" id="clientImageInput" style="display:none;"></label>':'')+
       '</div>'+
       '<div class="overview-grid">'+
       '<div class="panel"><h3>Overview'+(mgr?' <button type="button" class="btn btn-sm" id="editOverviewBtn" style="float:right;">Edit</button>':'')+'</h3>'+
@@ -1097,7 +1126,13 @@ function renderClient(clientId){
     if(imgInput) imgInput.addEventListener('change', function(){
       var file = imgInput.files[0]; if(!file) return;
       showToast('success','Uploading photo…');
-      compressImage(file, {maxWidth:800,maxHeight:800,quality:.85}).then(function(blob){
+      // Square cover-art crop (2026-09-29, podcast/album-art convention,
+      // matches the client-cover display which is a real square, not just
+      // square via CSS) - 1200px is already far sharper than this ever
+      // needs to render at in the UI (the cover art tops out at ~190px on
+      // screen, more on a big monitor's home-page grid), so this stays well
+      // short of literally shipping a 3000x3000 file for no visible gain.
+      compressImage(file, {maxWidth:1200,maxHeight:1200,quality:.88,square:true}).then(function(blob){
         var key = 'clients/'+clientId+'/photo_'+Date.now()+'.jpg';
         return uploadFile(new File([blob],'photo.jpg',{type:'image/jpeg'}), key);
       }).then(function(key){
@@ -1986,18 +2021,45 @@ function renderEpisode(episodeId){
       // re-renders this episode's checklist with them, the same "global
       // table subscription, filtered query on each refetch" pattern the
       // tasks listener itself already uses.
-      function fetchAndRenderCounts(){
+      function fetchCommentCounts(){
         var taskIds = ts.docs.map(function(d){ return d.id; });
-        (taskIds.length ? db.collection('taskComments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}))
+        return (taskIds.length ? db.collection('taskComments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}))
           .then(function(cSnap){
             var counts = {};
             cSnap.docs.forEach(function(d){ var row=d.data(); counts[row.taskId]=(counts[row.taskId]||0)+1; });
-            renderChecklist(counts);
+            return counts;
           })
-          .catch(function(){ renderChecklist({}); }); // fails open - still render the checklist without counts if this one query fails
+          .catch(function(){ return {}; }); // fails open - still render the checklist without counts if this one query fails
       }
-      refreshCountsNow = fetchAndRenderCounts;
-      fetchAndRenderCounts();
+      // Phase 5 fix (2026-09-29, "the screen starts loading" every time a
+      // message is sent): this used to call renderChecklist(counts) - a
+      // full box.innerHTML rebuild of every task row - on EVERY taskComments
+      // change anywhere in the episode (see unsubComments below, which has
+      // no filter). That tore down and recreated every already-expanded
+      // "Comments, links & files" panel's DOM node from scratch, which lost
+      // the data-collab-ready flag loadCollab() relies on to skip its
+      // blank-skeleton loading state on a reload - so sending your own
+      // message re-triggered the exact jarring blank-screen flash that fix
+      // was supposed to prevent. refreshCountsNow now only does that full
+      // rebuild on the very first render (when the task list itself needs
+      // building); every later comment-driven refresh just patches each
+      // closed task's count label in place and re-loads an already-open
+      // panel on its EXISTING node (loadCollab's own fade-in path handles
+      // that smoothly) - nothing gets torn down.
+      refreshCountsNow = function(){
+        fetchCommentCounts().then(function(counts){
+          Array.prototype.forEach.call(box.querySelectorAll('[data-collab]'), function(btn){
+            var taskId = btn.getAttribute('data-collab');
+            if(expandedTasks[taskId]){
+              var panel = document.getElementById('collab_'+taskId);
+              if(panel) loadTaskCollab(taskId, panel);
+            } else {
+              btn.textContent = 'Comments, links & files'+(counts[taskId]?' ('+counts[taskId]+')':'');
+            }
+          });
+        });
+      };
+      fetchCommentCounts().then(renderChecklist);
 
       function taskRowHtml(t, commentCounts){
         var r = roleOf(t.role);
@@ -2461,7 +2523,7 @@ function loadCollab(kind, id, panel){
         var editedInline = (grouped && c.editedAt) ? ' <span class="comment-edited-tag">(edited)</span>' : '';
         return '<div class="comment-row'+(grouped?' comment-row-grouped':'')+'" data-id="'+c.id+'">'+gutter+
           '<div class="comment-main">'+actions+head+
-          (c.body?'<div class="comment-body">'+linkifyHtml(escapeHtml(c.body))+editedInline+'</div>':'')+
+          (c.body?'<div class="comment-body">'+mentionifyHtml(linkifyHtml(escapeHtml(c.body)), c.mentions, who)+editedInline+'</div>':'')+
           attHtml+renderReactions(c.id)+
           '</div></div>';
       }
@@ -2477,6 +2539,39 @@ function loadCollab(kind, id, panel){
           (l.editedAt?'<span class="comment-edited-tag">(edited)</span>':'')+
           actionButtons('edit-link="'+l.id+'"', 'delete-link="'+l.id+'"', l.addedBy)+
           '</div>';
+      }
+
+      // Clears every message in this discussion at once (Humayun's ask,
+      // 2026-09-29) - a manager/admin-only bulk action, same access tier
+      // the existing per-comment delete RLS policy already grants for
+      // someone else's comment (see supabase/schema_v5.sql's "...delete"
+      // policies: author, admin, or a manager of that comment's own team -
+      // canManage() here is just the client-side mirror of that same
+      // check). Reactions have no FK cascade onto the comment tables (see
+      // schema_v6.sql), so they're deleted explicitly; attachments DO
+      // cascade at the database level, so they're only snapshotted here
+      // (for Undo) and not separately deleted.
+      function clearAllComments(){
+        if(!comments.length) return;
+        var n = comments.length;
+        if(!confirm('Delete all '+n+' message'+(n===1?'':'s')+' in this discussion? This also removes their attachments and reactions - use Undo right after if you change your mind.')) return;
+        var commentIds = comments.map(function(c){ return c.id; });
+        var reactionSnap = reactions.filter(function(r){ return commentIds.indexOf(r.commentId)>-1; });
+        var attachmentSnap = attachments.filter(function(a){ return a.commentId && commentIds.indexOf(a.commentId)>-1; });
+        var commentTuples = comments.map(function(c){ return {col:cfg.comments, id:c.id, data:c}; });
+        var reactionTuples = reactionSnap.map(function(r){ return {col:'commentReactions', id:r.id, data:r}; });
+        var attachmentTuples = attachmentSnap.map(function(a){ return {col:cfg.attachments, id:a.id, data:a}; });
+        Promise.all(
+          commentIds.map(function(cid){ return db.doc(cfg.comments+'/'+cid).delete(); })
+            .concat(reactionSnap.map(function(r){ return db.doc('commentReactions/'+r.id).delete(); }))
+        ).then(function(){
+          actionWithUndo('Cleared '+n+' message'+(n===1?'':'s'), function(){
+            restoreSnapshot([commentTuples, reactionTuples.concat(attachmentTuples)])
+              .then(function(){ showToast('success','Restored'); loadCollab(kind,id,panel); })
+              .catch(function(err){ showToast('error','Restore failed - '+errMsg(err)); });
+          });
+          loadCollab(kind,id,panel);
+        }).catch(function(err){ showToast('error', errMsg(err)); });
       }
 
       function render(){
@@ -2498,6 +2593,7 @@ function loadCollab(kind, id, panel){
         var prevTop = null;
         panel.setAttribute('data-collab-ready','1');
         panel.innerHTML =
+          (comments.length && canManage() ? '<button type="button" class="collab-clear-all-btn" id="clearAllBtn_'+id+'">Clear all messages</button>' : '')+
           '<div class="collab-list collab-fade-in">'+
             (topLevelComments.length ? topLevelComments.map(function(c){
               var topGrouped = isContinuation(prevTop, c);
@@ -2634,6 +2730,8 @@ function loadCollab(kind, id, panel){
       var mentionBox = null;
       function hideMentionBox(){ if(mentionBox){ mentionBox.remove(); mentionBox = null; } }
       function wire(){
+        var clearAllBtn = document.getElementById('clearAllBtn_'+id);
+        if(clearAllBtn) clearAllBtn.addEventListener('click', clearAllComments);
         var textarea = document.getElementById('commentInput_'+id);
         document.getElementById('commentSend_'+id).addEventListener('click', sendComposerMessage);
         textarea.addEventListener('keydown', function(ev){

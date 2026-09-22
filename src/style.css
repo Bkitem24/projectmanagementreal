@@ -189,6 +189,19 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 }
 .eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:var(--muted);font-weight:600;margin-bottom:7px;}
 .page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap;}
+/* Client detail page's cover-art header (2026-09-29) - square "podcast
+   cover art" proportions sitting beside the page-head, instead of a short
+   wide banner strip above it. */
+.client-hero{display:flex;gap:22px;align-items:flex-start;margin-bottom:28px;}
+.client-cover{width:190px;height:190px;flex:none;border-radius:var(--radius);overflow:hidden;position:relative;box-shadow:var(--shadow);background-size:cover;background-position:center;background-color:var(--line-soft);}
+.client-cover.no-image{background-image:linear-gradient(135deg,var(--blue-soft),var(--line-soft));}
+.client-cover-change{position:absolute;bottom:9px;right:9px;width:32px;height:32px;border-radius:50%;background:rgba(10,20,40,.55);color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background .12s ease,transform .12s ease;}
+.client-cover-change:hover{background:rgba(10,20,40,.78);transform:scale(1.06);}
+.client-hero-info{flex:1;min-width:0;padding-top:2px;}
+@media (max-width:640px){
+  .client-hero{flex-direction:column;}
+  .client-cover{width:100%;height:auto;aspect-ratio:1/1;}
+}
 .page-back-btn{display:inline-flex;align-items:center;gap:6px;border:none;background:none;color:var(--muted);font-size:13px;font-weight:600;padding:0;margin-bottom:14px;cursor:pointer;}
 .page-back-btn:hover{color:var(--ink);}
 .page-title{font-size:32px;}
@@ -208,21 +221,24 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px;}
 .client-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:0;box-shadow:var(--shadow);text-decoration:none;color:var(--ink);overflow:hidden;display:flex;flex-direction:column;transition:transform .18s var(--ease),box-shadow .18s ease,border-color .18s ease;}
 .client-card:hover{border-color:var(--blue);transform:translateY(-4px);box-shadow:var(--shadow-lg);}
-.client-card-rail{height:92px;background-size:cover;background-position:center;position:relative;overflow:hidden;}
-/* Edit/delete straight from the home card (2026-09-28) - sits on the rail
-   so it reads the same regardless of whether the rail is a photo or a
-   plain color gradient; hover-revealed like every other row-action this
-   app uses, dark translucent buttons for contrast against either. */
+/* Cover-art card (2026-09-29): the square photo IS the card now - podcast/
+   album-art convention, same square treatment as the client detail page's
+   own cover art. Hosted-by/overview text are gone (Humayun's explicit ask -
+   services/team/view-board are the only footer info left); the name stays
+   as a minimal caption on the photo itself rather than disappearing
+   entirely, so the grid is still usable for actually finding a client. */
+.client-card-photo{width:100%;aspect-ratio:1/1;background-size:cover;background-position:center;position:relative;overflow:hidden;}
+.client-card-photo.no-image{background-image:linear-gradient(135deg,var(--blue-soft),var(--line-soft));}
+/* Edit/delete straight from the home card (2026-09-28) - sits on the photo
+   so it reads the same regardless of whether it's a real photo or a plain
+   color gradient; hover-revealed like every other row-action this app
+   uses, dark translucent buttons for contrast against either. */
 .client-card-actions{position:absolute;top:7px;right:7px;display:flex;gap:4px;opacity:0;transition:opacity .12s ease;z-index:2;}
 .client-card:hover .client-card-actions{opacity:1;}
 .client-card-actions .icon-btn{background:rgba(0,0,0,.45);color:#fff;}
 .client-card-actions .icon-btn:hover{background:rgba(0,0,0,.7);color:#fff;}
-.client-card-rail.no-image{background:linear-gradient(135deg,var(--blue-soft),var(--line-soft));}
-.client-card-body{padding:17px;display:flex;flex-direction:column;gap:6px;flex:1;}
-.client-card-name{font-family:var(--font-display);font-size:22px;font-weight:600;}
-.client-card-host{font-size:12.5px;color:var(--muted);}
-.client-card-tagline{font-size:13px;color:var(--ink-soft);margin-top:4px;line-height:1.45;}
-.client-card-foot{margin-top:auto;padding-top:11px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);display:flex;justify-content:space-between;align-items:center;}
+.client-card-caption{position:absolute;left:0;right:0;bottom:0;padding:26px 14px 12px;background:linear-gradient(to top,rgba(8,16,32,.72),transparent);color:#fff;font-family:var(--font-display);font-size:17px;font-weight:700;text-shadow:0 1px 6px rgba(0,0,0,.3);}
+.client-card-foot{padding:11px 14px;font-size:12px;color:var(--muted);display:flex;justify-content:space-between;align-items:center;}
 .add-client-card{border:1.5px dashed var(--line);border-radius:var(--radius);display:flex;align-items:center;justify-content:center;min-height:124px;color:var(--muted);font-weight:600;font-size:14px;cursor:pointer;background:none;transition:border-color .15s ease,color .15s ease,transform .15s ease;}
 .add-client-card:hover{border-color:var(--blue);color:var(--blue);transform:translateY(-2px);}
 .section{margin-top:38px;}
@@ -321,7 +337,9 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
    afterthought and felt cramped ("too small") - now a proper card with its
    own background/border/padding and a real minimum height so it presents
    as a genuine discussion panel even with only one or two messages in it. */
-.task-collab{margin-top:12px;padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:12px;min-height:200px;display:flex;flex-direction:column;gap:10px;}
+.task-collab{margin-top:12px;padding:14px;background:var(--paper);border:1px solid var(--line);border-radius:12px;height:250px;display:flex;flex-direction:column;gap:10px;}
+.task-collab .collab-fade-in{flex:1;overflow-y:auto;min-height:0;}
+.task-collab .composer{flex:0 0 auto;}
 /* Phase 2.5 batch A: a class selector like .task-collab{display:flex} beats
    the browser's own [hidden]{display:none} rule on specificity, so setting
    the `hidden` attribute (which the JS "Hide discussion" handler already
@@ -340,6 +358,8 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
    loadCollab()'s isContinuation()/renderComment() in main.js. */
 .collab-list{display:flex;flex-direction:column;gap:10px;padding:4px 2px;}
 .collab-fade-in{animation:fadeIn .16s ease;}
+.collab-clear-all-btn{align-self:flex-end;flex:0 0 auto;border:none;background:none;color:var(--muted);font-size:11.5px;font-weight:600;cursor:pointer;padding:2px 4px;margin-bottom:2px;transition:color .12s ease;}
+.collab-clear-all-btn:hover{color:var(--overdue);}
 .collab-empty{font-size:13px;color:var(--muted);padding:14px 2px;}
 .comment-row{font-size:13.5px;display:flex;gap:11px;padding:5px 10px;border-radius:10px;transition:background .1s ease;position:relative;}
 .comment-row:hover{background:var(--paper);}
@@ -362,6 +382,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .icon-btn:hover{background:var(--line);color:var(--ink);}
 .comment-body{white-space:pre-wrap;word-break:break-word;line-height:1.5;}
 .comment-body a{color:var(--blue-2);}
+.mention-highlight{background:var(--blue-soft);color:var(--blue-2);border-radius:4px;padding:1px 4px;font-weight:600;}
 .comment-edit-box,.link-edit-box{display:flex;flex-direction:column;gap:6px;margin-top:3px;}
 .comment-edit-input{width:100%;min-height:60px;border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:9px 11px;font-size:13.5px;font-family:inherit;resize:vertical;}
 .comment-edit-actions{display:flex;gap:8px;}
@@ -564,8 +585,13 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .avatar-drop-hint{font-size:12px;color:var(--muted);}
 
 /* ---------- spotlight / hero banner ("Take Flight") ---------- */
-.spotlight-banner{position:relative;overflow:hidden;border-radius:20px;min-height:196px;padding:26px 30px;margin-bottom:30px;display:flex;align-items:center;gap:20px;background:linear-gradient(100deg,rgba(10,22,48,.55) 0%,rgba(10,22,48,.08) 55%,transparent 80%),url('/hero-banner.webp') center/cover no-repeat,linear-gradient(120deg,var(--blue),var(--blue-2));color:#fff;box-shadow:var(--shadow-lg);}
-.spotlight-photo{width:76px;height:76px;border-radius:16px;object-fit:cover;border:3px solid rgba(255,255,255,.5);flex:none;position:relative;z-index:1;box-shadow:var(--shadow);}
+.spotlight-banner{position:relative;overflow:hidden;border-radius:20px;min-height:196px;padding:26px 30px;margin-bottom:30px;display:flex;align-items:center;gap:20px;background:linear-gradient(100deg,rgba(10,22,48,.55) 0%,rgba(10,22,48,.08) 55%,transparent 80%),url('/hero-banner.webp') 53% 56%/cover no-repeat,linear-gradient(120deg,var(--blue),var(--blue-2));color:#fff;box-shadow:var(--shadow-lg);}
+/* Bigger, borderless, and feathered into the hero photo behind it (a soft
+   radial mask instead of a hard-edged square with a border) - 2026-09-29,
+   "shouldn't be enclosed in a box." Falls back to a plain circle in browsers
+   without mask-image support (very old WebView2 runtimes) rather than an
+   invisible photo. */
+.spotlight-photo{width:118px;height:118px;object-fit:cover;border-radius:50%;border:none;flex:none;position:relative;z-index:1;box-shadow:none;-webkit-mask-image:radial-gradient(circle at center, #000 52%, transparent 82%);mask-image:radial-gradient(circle at center, #000 52%, transparent 82%);}
 .spotlight-body{position:relative;z-index:1;flex:1;}
 .spotlight-eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;opacity:.9;font-weight:700;text-shadow:0 1px 6px rgba(0,0,0,.35);}
 .spotlight-name{font-family:var(--font-display);font-size:27px;font-weight:800;margin-top:3px;text-shadow:0 2px 14px rgba(0,0,0,.4);}
