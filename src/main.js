@@ -103,6 +103,10 @@ function linkifyHtml(escaped){
 }
 function todayISO(){ var d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
 function isoDate(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+// Phase 2.5 batch B: the deadline (dueDate) is now computed as the publish
+// date minus a configurable number of days, not the same date - see
+// generateEpisodesForRule and openAddOneOffEpisodeModal.
+function addDaysISO(iso, days){ var p=iso.split('-'); var d=new Date(+p[0],+p[1]-1,+p[2]); d.setDate(d.getDate()+(days||0)); return isoDate(d); }
 function fmtDate(iso){ if(!iso) return ''; var p=iso.split('-'); var d=new Date(+p[0],+p[1]-1,+p[2]); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}); }
 function fmtDateFull(iso){ if(!iso) return ''; var p=iso.split('-'); var d=new Date(+p[0],+p[1]-1,+p[2]); return d.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric',year:'numeric'}); }
 function fmtDateTime(iso){ if(!iso) return ''; var d=new Date(iso); return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' · '+d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}); }
@@ -448,8 +452,12 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
   monthOffsets.forEach(function(off){
     var y = base.getFullYear(), m = base.getMonth()+off;
     var d = nthWeekdayOfMonth(y, m, rule.weekOfMonth, rule.weekday);
-    var iso = isoDate(d);
-    if(off===0 && iso < todayISO()) return;
+    var publishIso = isoDate(d);
+    if(off===0 && publishIso < todayISO()) return;
+    // Deadline (dueDate - what drives overdue badges/sorting/"waiting on"
+    // urgency) is the publish date minus this rule's own offset, not the
+    // publish date itself - Phase 2.5 batch B, see schema_v12.sql.
+    var dueIso = addDaysISO(publishIso, -(rule.daysBeforePublish||2));
     var period = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
     var epId = 'ep_'+rule.id+'_'+period;
     out.push(
@@ -457,7 +465,7 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
         if(existing.exists) return null;
         var epDoc = {
           clientId: rule.clientId, clientName: clientMeta.name, templateId: rule.templateId,
-          scheduleRuleId: rule.id, title: rule.label, dueDate: iso, period: period,
+          scheduleRuleId: rule.id, title: rule.label, dueDate: dueIso, publishDate: publishIso, period: period,
           paid: !!rule.paid, amount: rule.amount||null, taskCount: steps.length, createdAt: new Date().toISOString()
         };
         return db.doc('episodes/'+epId).set(epDoc).then(function(){
@@ -466,7 +474,7 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
             return db.doc('tasks/'+taskId).set({
               episodeId: epId, episodeTitle: rule.label, clientId: rule.clientId, clientName: clientMeta.name,
               role: s.role, label: s.label, group: s.group||'', orderNum: s.order||0,
-              dependsOnStepIds: stepDepIds(s), dueDate: iso, done:false, doneByUserId:null, doneAt:null,
+              dependsOnStepIds: stepDepIds(s), dueDate: dueIso, done:false, doneByUserId:null, doneAt:null,
               createdAt: new Date().toISOString()
             });
           }));
@@ -920,12 +928,28 @@ function renderClient(clientId){
 
     var lastEpSnap = null;
     var showArchivedEpisodes = false;
+    // Completed-episode segment (Phase 2.5 batch B, item #2): an episode
+    // where every one of its tasks is done moves into its own "Completed"
+    // section instead of staying mixed in with open ones, the same idea
+    // already shipped for individual tasks within an episode's own
+    // checklist (round 8). Whether an episode is fully done isn't a field
+    // on the episode doc itself (there's no cached "done count" to drift
+    // out of sync, on purpose - see CLAUDE.md's "live lookup over baked-in
+    // value" convention) - it's computed live from a single grouped query
+    // over every task for this client, the same "one query covers every
+    // row, refetch on any relevant change" shape as the comment-count
+    // badge fix (round 8.9-fix).
+    var lastTaskCounts = {};
+    function isEpisodeComplete(d){
+      var c = lastTaskCounts[d.id];
+      return !!(c && c.total>0 && c.done===c.total);
+    }
     function renderEpisodeList(){
       var list = document.getElementById('episodeList');
       if(!list || !lastEpSnap) return;
       var docs = lastEpSnap.docs.filter(function(d){ return showArchivedEpisodes || !d.data().archived; });
       if(!docs.length){ list.innerHTML = '<div class="empty-state"><strong>No episodes yet</strong>'+(mgr?'Add a schedule rule, then generate episodes.':'Ask a manager to set up this client\'s schedule.')+'</div>'; return; }
-      list.innerHTML = docs.map(function(d){
+      function rowHtml(d){
         var e = d.data();
         var status = dueStatus(e.dueDate,false);
         return '<a class="episode-row" href="#/episode/'+d.id+'">'+
@@ -933,13 +957,34 @@ function renderClient(clientId){
           '<div class="episode-main"><div class="episode-title">'+escapeHtml(e.title)+(e.archived?' <span class="badge" style="background:var(--line-soft);">Archived</span>':'')+'</div>'+
           '<div class="episode-sub">'+(e.taskCount||0)+' tasks'+(e.paid?' · Paid $'+e.amount:'')+'</div></div>'+
           '<span class="badge badge-'+status+'">'+statusLabel(status)+'</span></a>';
-      }).join('');
+      }
+      var open = docs.filter(function(d){ return !isEpisodeComplete(d); });
+      var done = docs.filter(isEpisodeComplete);
+      // Not wrapped in a single container div: #episodeList is a flex
+      // column with its own gap between direct children (.episode-list),
+      // so the header and each "done" row are emitted as flat siblings,
+      // same as the open rows above, to keep that spacing consistent
+      // instead of collapsing to 0 inside one wrapped block.
+      list.innerHTML = open.map(rowHtml).join('') +
+        (done.length ? '<div class="checklist-group-head checklist-completed" style="margin-top:6px;"><span class="checklist-group-title">Completed ('+done.length+')</span></div>'+done.map(rowHtml).join('') : '');
     }
     var unsubEp = db.collection('episodes').where('clientId','==',clientId).orderBy('dueDate','asc').limit(30).onSnapshot(function(es){
       lastEpSnap = es;
       renderEpisodeList();
     }, function(){});
     activeUnsubs.push(unsubEp);
+    var unsubEpTasks = db.collection('tasks').where('clientId','==',clientId).onSnapshot(function(tsSnap){
+      var counts = {};
+      tsSnap.docs.forEach(function(d){
+        var t = d.data();
+        if(!counts[t.episodeId]) counts[t.episodeId] = {done:0, total:0};
+        counts[t.episodeId].total++;
+        if(t.done) counts[t.episodeId].done++;
+      });
+      lastTaskCounts = counts;
+      renderEpisodeList();
+    }, function(){});
+    activeUnsubs.push(unsubEpTasks);
     var epArchToggle = document.getElementById('showArchivedEpisodesToggle');
     if(epArchToggle) epArchToggle.addEventListener('change', function(){ showArchivedEpisodes = epArchToggle.checked; renderEpisodeList(); });
 
@@ -949,6 +994,37 @@ function renderClient(clientId){
     }
   }, function(){ paint('<div class="empty-state">Could not load this client.</div>'); });
   activeUnsubs.push(unsub);
+}
+
+// Group picker shared by the add-step and edit-step modals (Phase 2.5
+// batch B, "group dropdown" - item #3's first bullet): a free-text Group
+// input let two steps end up in "Editing" and "editing " as two visually-
+// identical-looking but functionally separate header groups on the
+// checklist, just from a typo. Existing group names on this template are
+// now offered as a dropdown instead, with a "+ New group" choice that
+// reveals a plain text input for a genuinely new name - see
+// wireGroupPicker/resolveGroupChoice.
+function groupOptionsHtml(steps, selected){
+  var names = [];
+  (steps||[]).forEach(function(s){
+    var g = (s.group||'').trim() || 'Tasks';
+    if(names.indexOf(g)===-1) names.push(g);
+  });
+  if(selected && names.indexOf(selected)===-1) names.push(selected);
+  return names.map(function(g){ return '<option value="'+escapeHtml(g)+'"'+(g===selected?' selected':'')+'>'+escapeHtml(g)+'</option>'; }).join('') +
+    '<option value="__new__"'+(!selected?' selected':'')+'>+ New group…</option>';
+}
+function wireGroupPicker(form){
+  var select = form.querySelector('[name="groupChoice"]');
+  var newField = form.querySelector('[data-group-new-field]');
+  if(!select || !newField) return;
+  function sync(){ newField.style.display = select.value==='__new__' ? '' : 'none'; }
+  select.addEventListener('change', sync);
+  sync();
+}
+function resolveGroupChoice(fd){
+  var choice = fd.get('groupChoice');
+  return choice==='__new__' ? (fd.get('groupNew')||'').trim() : (choice||'').trim();
 }
 
 // Renders a client's workflow templates + steps into `box`, and keeps it
@@ -973,6 +1049,7 @@ function mountTemplatesBox(clientId, box){
             '<span class="step-drag-handle" title="Drag to reorder">⋮⋮</span>'+
             '<span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):s.role)+'</span>'+
             '<span style="flex:1;">'+escapeHtml(s.label)+(deps.length?' <span class="task-waiting">⛔ waits for: '+deps.map(function(dd){return escapeHtml(dd.label);}).join(', ')+'</span>':'')+'</span>'+
+            '<button type="button" class="step-edit-remove" data-edit-step data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" title="Change this step\'s name, role or group">edit</button>'+
             '<button type="button" class="step-edit-remove" data-set-dep data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" title="Choose which steps this waits on">'+(deps.length?'Change dependencies':'+ Depends on')+'</button>'+
             '<button type="button" class="step-edit-remove" data-remove-step data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'">remove</button></div>';
         }).join('')+'</div>'+
@@ -987,6 +1064,9 @@ function mountTemplatesBox(clientId, box){
     });
     Array.prototype.forEach.call(box.querySelectorAll('[data-add-step]'), function(btn){
       btn.addEventListener('click', function(){ openAddStepModal(btn.getAttribute('data-add-step')); });
+    });
+    Array.prototype.forEach.call(box.querySelectorAll('[data-edit-step]'), function(btn){
+      btn.addEventListener('click', function(){ openEditStepModal(btn.getAttribute('data-tpl'), btn.getAttribute('data-step')); });
     });
     Array.prototype.forEach.call(box.querySelectorAll('[data-set-dep]'), function(btn){
       btn.addEventListener('click', function(){ openSetStepDependencyModal(btn.getAttribute('data-tpl'), btn.getAttribute('data-step')); });
@@ -1170,7 +1250,8 @@ function openCreateServiceTypeModal(clientIdToAttach){
 
 function openAddOneOffEpisodeModal(clientId, clientName){
   openModal('One-off episode', '<div class="field"><label>Title</label><input required name="title" type="text" placeholder="e.g. Live Q&amp;A special"></div>'+
-    '<div class="field"><label>Due date</label><input required name="dueDate" type="date" value="'+todayISO()+'"></div>'+
+    '<div class="field"><label>Publish/air date</label><input required name="publishDate" type="date" value="'+todayISO()+'"></div>'+
+    '<div class="field"><label>Deadline is this many days before that</label><input name="daysBeforePublish" type="number" min="0" value="2"></div>'+
     '<div class="check-row"><input type="checkbox" id="oneOffPaid" name="paid" style="width:16px;height:16px;"><label for="oneOffPaid">Paid appearance</label></div>'+
     '<div class="field"><label>Amount ($)</label><input name="amount" type="number" placeholder="200"></div>',
     function(fd){
@@ -1178,9 +1259,11 @@ function openAddOneOffEpisodeModal(clientId, clientName){
       if(!title){ showModalError('Give this episode a title.'); return; }
       setModalBusy(true);
       var epId = 'ep_oneoff_'+uid8();
+      var publishDate = fd.get('publishDate');
+      var dueDate = addDaysISO(publishDate, -(parseInt(fd.get('daysBeforePublish'),10)||0));
       db.doc('episodes/'+epId).set({
         clientId: clientId, clientName: clientName, templateId: null, scheduleRuleId: null,
-        title: title, dueDate: fd.get('dueDate'), period: null,
+        title: title, dueDate: dueDate, publishDate: publishDate, period: null,
         paid: fd.get('paid')==='on', amount: fd.get('paid')==='on' ? (parseInt(fd.get('amount'),10)||0) : null,
         taskCount: 0, createdAt: new Date().toISOString()
       }).then(function(){
@@ -1263,6 +1346,7 @@ function openAddRuleModal(clientId){
       '<div class="field-row"><div class="field"><label>Week of month</label><select name="weekOfMonth"><option value="1">1st</option><option value="2">2nd</option><option value="3">3rd</option><option value="4">4th</option><option value="-1">Last</option></select></div>'+
       '<div class="field"><label>Weekday</label><select name="weekday">'+WEEKDAY_NAMES.map(function(w,i){return '<option value="'+i+'">'+w+'</option>';}).join('')+'</select></div></div>'+
       '<div class="field"><label>Workflow template</label><select name="templateId">'+(opts||'<option value="">No templates yet</option>')+'</select></div>'+
+      '<div class="field"><label>Deadline is this many days before the publish date</label><input name="daysBeforePublish" type="number" min="0" value="2"></div>'+
       '<div class="check-row"><input type="checkbox" id="paidCheck" name="paid" style="width:16px;height:16px;"><label for="paidCheck">Paid appearance</label></div>'+
       '<div class="field"><label>Amount ($)</label><input name="amount" type="number" placeholder="200"></div>',
       function(fd){
@@ -1273,6 +1357,7 @@ function openAddRuleModal(clientId){
         db.doc('scheduleRules/'+id).set({
           clientId:clientId, templateId:fd.get('templateId')||null, label:label,
           weekOfMonth: parseInt(fd.get('weekOfMonth'),10), weekday: parseInt(fd.get('weekday'),10),
+          daysBeforePublish: parseInt(fd.get('daysBeforePublish'),10) || 0,
           paid: fd.get('paid')==='on', amount: fd.get('paid')==='on' ? (parseInt(fd.get('amount'),10)||0) : null,
           active:true
         }).then(function(){
@@ -1291,7 +1376,8 @@ function openAddStepModal(templateId){
     }).join('') : '<div class="field-hint">No other steps yet.</div>';
     openModal('Add workflow step', '<div class="field"><label>Step description</label><input required name="label" type="text" placeholder="e.g. Edit trailer"></div>'+
       '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
-      '<div class="field"><label>Group</label><input name="group" type="text" placeholder="e.g. Editing"></div></div>'+
+      '<div class="field"><label>Group</label><select name="groupChoice">'+groupOptionsHtml(existingSteps, null)+'</select>'+
+      '<input name="groupNew" type="text" placeholder="e.g. Editing" data-group-new-field style="margin-top:6px;"></div></div>'+
       '<div class="field"><label>Depends on (optional, pick any number)</label>'+checksHtml+'</div>'+
       '<div class="field-hint">Every task generated from this step - in every future episode - is locked until ALL chosen steps are checked off. You can change this later from the step\'s "Change dependencies" button.</div>',
       function(fd){
@@ -1299,7 +1385,7 @@ function openAddStepModal(templateId){
         if(!label){ showModalError('Describe the step.'); return; }
         setModalBusy(true);
         var dependsOnStepIds = fd.getAll('dependsOnStepIds');
-        var newStep = {stepId:'s'+uid8(), order:0, role:fd.get('role'), group:(fd.get('group')||'').trim(), label:label, dependsOnStepIds: dependsOnStepIds};
+        var newStep = {stepId:'s'+uid8(), order:0, role:fd.get('role'), group:resolveGroupChoice(fd), label:label, dependsOnStepIds: dependsOnStepIds};
         db.doc('templates/'+templateId).get().then(function(freshSnap){
           var ft = freshSnap.data();
           var freshSteps = (ft.steps||[]).slice();
@@ -1340,8 +1426,92 @@ function openAddStepModal(templateId){
         }).then(function(){
           closeModal(); showToast('success', 'Added step');
         }).catch(function(err){ showModalError(errMsg(err)); });
-      }, 'Add step');
+      }, 'Add step', {afterRender: wireGroupPicker});
   }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+// Editable step role/name/group (Phase 2.5 batch B, item #3's second
+// bullet) - previously the only way to change an existing step's label/
+// role/group was remove-and-re-add, which loses its dependencies and
+// orphans any tasks already generated from it. Editing in place needs a
+// real decision every time: does this change apply to episodes that
+// already exist, or only ones generated from now on - collected as a
+// second step right after this one, see openStepEditScopeModal. Per
+// Humayun's 2026-09-26 scope call: (A) everyone, current and future,
+// (B) future episodes only, (C) only tasks/episodes due on or after a
+// chosen date.
+function openEditStepModal(tplId, stepId){
+  db.doc('templates/'+tplId).get().then(function(snap){
+    var t = snap.data();
+    var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
+    var self = steps.filter(function(s){ return s.stepId===stepId; })[0];
+    if(!self){ showToast('error','That step no longer exists - try refreshing.'); return; }
+    var selfGroup = (self.group||'').trim() || 'Tasks';
+    openModal('Edit "'+escapeHtml(self.label)+'"',
+      '<div class="field"><label>Step description</label><input required name="label" type="text" value="'+escapeHtml(self.label)+'"></div>'+
+      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'"'+(r.key===self.role?' selected':'')+'>'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="field"><label>Group</label><select name="groupChoice">'+groupOptionsHtml(steps, selfGroup)+'</select>'+
+      '<input name="groupNew" type="text" placeholder="e.g. Editing" data-group-new-field style="margin-top:6px;"></div></div>',
+      function(fd){
+        var label = (fd.get('label')||'').trim();
+        if(!label){ showModalError('Describe the step.'); return; }
+        var changes = { label: label, role: fd.get('role'), group: resolveGroupChoice(fd) };
+        openStepEditScopeModal(tplId, stepId, changes);
+      }, 'Next', {afterRender: wireGroupPicker});
+  }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+function openStepEditScopeModal(tplId, stepId, changes){
+  openModal('Apply this change to…',
+    '<div class="field">'+
+      '<div class="check-row"><input type="radio" name="scope" value="all" id="scopeAll" checked><label for="scopeAll">Every task - current episodes and future ones</label></div>'+
+      '<div class="check-row"><input type="radio" name="scope" value="future" id="scopeFuture"><label for="scopeFuture">Future episodes only - leave already-generated tasks as they are</label></div>'+
+      '<div class="check-row"><input type="radio" name="scope" value="cutoff" id="scopeCutoff"><label for="scopeCutoff">Only tasks/episodes due on or after a date</label></div>'+
+      '<input name="cutoffDate" type="date" value="'+todayISO()+'" data-cutoff-field style="margin-top:6px;margin-left:24px;">'+
+    '</div>'+
+    '<div class="field-hint">The workflow template itself always updates right away, so every future episode picks up the new name/role/group automatically - this choice only controls whether tasks on episodes that already exist get updated too.</div>',
+    function(fd){
+      setModalBusy(true);
+      var scope = fd.get('scope');
+      var cutoff = fd.get('cutoffDate');
+      db.doc('templates/'+tplId).get().then(function(freshSnap){
+        var ft = freshSnap.data();
+        var freshSteps = (ft.steps||[]).map(function(s){
+          return s.stepId===stepId ? Object.assign({}, s, changes) : s;
+        });
+        return db.doc('templates/'+tplId).update({steps: freshSteps});
+      }).then(function(){
+        if(scope==='future') return null;
+        // Existing tasks are found the same way the new-step backfill
+        // does (round 8.7): every episode generated from this template has
+        // a deterministic task id, <episodeId>_<stepId> - no separate
+        // "which step did this task come from" column needed on tasks at
+        // all, so this is a direct .doc().update() per eligible episode,
+        // not a tasks query. A task that's missing for some episode (step
+        // added after that episode was generated, since backfilled - or
+        // genuinely never backfilled) is skipped rather than failing the
+        // whole batch.
+        return db.collection('episodes').where('templateId','==',tplId).get().then(function(epSnap){
+          var eligible = epSnap.docs.filter(function(d){
+            var e = d.data();
+            if(e.archived) return false;
+            if(scope==='cutoff' && cutoff && e.dueDate < cutoff) return false;
+            return true;
+          });
+          return Promise.all(eligible.map(function(epDoc){
+            var taskId = epDoc.id+'_'+stepId;
+            return db.doc('tasks/'+taskId).update({ role: changes.role, label: changes.label, group: changes.group }).catch(function(){});
+          }));
+        });
+      }).then(function(){
+        closeModal(); showToast('success', 'Step updated');
+      }).catch(function(err){ showModalError(errMsg(err)); });
+    }, 'Apply', {afterRender: function(form){
+      var cutoffField = form.querySelector('[data-cutoff-field]');
+      function sync(){ cutoffField.style.display = form.querySelector('[name="scope"]:checked').value==='cutoff' ? '' : 'none'; }
+      Array.prototype.forEach.call(form.querySelectorAll('[name="scope"]'), function(r){ r.addEventListener('change', sync); });
+      sync();
+    }});
 }
 
 // ---------- EPISODE DETAIL ----------
@@ -1354,7 +1524,7 @@ function renderEpisode(episodeId){
     paint(
       '<div class="page-head"><div><div class="eyebrow"><a href="#/client/'+e.clientId+'" style="color:var(--muted);text-decoration:none;">'+escapeHtml(e.clientName)+'</a></div>'+
       '<h1 class="page-title">'+escapeHtml(e.title)+(e.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+'</h1>'+
-      '<div class="page-sub">'+fmtDateFull(e.dueDate)+(e.paid?' · Paid appearance ($'+e.amount+')':'')+'</div></div>'+
+      '<div class="page-sub">'+(e.publishDate && e.publishDate!==e.dueDate ? 'Airs '+fmtDateFull(e.publishDate)+' · Deadline '+fmtDateFull(e.dueDate) : fmtDateFull(e.publishDate||e.dueDate))+(e.paid?' · Paid appearance ($'+e.amount+')':'')+'</div></div>'+
       '<div style="display:flex;align-items:flex-start;gap:8px;">'+
       (canManage()?'<button type="button" class="btn btn-sm" id="archiveEpisodeBtn">'+(e.archived?'Unarchive':'Archive')+'</button><button type="button" class="btn btn-sm btn-danger" id="deleteEpisodeBtn">Delete</button>':'')+
       '<div id="epStatusBadge"></div></div></div>'+
