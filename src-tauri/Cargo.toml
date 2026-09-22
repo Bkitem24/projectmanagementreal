@@ -19,9 +19,12 @@ serde_json = "1"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 
-# Phase 2.5 batch A: launch on Windows startup, enabled by default (see
-# src/main.rs's .setup() hook).
-tauri-plugin-autostart = "2"
+# Phase 2.5 batch A follow-up: launch on Windows startup is now done with a
+# direct schtasks.exe Scheduled Task call from src/main.rs's .setup() hook
+# (register_autostart_task()) instead of a plugin - see the long comment
+# there for why the registry-based tauri-plugin-autostart approach (removed
+# here) didn't actually work on this app. No autostart crate needed at all
+# any more; std::process::Command is enough.
 
 # TimeLog (src/timelog.rs): screen capture + global keyboard/mouse activity.
 #
