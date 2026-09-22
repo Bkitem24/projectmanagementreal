@@ -159,6 +159,10 @@ function toggleTheme(){
 }
 
 // ---------- toast ----------
+// Set by showToast() whenever an "Undo" action toast is showing, so
+// Ctrl/Cmd+Z (wired further down, near the other app-wide keyboard
+// shortcuts) can trigger the same reversal a click on the button would.
+var pendingUndoTrigger = null;
 function showToast(type, message, opts){
   opts = opts || {};
   var root = document.getElementById('toastRoot');
@@ -177,8 +181,19 @@ function showToast(type, message, opts){
     btn.type = 'button';
     btn.className = 'toast-action';
     btn.textContent = opts.actionLabel;
-    btn.addEventListener('click', function(){ opts.onAction(); dismiss(); });
+    function trigger(){ opts.onAction(); dismiss(); if(pendingUndoTrigger===trigger) pendingUndoTrigger=null; }
+    btn.addEventListener('click', trigger);
     el.appendChild(btn);
+    // Ctrl/Cmd+Z for the Undo toast specifically (2026-09-28, asked for
+    // after shipping the click-only version) - only the most recent
+    // undo-able toast is reachable this way, matching there only ever
+    // being one Undo button visible at a time in practice. Cleared the
+    // moment it's used, dismissed, or its own window naturally expires -
+    // see the global keydown listener below.
+    if(opts.actionLabel==='Undo'){
+      pendingUndoTrigger = trigger;
+      setTimeout(function(){ if(pendingUndoTrigger===trigger) pendingUndoTrigger=null; }, opts.duration||3400);
+    }
   }
   root.appendChild(el);
   setTimeout(dismiss, opts.duration||3400);
@@ -306,6 +321,37 @@ function deleteClientWithUndo(clientId, clientName){
       });
     });
   }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+// Shared by the client detail page's own Delete button AND the home page's
+// per-card delete action (2026-09-28 ask: delete/edit a client without
+// opening it first) - the "type the name back" gate is the same weight
+// either way, a permanent delete is a permanent delete regardless of which
+// page it's clicked from. Returns true if the delete actually ran (caller
+// decides what to do next - the detail page navigates home, the card just
+// lets the live grid subscription drop the card).
+function confirmAndDeleteClient(clientId, clientName){
+  var typed = prompt('This permanently deletes "'+clientName+'" and ALL of its episodes, tasks, comments and attachments (a few seconds\' Undo is offered right after, but not longer than that).\n\nType the client\'s name to confirm:');
+  if(typed===null) return false;
+  if(typed.trim()!==clientName){ showToast('error','Name didn\'t match - nothing was deleted.'); return false; }
+  deleteClientWithUndo(clientId, clientName);
+  return true;
+}
+
+// Shared by the client detail page's pencil button AND the home page's
+// per-card edit action - see confirmAndDeleteClient's comment above for
+// why both exist.
+function openEditClientNameModal(clientId, c){
+  openModal('Edit podcast name & host', '<div class="field"><label>Podcast name</label><input required name="name" type="text" value="'+escapeHtml(c.name)+'"></div>'+
+    '<div class="field"><label>Host name(s)</label><input name="hostName" type="text" value="'+escapeHtml(c.hostName||'')+'" placeholder="e.g. Erica Bonser &amp; Steph Eggar"></div>',
+    function(fd){
+      var name = (fd.get('name')||'').trim();
+      if(!name){ showModalError('Name the podcast.'); return; }
+      setModalBusy(true);
+      db.doc('clients/'+clientId).update({name:name, hostName:(fd.get('hostName')||'').trim()}).then(function(){
+        closeModal(); showToast('success','Updated');
+      }).catch(function(err){ showModalError(errMsg(err)); });
+    }, 'Save');
 }
 
 // A short beep, embedded as base64 so a screenshot notice never depends on
@@ -693,6 +739,26 @@ document.addEventListener('keydown', function(e){
   else if(e.key==='0'){ e.preventDefault(); appZoomLevel = 1; applyAppZoom(); }
 });
 
+// Ctrl/Cmd+Z triggers the most recent undo-able toast (2026-09-28, asked
+// for after shipping the click-only Undo button) - pendingUndoTrigger is
+// set by showToast() whenever an "Undo" action toast is shown, and cleared
+// the moment it's used, clicked, or its own window expires. Skipped while
+// focus is inside a text field/contentEditable so this doesn't hijack the
+// browser's own native undo-my-typing behavior there - genuinely different
+// things, and a person editing a comment when a delete's undo window
+// happens to still be open should get their typing undone, not someone
+// else's delete reversed.
+document.addEventListener('keydown', function(e){
+  if(!(e.ctrlKey||e.metaKey) || e.shiftKey) return;
+  if(e.key!=='z' && e.key!=='Z') return;
+  if(!pendingUndoTrigger) return;
+  var t = e.target;
+  var editable = t && (t.tagName==='INPUT' || t.tagName==='TEXTAREA' || t.isContentEditable);
+  if(editable) return;
+  e.preventDefault();
+  pendingUndoTrigger();
+});
+
 // ---------- EXIT CONFIRMATION + CLOCK-OUT ON CLOSE ----------
 // Added 2026-09-21: clicking the window's own close ("X") button used to
 // just end the process outright - no confirmation, and (worse, while
@@ -861,7 +927,9 @@ function renderHome(){
       var c = d.data();
       var color = c.color || CLIENT_COLORS[i%CLIENT_COLORS.length];
       return '<a class="client-card" href="#/client/'+d.id+'">'+
-        '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\')':'background:linear-gradient(135deg,'+color+',var(--line-soft))')+'"></div>'+
+        '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\')':'background:linear-gradient(135deg,'+color+',var(--line-soft))')+'">'+
+        (canManage()?'<div class="client-card-actions"><button type="button" class="icon-btn" data-edit-client-card="'+d.id+'" title="Edit name/host">'+ICON_PENCIL+'</button><button type="button" class="icon-btn" data-delete-client-card="'+d.id+'" title="Delete client">'+ICON_TRASH+'</button></div>':'')+
+        '</div>'+
         '<div class="client-card-body">'+
         '<div class="client-card-name">'+escapeHtml(c.name)+'</div>'+
         '<div class="client-card-host">Hosted by '+escapeHtml(c.hostName||'-')+'</div>'+
@@ -873,6 +941,28 @@ function renderHome(){
     grid.innerHTML = cards || '<div class="empty-state">No clients'+(showArchivedClients?' in your team yet':' - toggle "Show archived" above if you\'re looking for one you archived')+'.</div>';
     var btn = document.getElementById('addClientCard');
     if(btn) btn.addEventListener('click', openAddClientModal);
+    // Edit/delete straight from the card (2026-09-28 ask: shouldn't have
+    // to open a client just to rename or delete it) - both buttons sit
+    // inside the card's own <a>, so each needs to stop the click from
+    // ALSO navigating into the client.
+    Array.prototype.forEach.call(grid.querySelectorAll('[data-edit-client-card]'), function(btn2){
+      btn2.addEventListener('click', function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        var cid = btn2.getAttribute('data-edit-client-card');
+        var doc = docs.filter(function(d){ return d.id===cid; })[0];
+        if(doc) openEditClientNameModal(cid, doc.data());
+      });
+    });
+    Array.prototype.forEach.call(grid.querySelectorAll('[data-delete-client-card]'), function(btn2){
+      btn2.addEventListener('click', function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        var cid = btn2.getAttribute('data-delete-client-card');
+        var doc = docs.filter(function(d){ return d.id===cid; })[0];
+        if(!doc) return;
+        var card = btn2.closest('.client-card');
+        if(confirmAndDeleteClient(cid, doc.data().name) && card) card.classList.add('pending-remove');
+      });
+    });
   }
   var unsub2 = db.collection('clients').orderBy('createdAt','asc').onSnapshot(function(snap){
     lastClientSnap = snap;
@@ -984,17 +1074,7 @@ function renderClient(clientId){
     });
     var deleteClientBtn = document.getElementById('deleteClientBtn');
     if(deleteClientBtn) deleteClientBtn.addEventListener('click', function(){
-      // A permanent delete cascades away every episode, task, template,
-      // schedule rule, comment and attachment tied to this client (the
-      // database's own foreign keys already do this cleanly - see
-      // schema.sql) - real, irreversible history loss, so this asks for
-      // the client's exact name typed back rather than just a yes/no
-      // confirm, the same weight as any other "type to confirm" delete.
-      var typed = prompt('This permanently deletes "'+c.name+'" and ALL of its episodes, tasks, comments and attachments (a few seconds\' Undo is offered right after, but not longer than that).\n\nType the client\'s name to confirm:');
-      if(typed===null) return;
-      if(typed.trim()!==c.name){ showToast('error','Name didn\'t match - nothing was deleted.'); return; }
-      deleteClientWithUndo(clientId, c.name);
-      location.hash = '#/';
+      if(confirmAndDeleteClient(clientId, c.name)) location.hash = '#/';
     });
 
     var imgInput = document.getElementById('clientImageInput');
@@ -1014,18 +1094,7 @@ function renderClient(clientId){
     // afterward - flagged 2026-09-28. No schema change needed, both
     // columns already exist.
     var editClientNameBtn = document.getElementById('editClientNameBtn');
-    if(editClientNameBtn) editClientNameBtn.addEventListener('click', function(){
-      openModal('Edit podcast name & host', '<div class="field"><label>Podcast name</label><input required name="name" type="text" value="'+escapeHtml(c.name)+'"></div>'+
-        '<div class="field"><label>Host name(s)</label><input name="hostName" type="text" value="'+escapeHtml(c.hostName||'')+'" placeholder="e.g. Erica Bonser &amp; Steph Eggar"></div>',
-        function(fd){
-          var name = (fd.get('name')||'').trim();
-          if(!name){ showModalError('Name the podcast.'); return; }
-          setModalBusy(true);
-          db.doc('clients/'+clientId).update({name:name, hostName:(fd.get('hostName')||'').trim()}).then(function(){
-            closeModal(); showToast('success','Updated');
-          }).catch(function(err){ showModalError(errMsg(err)); });
-        }, 'Save');
-    });
+    if(editClientNameBtn) editClientNameBtn.addEventListener('click', function(){ openEditClientNameModal(clientId, c); });
 
     var editOverviewBtn = document.getElementById('editOverviewBtn');
     if(editOverviewBtn) editOverviewBtn.addEventListener('click', function(){
@@ -1134,7 +1203,9 @@ function renderClient(clientId){
           '<span class="episode-date mono">'+fmtDate(e.dueDate)+'</span>'+
           '<div class="episode-main"><div class="episode-title">'+escapeHtml(e.title)+(e.archived?' <span class="badge" style="background:var(--line-soft);">Archived</span>':'')+'</div>'+
           '<div class="episode-sub">'+(e.taskCount||0)+' tasks'+(e.paid?' · Paid $'+e.amount:'')+'</div></div>'+
-          '<span class="badge badge-'+status+'">'+statusLabel(status)+'</span></a>';
+          '<span class="badge badge-'+status+'">'+statusLabel(status)+'</span>'+
+          (mgr?'<button type="button" class="icon-btn episode-row-delete" data-delete-episode-row="'+d.id+'" data-title="'+escapeHtml(e.title)+'" title="Delete episode">'+ICON_TRASH+'</button>':'')+
+          '</a>';
       }
       var open = docs.filter(function(d){ return !isEpisodeComplete(d); });
       var done = docs.filter(isEpisodeComplete);
@@ -1145,6 +1216,19 @@ function renderClient(clientId){
       // instead of collapsing to 0 inside one wrapped block.
       list.innerHTML = open.map(rowHtml).join('') +
         (done.length ? '<div class="checklist-group-head checklist-completed" style="margin-top:6px;"><span class="checklist-group-title">'+ICON_CHECK_CIRCLE+' Completed ('+done.length+')</span></div>'+done.map(rowHtml).join('') : '');
+      // Delete straight from the list (2026-09-28 ask: shouldn't have to
+      // open an episode just to delete it) - the button sits inside the
+      // row's own <a>, so it needs to stop the click from ALSO navigating.
+      Array.prototype.forEach.call(list.querySelectorAll('[data-delete-episode-row]'), function(btn){
+        btn.addEventListener('click', function(ev){
+          ev.preventDefault(); ev.stopPropagation();
+          var epId = btn.getAttribute('data-delete-episode-row');
+          var title = btn.getAttribute('data-title');
+          var row = btn.closest('.episode-row');
+          if(row) row.classList.add('pending-remove');
+          deleteEpisodeWithUndo(epId, title, clientId);
+        });
+      });
     }
     var unsubEp = db.collection('episodes').where('clientId','==',clientId).orderBy('dueDate','asc').limit(30).onSnapshot(function(es){
       lastEpSnap = es;
@@ -2197,6 +2281,17 @@ var ICON_CHECK_CIRCLE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="n
 // auto-expanding textarea (like this very chat box), and emoji reactions
 // per message.
 var REACTION_EMOJI = ['👍','❤️','😂','😮','😢','🙏','🎉','👀'];
+// @mention autocomplete roster (Phase 4) - every profile, fetched once per
+// session and cached (not per-panel) since it barely ever changes and
+// every composer on every task/episode discussion needs the same list.
+var mentionRosterCache = null;
+function getMentionRoster(){
+  if(mentionRosterCache) return Promise.resolve(mentionRosterCache);
+  return db.collection('profiles').get().then(function(snap){
+    mentionRosterCache = snap.docs.map(function(d){ var p=d.data(); return {id:d.id, name:p.displayName||p.email||'Someone'}; });
+    return mentionRosterCache;
+  }).catch(function(){ return []; });
+}
 function loadCollab(kind, id, panel){
   var cfg = COLLAB_TABLES[kind];
   panel.innerHTML = '<div class="skeleton" style="height:40px;"></div>';
@@ -2224,6 +2319,11 @@ function loadCollab(kind, id, panel){
       // (renderComment's isReply flag), so this can never point at a
       // reply itself - a reply to a reply just joins the same thread.
       var replyingTo = null;
+      // @mentions (Phase 4) - id -> display name, for whoever's been
+      // picked from the autocomplete since the composer was last cleared.
+      // Cleared on send; NOT reset by a plain render() (someone attaching
+      // a file after already picking a mention shouldn't lose it).
+      var pendingMentions = {};
       function who(uid){ return (ps[uid]&&ps[uid].name)||'Someone'; }
       function avatarFor(uid){
         var p = ps[uid]||{};
@@ -2391,15 +2491,43 @@ function loadCollab(kind, id, panel){
         ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';
       }
 
+      // Finds the episode a mention notification should link to - trivial
+      // for the episode discussion itself, needs one lookup for a task
+      // comment since tasks don't have their own route (only their parent
+      // episode's checklist does).
+      function mentionLinkFor(){
+        if(kind==='episode') return Promise.resolve('#/episode/'+id);
+        return db.doc('tasks/'+id).get().then(function(snap){
+          var t = snap.exists && snap.data();
+          return t ? '#/episode/'+t.episodeId : '#/';
+        }).catch(function(){ return '#/'; });
+      }
+      function notifyMentions(mentionedIds, body){
+        if(!mentionedIds.length) return;
+        mentionLinkFor().then(function(link){
+          var fromName = (myProfile && myProfile.displayName) || 'Someone';
+          var snippet = body.length>60 ? body.slice(0,60)+'…' : body;
+          mentionedIds.forEach(function(uid){
+            if(uid===myUid) return; // mentioning yourself doesn't need a notification
+            db.doc('notifications/'+('nf_'+uid8())).set({
+              userId: uid, type:'mention',
+              message: fromName+' mentioned you: "'+snippet+'"',
+              link: link, fromUserId: myUid, readAt: null, createdAt: new Date().toISOString()
+            }).catch(function(){});
+          });
+        });
+      }
+
       function sendComposerMessage(){
         var input = document.getElementById('commentInput_'+id);
         var sendBtn = document.getElementById('commentSend_'+id);
         var body = input.value.trim();
         if(!body && !pendingFile) return; // nothing to send - matches the spec: text alone, file alone, or both, never neither
         var file = pendingFile;
+        var mentionedIds = Object.keys(pendingMentions);
         sendBtn.disabled = true;
         var commentId = 'cm_'+uid8();
-        var row = { id:commentId, authorId: myUid, body: body, parentId: replyingTo||null };
+        var row = { id:commentId, authorId: myUid, body: body, parentId: replyingTo||null, mentions: mentionedIds };
         row[cfg.idField] = id;
         var uploadStep = file ? uploadFile(file, cfg.keyPrefix+id+'/'+Date.now()+'_'+file.name) : Promise.resolve(null);
         uploadStep.then(function(key){
@@ -2412,6 +2540,7 @@ function loadCollab(kind, id, panel){
           });
         }).then(function(){
           pendingFile = null;
+          notifyMentions(mentionedIds, body);
           loadCollab(kind, id, panel);
         }).catch(function(err){
           sendBtn.disabled = false;
@@ -2419,13 +2548,61 @@ function loadCollab(kind, id, panel){
         });
       }
 
+      // @mention autocomplete (Phase 4) - a small suggestion list under the
+      // composer while typing "@something", click one to insert "@Name "
+      // and remember that person's id for notifyMentions() at send time.
+      // Deliberately click-only (no arrow-key navigation/highlight) to
+      // keep this simple - Enter always sends the message rather than
+      // needing to first dismiss a suggestion list.
+      var mentionBox = null;
+      function hideMentionBox(){ if(mentionBox){ mentionBox.remove(); mentionBox = null; } }
       function wire(){
         var textarea = document.getElementById('commentInput_'+id);
         document.getElementById('commentSend_'+id).addEventListener('click', sendComposerMessage);
         textarea.addEventListener('keydown', function(ev){
-          if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); sendComposerMessage(); }
+          if(ev.key==='Escape'){ hideMentionBox(); return; }
+          if(ev.key==='Enter' && !ev.shiftKey){ ev.preventDefault(); hideMentionBox(); sendComposerMessage(); }
         });
-        textarea.addEventListener('input', function(){ autoGrow(textarea); });
+        textarea.addEventListener('input', function(){
+          autoGrow(textarea);
+          var val = textarea.value;
+          var caret = textarea.selectionStart;
+          var m = val.slice(0, caret).match(/@([a-zA-Z0-9_.' -]{0,25})$/);
+          if(!m){ hideMentionBox(); return; }
+          var fragment = m[1];
+          var rangeStart = caret - m[0].length;
+          getMentionRoster().then(function(roster){
+            if(textarea.selectionStart!==caret) return; // caret moved on since this lookup started - stale
+            var lower = fragment.toLowerCase();
+            var matches = roster.filter(function(p){ return p.name.toLowerCase().indexOf(lower)>-1; }).slice(0,6);
+            hideMentionBox();
+            if(!matches.length) return;
+            mentionBox = document.createElement('div');
+            mentionBox.className = 'mention-suggest';
+            mentionBox.innerHTML = matches.map(function(p){ return '<button type="button" class="mention-suggest-item" data-mention-id="'+escapeHtml(p.id)+'">'+escapeHtml(p.name)+'</button>'; }).join('');
+            var composerEl = textarea.closest('.composer');
+            if(composerEl) composerEl.appendChild(mentionBox);
+            Array.prototype.forEach.call(mentionBox.querySelectorAll('[data-mention-id]'), function(btn){
+              // mousedown (not click) so this fires before the textarea's
+              // own blur would otherwise dismiss the list first.
+              btn.addEventListener('mousedown', function(ev2){
+                ev2.preventDefault();
+                var pid = btn.getAttribute('data-mention-id');
+                var person = matches.filter(function(p){ return p.id===pid; })[0];
+                if(!person) return;
+                var insertText = '@'+person.name+' ';
+                textarea.value = val.slice(0, rangeStart) + insertText + val.slice(caret);
+                var newPos = rangeStart + insertText.length;
+                textarea.setSelectionRange(newPos, newPos);
+                pendingMentions[pid] = person.name;
+                hideMentionBox();
+                textarea.focus();
+                autoGrow(textarea);
+              });
+            });
+          });
+        });
+        textarea.addEventListener('blur', function(){ setTimeout(hideMentionBox, 150); });
         autoGrow(textarea);
         document.getElementById('fileInput_'+id).addEventListener('change', function(ev){
           var file = ev.target.files[0]; if(!file) return;
@@ -3024,6 +3201,106 @@ function playCallConnectedBeep(){
     });
     setTimeout(function(){ try{ ctx.close(); }catch(e){} }, 500);
   } catch(e){} // no Web Audio support - fail silently, same as the ringtone
+}
+
+// Notification sound for a new @mention (Phase 4's last two items: real
+// @mentions + a notification path, and "general UI sound effects" - the
+// punch list already narrowed that second one down to notification sounds
+// specifically). Same synthesized-tone technique as the ringtone/connected
+// beep above (no licensed audio asset), a bright, quick two-note "ping" -
+// deliberately shorter and higher than the call-connected beep so the two
+// are never confused.
+function playMentionPing(){
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var now = ctx.currentTime;
+    [988, 1319].forEach(function(freq, i){ // B5, E6
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      var t = now + i*0.06;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.09, t+0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t+0.16);
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(t); osc.stop(t+0.18);
+    });
+    setTimeout(function(){ try{ ctx.close(); }catch(e){} }, 400);
+  } catch(e){}
+}
+
+// ---------- NOTIFICATIONS ----------
+// A real inbox (public.notifications, schema_v18.sql), not just a same-
+// session toast - the whole point of a mention is reaching someone who
+// ISN'T currently looking at that comment thread. "type" is kept generic
+// so a future notification kind can reuse this same table/UI instead of
+// needing its own.
+var notificationsCache = [];
+var notificationsUnsub = null;
+var seenNotificationIds = null; // null until the first snapshot - see startNotificationsListener()
+function unreadNotifCount(){ return notificationsCache.filter(function(n){ return !n.readAt; }).length; }
+function updateNotifBadge(){
+  var badge = document.getElementById('notifBadge');
+  if(!badge) return;
+  var n = unreadNotifCount();
+  badge.hidden = !n;
+  badge.textContent = n>99 ? '99+' : String(n);
+}
+function startNotificationsListener(){
+  if(notificationsUnsub) return;
+  seenNotificationIds = null;
+  notificationsUnsub = db.collection('notifications').where('userId','==',myUid).orderBy('createdAt','desc').limit(50).onSnapshot(function(snap){
+    notificationsCache = snap.docs.map(function(d){ var n=d.data(); n._id=d.id; return n; });
+    // First snapshot after (re)connecting just establishes the baseline -
+    // nobody wants every already-unread notification from days ago to pop
+    // a toast + play a sound the moment the app opens. Only notifications
+    // that show up in a LATER snapshot, that weren't in the previous one,
+    // are genuinely "new right now."
+    if(seenNotificationIds){
+      notificationsCache.forEach(function(n){
+        if(!n.readAt && !seenNotificationIds[n._id]){
+          showToast('info', n.message, { duration: 5000 });
+          playMentionPing();
+        }
+      });
+    }
+    seenNotificationIds = {};
+    notificationsCache.forEach(function(n){ seenNotificationIds[n._id] = true; });
+    updateNotifBadge();
+  }, function(){});
+}
+function stopNotificationsListener(){
+  if(notificationsUnsub){ try{ notificationsUnsub(); }catch(e){} notificationsUnsub = null; }
+  notificationsCache = []; seenNotificationIds = null;
+  updateNotifBadge();
+}
+function openNotificationsPanel(){
+  var rows = notificationsCache;
+  openModal('Notifications',
+    (rows.length ? '<div class="notif-list">'+rows.map(function(n){
+      return '<a href="'+(n.link?escapeHtml(n.link):'#')+'" class="notif-row'+(n.readAt?'':' unread')+'" data-notif-open="'+n._id+'">'+
+        '<div class="notif-msg">'+escapeHtml(n.message)+'</div>'+
+        '<div class="notif-time">'+fmtDateTime(n.createdAt)+'</div>'+
+        '</a>';
+    }).join('')+'</div>' : '<div class="empty-state">No notifications yet.</div>')+
+    (rows.some(function(n){return !n.readAt;}) ? '<div class="field-hint" style="margin-top:10px;"><button type="button" class="btn btn-sm" id="markAllReadBtn">Mark all read</button></div>' : ''),
+    function(){ closeModal(); }, 'Close', {afterRender: function(form){
+      Array.prototype.forEach.call(form.querySelectorAll('[data-notif-open]'), function(a){
+        a.addEventListener('click', function(){
+          var nid = a.getAttribute('data-notif-open');
+          db.doc('notifications/'+nid).update({readAt: new Date().toISOString()}).catch(function(){});
+          closeModal();
+        });
+      });
+      var markAllBtn = document.getElementById('markAllReadBtn');
+      if(markAllBtn) markAllBtn.addEventListener('click', function(){
+        var unread = rows.filter(function(n){ return !n.readAt; });
+        Promise.all(unread.map(function(n){ return db.doc('notifications/'+n._id).update({readAt: new Date().toISOString()}).catch(function(){}); })).then(function(){
+          closeModal(); showToast('success','All caught up');
+        });
+      });
+    }});
 }
 
 // ---------- INCOMING CALL POPUP (Accept/Decline, only shown when the
@@ -4130,6 +4407,8 @@ function hideIdleWarningOverlay(){
   // reload, so this always picks up permission/team changes immediately.
   var reloadBtn = document.getElementById('reloadBtn');
   if(reloadBtn) reloadBtn.addEventListener('click', function(){ location.reload(); });
+  var notifBellBtn = document.getElementById('notifBellBtn');
+  if(notifBellBtn) notifBellBtn.addEventListener('click', openNotificationsPanel);
 
   var boundOnce = false;
   var lastUid = null;
@@ -4144,6 +4423,7 @@ function hideIdleWarningOverlay(){
       if(pendingRingCall){ if(pendingRingCall.timer) clearTimeout(pendingRingCall.timer); pendingRingCall = null; }
       hideIncomingCallPopup();
       removeGlobalClockBadge();
+      stopNotificationsListener();
       navBackStack = []; navSkipPush = false; navCurrentHash = null;
       renderAuthScreen('signin');
       return;
@@ -4204,6 +4484,7 @@ function hideIdleWarningOverlay(){
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
           listenForConnects(myUid, { onRing: handleIncomingRing, onRingMissed: handleRingMissed });
+          startNotificationsListener();
           var moods = profileMoods(p);
           if(moods.length){ mountMusicPlayer(moods); musicPlayer.initPlayer('ytMusicMount', moods); }
           // Reconnect to an already-open clock-in (e.g. after a reload)
