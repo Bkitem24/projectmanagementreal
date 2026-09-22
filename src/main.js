@@ -1528,12 +1528,29 @@ function renderEpisode(episodeId){
       '<div style="display:flex;align-items:flex-start;gap:8px;">'+
       (canManage()?'<button type="button" class="btn btn-sm" id="archiveEpisodeBtn">'+(e.archived?'Unarchive':'Archive')+'</button><button type="button" class="btn btn-sm btn-danger" id="deleteEpisodeBtn">Delete</button>':'')+
       '<div id="epStatusBadge"></div></div></div>'+
+      // Two-column layout (Phase 2.5 batch C, item #5's first bullet): the
+      // episode's own "Discussion" used to be one more stacked section
+      // below the whole checklist - scroll past every task to reach it,
+      // and scroll back up to see both at once. Now a persistent,
+      // independently-scrolling right-hand panel (.episode-side-panel,
+      // see style.css) alongside the checklist instead, same idea as
+      // Slack/Linear's own side-panel discussion - loadCollab() itself is
+      // unchanged, #epCollab just lives in a different place in the page
+      // now. Falls back to a single column under 900px (see the
+      // .episode-layout media query) since there's no room for two columns
+      // on anything narrower.
+      '<div class="episode-layout">'+
+      '<div class="episode-main-col">'+
       '<div class="progress-bar"><div class="progress-fill" id="epProgressFill" style="width:0%"></div></div>'+
       (canManage()?'<div style="margin-top:14px;"><button type="button" class="btn btn-sm" id="addCustomTaskBtn">+ Add custom task</button></div>':'')+
       '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>'+
-      '<div class="section"><div class="section-head"><h2 class="section-title">Discussion</h2></div>'+
+      '</div>'+
+      '<div class="episode-side-col"><div class="episode-side-panel">'+
+      '<div class="section-head"><h2 class="section-title">Discussion</h2></div>'+
       '<div class="page-sub" style="margin:-6px 0 12px;">General chat about this episode as a whole - for a specific subtask, use "Comments, links & files" on that task instead.</div>'+
-      '<div id="epCollab"></div></div>'
+      '<div id="epCollab" class="episode-side-scroll"><div class="skeleton" style="height:120px;"></div></div>'+
+      '</div></div>'+
+      '</div>'
     );
 
     var addCustomBtn = document.getElementById('addCustomTaskBtn');
@@ -1582,7 +1599,6 @@ function renderEpisode(episodeId){
       var box = document.getElementById('taskGroups');
       if(!box) return;
       if(ts.empty){ box.innerHTML = '<div class="empty-state">No tasks on this episode.</div>'; return; }
-      var completed = [];
       var doneCount = 0;
       var taskById = {};
       // Build the full lookup table first, in one pass over every sibling
@@ -1629,10 +1645,19 @@ function renderEpisode(episodeId){
       // that group name was already seen earlier. Within a block, tasks
       // are already in liveOrderNum order since blocks are built by
       // walking liveOrderedDocs in order.
+      //
+      // A done task is NOT pulled out into a separate "Completed" bucket
+      // any more (reverted 2026-09-28, per Humayun: a task should stay
+      // exactly where it sits in its group when checked off, not jump to
+      // the bottom of the checklist) - it just flows into its block like
+      // any other task, in the same live step-order position, and gets its
+      // usual dimmed/struck-through ".done" styling (taskRowHtml/style.css)
+      // right there. This is now just about episodes, not individual
+      // tasks - see the client detail page's episode list for the
+      // completed-EPISODE segment (Phase 2.5 batch B, round 10).
       var blocks = [];
       liveOrderedDocs.forEach(function(d){
         var t = taskById[d.id];
-        if(t.done){ completed.push(t); return; }
         var g = t.group||'Tasks';
         var last = blocks[blocks.length-1];
         if(!last || last.group!==g){ last = {group:g, tasks:[]}; blocks.push(last); }
@@ -1723,7 +1748,7 @@ function renderEpisode(episodeId){
         return '<div class="checklist-group"><div class="checklist-group-head"><span class="checklist-group-title">'+escapeHtml(block.group)+'</span></div>'+
           block.tasks.map(rowHtml).join('')+
           '</div>';
-      }).join('') + (completed.length ? '<div class="checklist-group checklist-completed"><div class="checklist-group-head"><span class="checklist-group-title">Completed ('+completed.length+')</span></div>'+completed.map(rowHtml).join('')+'</div>' : '');
+      }).join('');
       hydrateProfiles(box);
       Array.prototype.forEach.call(box.querySelectorAll('.task-check:not([disabled])'), function(cb){
         cb.addEventListener('change', function(){
@@ -1961,6 +1986,7 @@ function loadTaskCollab(taskId, panel){ return loadCollab('task', taskId, panel)
 var ICON_PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
 var ICON_BACK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>';
 var ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>';
+var ICON_REPLY = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 17 4 12l5-5"/><path d="M4 12h10a4 4 0 0 1 4 4v2"/></svg>';
 // kind is 'task' or 'episode' - same comments/links/attachments UI, just
 // pointed at a different set of tables. Rewritten (Phase 1 final fixes) to
 // feel like an actual chat/discussion tool instead of a flat list: grouped
@@ -2002,6 +2028,13 @@ function loadCollab(kind, id, panel){
       var editingComment = null, editingLink = null; // id of the row currently in inline-edit mode, if any
       var pendingFile = null; // File staged for the NEXT send, via the composer's attach button
       var openPicker = null; // commentId whose reaction picker is currently open, if any
+      // Reply-to-comment threading (Phase 2.5 batch C, one level deep - see
+      // schema_v13.sql): the id of the TOP-LEVEL comment the next message
+      // will be posted as a reply to, or null for an ordinary top-level
+      // message. Only top-level comments show their own "Reply" button
+      // (renderComment's isReply flag), so this can never point at a
+      // reply itself - a reply to a reply just joins the same thread.
+      var replyingTo = null;
       function who(uid){ return (ps[uid]&&ps[uid].name)||'Someone'; }
       function avatarFor(uid){
         var p = ps[uid]||{};
@@ -2052,7 +2085,7 @@ function loadCollab(kind, id, panel){
           '</div>';
       }
 
-      function renderComment(c){
+      function renderComment(c, isReply){
         if(editingComment===c.id){
           return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
             '<div class="comment-main"><div class="comment-row-head"><span class="comment-author">'+escapeHtml(who(c.authorId))+'</span></div>'+
@@ -2060,11 +2093,16 @@ function loadCollab(kind, id, panel){
             '<div class="comment-edit-actions"><button type="button" class="btn btn-sm" data-save-comment="'+c.id+'">Save</button><button type="button" class="btn btn-sm btn-ghost" data-cancel-comment>Cancel</button></div></div></div></div>';
         }
         var attHtml = attachmentsByComment[c.id] ? '<div class="attachment-grid comment-inline-attachments">'+attachmentsByComment[c.id].map(attachmentItemHtml).join('')+'</div>' : '';
+        // Reply is only offered on a top-level comment (isReply falsy) -
+        // replying to a reply just joins the same thread instead of
+        // nesting further, see the note above `replyingTo`.
+        var replyBtn = !isReply ? '<button type="button" class="icon-btn" data-reply-comment="'+c.id+'" title="Reply">'+ICON_REPLY+'</button>' : '';
         return '<div class="comment-row" data-id="'+c.id+'">'+avatarFor(c.authorId)+
           '<div class="comment-main"><div class="comment-row-head">'+
           '<span class="comment-author">'+escapeHtml(who(c.authorId))+'</span>'+
           '<span class="comment-time">'+fmtDateTime(c.createdAt)+'</span>'+
           (c.editedAt?'<span class="comment-edited-tag">(edited)</span>':'')+
+          replyBtn+
           actionButtons('edit-comment="'+c.id+'"', 'delete-comment="'+c.id+'"', c.authorId)+
           '</div>'+(c.body?'<div class="comment-body">'+linkifyHtml(escapeHtml(c.body))+'</div>':'')+
           attHtml+renderReactions(c.id)+
@@ -2085,13 +2123,27 @@ function loadCollab(kind, id, panel){
       }
 
       function render(){
+        // Thread the flat comments list into top-level messages + their
+        // replies (one level deep - see the note above `replyingTo`).
+        // Reads live off the just-fetched `comments` array every render,
+        // so a reply posted by someone else lands in the right thread the
+        // next time this panel reloads, same as any other comment.
+        var topLevelComments = comments.filter(function(c){ return !c.parentId; });
+        var repliesByParent = {};
+        comments.forEach(function(c){ if(c.parentId) (repliesByParent[c.parentId]=repliesByParent[c.parentId]||[]).push(c); });
+        var replyTarget = replyingTo ? comments.filter(function(c){ return c.id===replyingTo; })[0] : null;
+        if(replyingTo && !replyTarget) replyingTo = null; // its parent got deleted from under us - fails open, back to an ordinary top-level message
         panel.innerHTML =
           '<div class="collab-list">'+
-            (comments.length ? comments.map(renderComment).join('') : '<div class="collab-empty">No comments yet - start the discussion below.</div>') +
+            (topLevelComments.length ? topLevelComments.map(function(c){
+              var replies = repliesByParent[c.id]||[];
+              return renderComment(c,false) + (replies.length ? '<div class="comment-thread">'+replies.map(function(r){ return renderComment(r,true); }).join('')+'</div>' : '');
+            }).join('') : '<div class="collab-empty">No comments yet - start the discussion below.</div>') +
           '</div>'+
           (links.length?'<div class="collab-list collab-links">'+links.map(renderLink).join('')+'</div>':'')+
           (standaloneAttachments.length?'<div class="attachment-grid">'+standaloneAttachments.map(attachmentItemHtml).join('')+'</div>':'')+
           '<div class="composer">'+
+          (replyTarget?'<div class="composer-reply-banner">Replying to <strong>'+escapeHtml(who(replyTarget.authorId))+'</strong>'+(replyTarget.body?' · '+escapeHtml(replyTarget.body.length>80?replyTarget.body.slice(0,80)+'…':replyTarget.body):'')+'<button type="button" id="cancelReply_'+id+'" title="Cancel reply">✕</button></div>':'')+
           '<div class="composer-chip-row" id="composerChipRow_'+id+'"'+(pendingFile?'':' hidden')+'>'+
             (pendingFile?'<span class="composer-file-chip"><span class="attachment-file-icon">'+attachmentIcon({fileName:pendingFile.name,fileType:pendingFile.type})+'</span>'+escapeHtml(pendingFile.name)+'<button type="button" id="composerChipRemove_'+id+'" title="Remove">✕</button></span>':'')+
           '</div>'+
@@ -2117,7 +2169,7 @@ function loadCollab(kind, id, panel){
         var file = pendingFile;
         sendBtn.disabled = true;
         var commentId = 'cm_'+uid8();
-        var row = { id:commentId, authorId: myUid, body: body };
+        var row = { id:commentId, authorId: myUid, body: body, parentId: replyingTo||null };
         row[cfg.idField] = id;
         var uploadStep = file ? uploadFile(file, cfg.keyPrefix+id+'/'+Date.now()+'_'+file.name) : Promise.resolve(null);
         uploadStep.then(function(key){
@@ -2178,6 +2230,17 @@ function loadCollab(kind, id, panel){
             });
           });
         });
+
+        // ---- reply ----
+        Array.prototype.forEach.call(panel.querySelectorAll('[data-reply-comment]'), function(btn){
+          btn.addEventListener('click', function(){
+            replyingTo = btn.getAttribute('data-reply-comment');
+            render();
+            var ta = document.getElementById('commentInput_'+id); if(ta) ta.focus();
+          });
+        });
+        var cancelReplyBtn = document.getElementById('cancelReply_'+id);
+        if(cancelReplyBtn) cancelReplyBtn.addEventListener('click', function(){ replyingTo = null; render(); });
 
         // ---- comment edit / delete ----
         Array.prototype.forEach.call(panel.querySelectorAll('[data-edit-comment]'), function(btn){

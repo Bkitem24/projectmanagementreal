@@ -154,6 +154,25 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
   #app{padding:72px 16px 60px;}
   #main{height:auto;}
 }
+/* Episode detail two-column layout (Phase 2.5 batch C): checklist on the
+   left, a persistent right-hand discussion panel alongside it instead of
+   stacked below - see renderEpisode(). The panel is height-capped to the
+   viewport and scrolls its own comment list independently of the page
+   (.collab-list gets the scroll, .composer stays pinned at the panel's
+   bottom) so the composer is always reachable without hunting for it. */
+.episode-layout{display:flex;align-items:flex-start;gap:24px;}
+.episode-main-col{flex:1;min-width:0;}
+.episode-side-col{width:360px;flex:0 0 auto;}
+.episode-side-panel{position:sticky;top:20px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:19px;max-height:calc(100vh - 40px);display:flex;flex-direction:column;}
+.episode-side-scroll{flex:1;min-height:0;display:flex;flex-direction:column;}
+.episode-side-scroll .collab-list{flex:1;overflow-y:auto;}
+.episode-side-scroll .composer{flex:0 0 auto;}
+@media (max-width:900px){
+  .episode-layout{flex-direction:column;}
+  .episode-side-col{width:100%;}
+  .episode-side-panel{position:static;max-height:none;}
+  .episode-side-scroll .collab-list{overflow-y:visible;}
+}
 .eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;color:var(--muted);font-weight:600;margin-bottom:7px;}
 .page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:24px;flex-wrap:wrap;}
 .page-back-btn{display:inline-flex;align-items:center;gap:6px;border:none;background:none;color:var(--muted);font-size:13px;font-weight:600;padding:0;margin-bottom:14px;cursor:pointer;}
@@ -290,6 +309,14 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .link-edit-url{flex:2;min-width:140px;}
 .link-edit-label{flex:1;min-width:100px;}
 .collab-list.collab-links{gap:4px;margin-top:2px;}
+/* Reply-to-comment threading (Phase 2.5 batch C, one level deep) - a
+   thread's replies sit indented under their parent, with a thin left rule
+   so the grouping reads clearly without a full nested-avatar tree. */
+.comment-thread{margin-left:28px;padding-left:11px;border-left:2px solid var(--line);display:flex;flex-direction:column;gap:2px;}
+.composer-reply-banner{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:6px 8px;}
+.composer-reply-banner strong{color:var(--ink);}
+.composer-reply-banner button{margin-left:auto;border:none;background:var(--line-soft);color:var(--muted);width:17px;height:17px;border-radius:50%;cursor:pointer;font-size:10px;line-height:1;display:inline-flex;align-items:center;justify-content:center;flex:0 0 auto;}
+.composer-reply-banner button:hover{background:var(--overdue);color:#fff;}
 .link-row,.attachment-row{display:flex;align-items:center;gap:8px;font-size:12.5px;padding:5px 8px;border-radius:8px;}
 .link-row:hover{background:var(--paper);}
 .link-row a,.attachment-row a{color:var(--blue-2);text-decoration:none;}
