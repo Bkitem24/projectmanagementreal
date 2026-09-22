@@ -2772,7 +2772,7 @@ function loadCollab(kind, id, panel){
           var snippet = body.length>60 ? body.slice(0,60)+'…' : body;
           mentionedIds.forEach(function(uid){
             if(uid===myUid) return; // mentioning yourself doesn't need a notification
-            db.doc('notifications/'+('nf_'+uid8())).set({
+            insertNotification({
               userId: uid, type:'mention',
               message: fromName+' mentioned you: "'+snippet+'"',
               link: link, fromUserId: myUid, readAt: null, createdAt: new Date().toISOString()
@@ -3613,6 +3613,32 @@ function openNotificationsPanel(){
 // action - this is "a new work item matches your role," not a social
 // mention, so even the person who happened to trigger it should still
 // hear about their own new task the same as anyone else holding that role.
+// Real bug (2026-09-29, found by the user, not guessed): a mention
+// notification failed with "new row violates row-level security policy
+// for table notifications" even after schema_v19.sql re-issued the
+// insertable policy. Root cause was never the INSERT policy - it was that
+// db.doc(...).set(...) goes through the shim's upsert path (INSERT ... ON
+// CONFLICT (id) DO UPDATE), and Postgres validates the UPDATE policy's
+// WITH CHECK for that statement shape regardless of whether a real
+// conflict occurs (ids here are freshly random, so one never does). The
+// notifications UPDATE policy is "userId = auth.uid()" (only you can mark
+// your own notifications read) - satisfied when you're notifying
+// yourself, never satisfied when notifying someone else, which is
+// obviously the common case for a mention or task-assignment notification.
+// Fix: a genuine bare INSERT (no ON CONFLICT clause at all), which only
+// ever needs the INSERT policy. Deliberately NOT db.collection(...).add() -
+// that shim chains .select().single() to hand back the new id, and
+// PostgREST silently filters a RETURNING row through the table's SELECT
+// policy ("userId = auth.uid()") before deciding what to hand back - since
+// the recipient isn't the sender, that would swap this bug for a
+// different one (.single() throwing on zero rows returned) instead of
+// actually fixing it. No RLS policy needed to change for any of this.
+function insertNotification(row){
+  return supabase.from('notifications').insert(Object.assign({id:'nf_'+uid8()}, row)).then(function(res){
+    if(res.error) throw res.error;
+  });
+}
+
 function notifyRoleAssignment(role, taskLabel, episodeTitle, clientName, link){
   if(!role || role==='manager' || role==='admin') return; // those two aren't "assigned" job-title work the same way
   db.collection('profileRoles').where('role','==',role).get().then(function(snap){
@@ -3621,7 +3647,7 @@ function notifyRoleAssignment(role, taskLabel, episodeTitle, clientName, link){
     var r = roleOf(role);
     var roleLabel = r ? r.label : role;
     uids.forEach(function(uid){
-      db.doc('notifications/'+('nf_'+uid8())).set({
+      insertNotification({
         userId: uid, type:'task_assigned',
         message: 'New '+roleLabel+' task: "'+taskLabel+'" on "'+episodeTitle+'" ('+clientName+')',
         link: link, fromUserId: null, readAt: null, createdAt: new Date().toISOString()
