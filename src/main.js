@@ -1,7 +1,7 @@
 import { supabase, supabaseConfigured } from './lib/supabaseClient.js';
 import { db, randomId } from './lib/db.js';
 import { signUp, signIn, signOut, getSession, onAuthStateChange, fetchProfiles, updateEmail, updatePassword } from './lib/auth.js';
-import { listTeams, createTeam, assignTeamManager, clearTeamManager, createInvite, listInvites, cancelInvite, listServices, createService, deleteService } from './lib/teams.js';
+import { listTeams, createTeam, assignTeamManager, clearTeamManager, createInvite, listInvites, cancelInvite, listServices, createService, deleteService, listAllRoles, listRolesFor, assignRoles } from './lib/teams.js';
 import { startPresence, stopPresence, isOnline, onPresenceChange } from './lib/presence.js';
 import { compressImage } from './lib/imageCompress.js';
 import { imageHasFace } from './lib/faceDetect.js';
@@ -193,13 +193,20 @@ function errMsg(err){ return (err && err.message) ? err.message : 'Something wen
 // ---------- app state ----------
 var app = document.getElementById('app');
 var myUid=null, myRole=null, myProfile=null, myTeamId=null;
+// myRoles (round 8.7/schema_v10, 2026-09-24): the FULL set of roles the
+// signed-in person holds - Manager/Admin included, since Humayun confirmed
+// 2026-09-24 those can now be held alongside job-title roles rather than
+// being a single separate access level. myRole above is kept in sync as
+// myRoles[0] purely as a legacy fallback for any display spot that still
+// reads it; every actual access check below reads myRoles instead.
+var myRoles = [];
 var activeUnsubs = [];
 var profileUnsub = null;
 var clientNavUnsub = null;
 var teamsCache = {}; // id -> team row
 var servicesCache = [];
-function isAdmin(){ return myRole==='admin'; }
-function isManager(){ return myRole==='manager'; }
+function isAdmin(){ return myRoles.indexOf('admin')>-1; }
+function isManager(){ return myRoles.indexOf('manager')>-1; }
 function canManage(){ return isManager() || isAdmin(); }
 function clearSubs(){ activeUnsubs.forEach(function(u){ try{u();}catch(e){} }); activeUnsubs=[]; }
 
@@ -258,15 +265,20 @@ function servicesForMyScope(){
 function renderIdentityCard(){
   var box = document.getElementById('roleBox');
   if(!box) return;
-  if(!myRole){ box.innerHTML = '<div class="role-box-label">Loading your profile…</div>'; return; }
-  var r = roleOf(myRole);
+  if(!myRoles.length){ box.innerHTML = '<div class="role-box-label">Loading your profile…</div>'; return; }
+  var r = roleOf(myRoles[0]);
+  // Multiple roles (round 8.7/schema_v10, 2026-09-24): lists every role
+  // held, not just one - corrected 2026-09-23's plan already promised this
+  // ("the identity card and My Board just list every role someone holds,
+  // no single label to pick"), this is that promise actually built.
+  var roleLabels = myRoles.map(function(k){ var rr=roleOf(k); return rr?rr.label:k; }).join(', ');
   var avatar = myProfile && myProfile.avatarUrl
     ? '<span class="avatar" style="width:30px;height:30px;font-size:12px;background-image:url(\''+escapeHtml(myProfile.avatarUrl)+'\')"></span>'
     : '<span class="avatar" style="width:30px;height:30px;font-size:12px;background:'+(r?r.color:'#888')+'">'+escapeHtml((myProfile&&myProfile.displayName?myProfile.displayName:'?').trim()[0]||'?')+'</span>';
   box.innerHTML =
     '<div style="display:flex;align-items:center;gap:9px;">'+avatar+
     '<div style="min-width:0;flex:1;"><div class="role-current-label" style="line-height:1.15;">'+escapeHtml((myProfile&&myProfile.displayName)||'')+'</div>'+
-    '<div class="team-current-label"><span class="role-dot" style="background:'+(r?r.color:'#888')+';display:inline-block;margin-right:5px;"></span>'+escapeHtml(r?r.label:myRole)+(myTeamId?' · '+escapeHtml(teamName(myTeamId)):'')+'</div></div>'+
+    '<div class="team-current-label"><span class="role-dot" style="background:'+(r?r.color:'#888')+';display:inline-block;margin-right:5px;"></span>'+escapeHtml(roleLabels)+(myTeamId?' · '+escapeHtml(teamName(myTeamId)):'')+'</div></div>'+
     // Used to be a bare 13px "✎" character with no border or background - a
     // real button, but nothing about it looked clickable, which is almost
     // certainly why "there's no way to change my profile picture or name"
@@ -1286,12 +1298,44 @@ function openAddStepModal(templateId){
         if(!label){ showModalError('Describe the step.'); return; }
         setModalBusy(true);
         var dependsOnStepIds = fd.getAll('dependsOnStepIds');
+        var newStep = {stepId:'s'+uid8(), order:0, role:fd.get('role'), group:(fd.get('group')||'').trim(), label:label, dependsOnStepIds: dependsOnStepIds};
         db.doc('templates/'+templateId).get().then(function(freshSnap){
           var ft = freshSnap.data();
           var freshSteps = (ft.steps||[]).slice();
           var maxOrder = freshSteps.reduce(function(m,s){return Math.max(m,s.order||0);},0);
-          freshSteps.push({stepId:'s'+uid8(), order:maxOrder+1, role:fd.get('role'), group:(fd.get('group')||'').trim(), label:label, dependsOnStepIds: dependsOnStepIds});
+          newStep.order = maxOrder+1;
+          freshSteps.push(newStep);
           return db.doc('templates/'+templateId).update({steps:freshSteps});
+        }).then(function(){
+          // Backfill onto episodes already on the board. Before this, a
+          // brand-new step only ever affected FUTURE episodes
+          // (generateEpisodesForRule below) - an episode already
+          // generated never got a task for it at all, on either its own
+          // checklist or the workboard, because nothing ever wrote a new
+          // `tasks` row for it (unlike a dependency edit on an EXISTING
+          // step, which liveDepStepIds above already looks up live).
+          // Mirror generateEpisodesForRule's own task shape here for
+          // every still-open (non-archived) episode already generated
+          // from this template, so the new step shows up everywhere
+          // immediately instead of only on episodes generated from now on.
+          return db.collection('episodes').where('templateId','==',templateId).get();
+        }).then(function(epSnap){
+          // Filtered client-side (not archived != true in the query) to
+          // match how archived-filtering is done everywhere else in this
+          // file, rather than relying on Postgres's not-null-safe `!=`.
+          var openDocs = epSnap.docs.filter(function(d){ return !d.data().archived; });
+          return Promise.all(openDocs.map(function(epDoc){
+            var e = epDoc.data();
+            var taskId = epDoc.id+'_'+newStep.stepId;
+            return db.doc('tasks/'+taskId).set({
+              episodeId: epDoc.id, episodeTitle: e.title, clientId: e.clientId, clientName: e.clientName,
+              role: newStep.role, label: newStep.label, group: newStep.group||'', orderNum: newStep.order||0,
+              dependsOnStepIds: newStep.dependsOnStepIds||[], dueDate: e.dueDate, done:false, doneByUserId:null, doneAt:null,
+              createdAt: new Date().toISOString()
+            }).then(function(){
+              return db.doc('episodes/'+epDoc.id).update({ taskCount: (e.taskCount||0) + 1 });
+            });
+          }));
         }).then(function(){
           closeModal(); showToast('success', 'Added step');
         }).catch(function(err){ showModalError(errMsg(err)); });
@@ -1410,7 +1454,7 @@ function renderEpisode(episodeId){
         var r = roleOf(t.role);
         var unmet = depTasksFor(t).filter(function(dt){ return !dt.done; });
         var isBlocked = unmet.length>0;
-        var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
+        var canCheck = (myRoles.indexOf(t.role)>-1 || canManage()) && !isBlocked;
         var waitingLabel = unmet.map(function(dt){ return dt.label; }).join(', ');
         return '<div class="task-row '+(t.done?'done':'')+(isBlocked?' task-blocked':'')+'" style="--role-color:'+(r?r.color:'var(--line)')+'">'+
           '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(waitingLabel)+'\' '+(unmet.length>1?'are':'is')+' done"':'')+'>'+
@@ -1982,20 +2026,24 @@ function loadCollab(kind, id, panel){
 
 // ---------- MY BOARD ----------
 function renderBoard(){
-  if(!myRole){
+  if(!myRoles.length){
     paint('<div class="page-head"><div><div class="eyebrow">My Board</div><h1 class="page-title">Loading…</h1></div></div>');
     return;
   }
-  var r = roleOf(myRole);
-  var showingAll = myRole==='manager' || myRole==='admin';
+  // round 8.8/schema_v10: someone can now hold more than one job-title role
+  // at once, so "my board" needs to show tasks matching ANY role they hold,
+  // not just a single myRole - the heading joins every role's label rather
+  // than assuming there's exactly one.
+  var myRoleLabels = myRoles.map(function(k){ var rr=roleOf(k); return rr?rr.label:k; }).join(' & ');
+  var showingAll = canManage();
   paint(
-    '<div class="page-head"><div><div class="eyebrow">My Board</div><h1 class="page-title">'+(showingAll?'All open tasks':escapeHtml(r.label)+"'s tasks")+'</h1>'+
+    '<div class="page-head"><div><div class="eyebrow">My Board</div><h1 class="page-title">'+(showingAll?'All open tasks':escapeHtml(myRoleLabels)+"'s tasks")+'</h1>'+
     '<div class="page-sub">'+(showingAll?'Everything across your team\'s clients, grouped by due date.':'Everything assigned to your role, across your team\'s clients.')+'</div></div></div>'+
     '<div id="boardBody"><div class="skeleton" style="height:60px;margin-bottom:10px;"></div><div class="skeleton" style="height:60px;"></div></div>'
   );
 
   var q = db.collection('tasks').where('done','==',false);
-  if(!showingAll) q = q.where('role','==', myRole);
+  if(!showingAll) q = q.where('role','in', myRoles);
   q = q.orderBy('dueDate','asc').limit(200);
 
   var unsub = q.onSnapshot(function(snap){
@@ -2075,7 +2123,7 @@ function renderBoardBody(box, tasks, depById, showingAll, liveStepByEpisodeId){
         var depTasks = liveDepStepIds(t, liveStepByEpisodeId[t.episodeId]).map(function(sid){ return depById[t.episodeId+'_'+sid]; }).filter(Boolean);
         var unmet = depTasks.filter(function(dt){ return !dt.done; });
         var isBlocked = unmet.length>0;
-        var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
+        var canCheck = (myRoles.indexOf(t.role)>-1 || canManage()) && !isBlocked;
         var waitingLabel = unmet.map(function(dt){ return dt.label; }).join(', ');
         return '<div class="board-task'+(isBlocked?' task-blocked':'')+'" style="border-left:3px solid '+(rr?rr.color:'var(--line)')+'">'+
           '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(waitingLabel)+'\' '+(unmet.length>1?'are':'is')+' done"':'')+'>'+
@@ -2343,6 +2391,34 @@ function stopRingtone(){
   if(ringtoneCtx){ try{ ringtoneCtx.close(); }catch(e){} ringtoneCtx = null; }
 }
 
+// ---------- CALL-CONNECTED BEEP (round 8.7, 2026-09-24 - soft, synthesized,
+// same reasoning as the ringtone above: no bundled audio file to source or
+// license). Plays once whenever a participant's audio actually connects -
+// see pullParticipant() below, the one place both "the other side of a 1:1
+// call just answered" and "someone new just joined a group call" funnel
+// through, so one hook covers both cases Humayun asked for. Deliberately a
+// one-shot context (not shared/reused like the ringtone's) since this can
+// fire several times in quick succession in a group call as people join.
+function playCallConnectedBeep(){
+  try {
+    var ctx = new (window.AudioContext || window.webkitAudioContext)();
+    var now = ctx.currentTime;
+    [660, 880].forEach(function(freq, i){ // soft rising two-note beep (E5, A5) - distinct from the ringtone's chime so the two are never confused
+      var osc = ctx.createOscillator();
+      var gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      var t = now + i*0.09;
+      gain.gain.setValueAtTime(0, t);
+      gain.gain.linearRampToValueAtTime(0.1, t+0.02); // soft attack, modest volume
+      gain.gain.exponentialRampToValueAtTime(0.0001, t+0.28); // quick, gentle decay
+      osc.connect(gain); gain.connect(ctx.destination);
+      osc.start(t); osc.stop(t+0.3);
+    });
+    setTimeout(function(){ try{ ctx.close(); }catch(e){} }, 500);
+  } catch(e){} // no Web Audio support - fail silently, same as the ringtone
+}
+
 // ---------- INCOMING CALL POPUP (Accept/Decline, only shown when the
 // person being rung is clocked out - see handleIncomingRing) ----------
 // A standalone fixed-position card appended straight to document.body,
@@ -2446,7 +2522,9 @@ function pullParticipant(call, meta){
   call.hadOtherParticipant = true;
   call.pendingPullUids.push(meta.uid);
   renderCallBar();
-  return pullRemoteTrack(call.sessionId, meta.sessionId, 'mic', call.pc).catch(function(err){
+  return pullRemoteTrack(call.sessionId, meta.sessionId, 'mic', call.pc).then(function(){
+    playCallConnectedBeep();
+  }).catch(function(err){
     delete call.participants[meta.uid];
     renderCallBar();
     showToast('error', 'Could not hear '+(meta.name||'a participant')+': '+errMsg(err));
@@ -2708,12 +2786,18 @@ function renderTeamSettings(){
   document.getElementById('inviteBtn').addEventListener('click', openInviteModal);
   document.getElementById('newServiceBtn2').addEventListener('click', function(){ openCreateServiceTypeModal(null); });
 
-  db.collection('profiles').where('teamId','==',myTeamId).get().then(function(snap){
+  // round 8.8/schema_v10: a teammate can hold more than one role now, so the
+  // roster needs everyone's full role list (listAllRoles(), one query) -
+  // not just the legacy single profiles.role column.
+  Promise.all([db.collection('profiles').where('teamId','==',myTeamId).get(), listAllRoles()]).then(function(res){
+    var snap = res[0], rolesByUser = res[1];
     var box = document.getElementById('rosterBox');
     box.innerHTML = snap.docs.map(function(d){
-      var p = d.data(); var r = roleOf(p.role);
+      var p = d.data();
+      var roleKeys = rolesByUser[d.id] && rolesByUser[d.id].length ? rolesByUser[d.id] : (p.role?[p.role]:[]);
+      var roleLabel = roleKeys.map(function(k){ var rr=roleOf(k); return rr?rr.label:k; }).join(', ') || '-';
       return '<div class="roster-row"><span class="presence-dot'+(isOnline(d.id)?' online':'')+'"></span>'+
-        '<div><div class="roster-name">'+escapeHtml(p.displayName||p.email)+'</div><div class="roster-role">'+(r?escapeHtml(r.label):p.role)+'</div></div></div>';
+        '<div><div class="roster-name">'+escapeHtml(p.displayName||p.email)+'</div><div class="roster-role">'+escapeHtml(roleLabel)+'</div></div></div>';
     }).join('') || '<div class="empty-state">No teammates yet - invite your first one.</div>';
   });
 
@@ -2721,7 +2805,9 @@ function renderTeamSettings(){
     var box = document.getElementById('invitesBox');
     var pending = invites.filter(function(i){ return !i.usedAt; });
     box.innerHTML = pending.length ? pending.map(function(i){
-      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleOf(i.role)?roleOf(i.role).label:i.role)+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div>'+
+      var roleKeys = (i.roles && i.roles.length) ? i.roles : (i.role?[i.role]:[]);
+      var roleLabel = roleKeys.map(function(k){ var rr=roleOf(k); return rr?rr.label:k; }).join(', ') || '-';
+      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleLabel)+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div>'+
         '<button type="button" class="btn btn-sm btn-danger" data-cancel-invite="'+escapeHtml(i.id)+'" data-email="'+escapeHtml(i.email)+'" style="margin-left:auto;">Cancel</button></div>';
     }).join('') : '<div class="empty-state">No pending invites.</div>';
     wireCancelInviteButtons(box);
@@ -2763,15 +2849,24 @@ function showInviteCodeModal(email, roleLabel, code){
   });
 }
 
+// round 8.8/schema_v10: an invite can now grant more than one role at once
+// (same as an existing employee's role set), so this is a checkbox group -
+// same "check-row" pattern as the workflow "depends on" picker - not a
+// single-value <select>, and createInvite() takes the whole checked array.
 function openInviteModal(){
+  var roleChecksHtml = INVITABLE_ROLES.map(function(r){
+    return '<div class="check-row"><input type="checkbox" name="roles" value="'+r.key+'" id="invrole_'+r.key+'"><label for="invrole_'+r.key+'">'+escapeHtml(r.label)+'</label></div>';
+  }).join('');
   openModal('Invite a teammate', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
-    '<div class="field"><label>Role</label><select name="role">'+INVITABLE_ROLES.map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>',
+    '<div class="field"><label>Role(s)</label>'+roleChecksHtml+'</div>',
     function(fd){
       var email = (fd.get('email')||'').trim();
       if(!email){ showModalError('Enter their email.'); return; }
+      var roles = fd.getAll('roles');
+      if(!roles.length){ showModalError('Pick at least one role.'); return; }
       setModalBusy(true);
-      var roleLabel = (INVITABLE_ROLES.filter(function(r){ return r.key===fd.get('role'); })[0]||{}).label;
-      createInvite(email, fd.get('role'), myTeamId, myUid).then(function(invite){
+      var roleLabel = INVITABLE_ROLES.filter(function(r){ return roles.indexOf(r.key)>-1; }).map(function(r){return r.label;}).join(', ');
+      createInvite(email, roles, myTeamId, myUid).then(function(invite){
         showInviteCodeModal(email, roleLabel, invite.id);
         route();
       }).catch(function(err){ showModalError(errMsg(err)); });
@@ -2781,17 +2876,24 @@ function openInviteModal(){
 // Admin-only: same idea as openInviteModal above, but Admin isn't scoped to
 // one Team, so this one also asks which Team and allows Manager as a role
 // (a Manager, per RLS, can never invite someone in as 'manager' - only
-// Admin can, which is exactly what this modal is for).
+// Admin can, which is exactly what this modal is for). Also a checkbox
+// group (round 8.8/schema_v10) so Admin can grant, say, Manager + a
+// job-title role to the same invite at once.
 function openAdminInviteModal(){
+  var roleChecksHtml = ASSIGNABLE_ROLES.map(function(r){
+    return '<div class="check-row"><input type="checkbox" name="roles" value="'+r.key+'" id="adminvrole_'+r.key+'"><label for="adminvrole_'+r.key+'">'+escapeHtml(r.label)+'</label></div>';
+  }).join('');
   openModal('Invite someone', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
-    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ASSIGNABLE_ROLES.map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+    '<div class="field-row"><div class="field"><label>Role(s)</label>'+roleChecksHtml+'</div>'+
     '<div class="field"><label>Team</label><select name="teamId" required>'+teamOptionsHtml()+'</select></div></div>',
     function(fd){
       var email = (fd.get('email')||'').trim();
       if(!email){ showModalError('Enter their email.'); return; }
+      var roles = fd.getAll('roles');
+      if(!roles.length){ showModalError('Pick at least one role.'); return; }
       setModalBusy(true);
-      var roleLabel = (ASSIGNABLE_ROLES.filter(function(r){ return r.key===fd.get('role'); })[0]||{}).label;
-      createInvite(email, fd.get('role'), fd.get('teamId'), myUid).then(function(invite){
+      var roleLabel = ASSIGNABLE_ROLES.filter(function(r){ return roles.indexOf(r.key)>-1; }).map(function(r){return r.label;}).join(', ');
+      createInvite(email, roles, fd.get('teamId'), myUid).then(function(invite){
         showInviteCodeModal(email, roleLabel, invite.id);
         route();
       }).catch(function(err){ showModalError(errMsg(err)); });
@@ -2834,15 +2936,26 @@ function renderAdmin(){
     if(!box) return;
     var pending = invites.filter(function(i){ return !i.usedAt; });
     box.innerHTML = pending.length ? pending.map(function(i){
-      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleOf(i.role)?roleOf(i.role).label:i.role)+' · '+escapeHtml(teamName(i.teamId))+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div>'+
+      var roleKeys = (i.roles && i.roles.length) ? i.roles : (i.role?[i.role]:[]);
+      var roleLabel = roleKeys.map(function(k){ var rr=roleOf(k); return rr?rr.label:k; }).join(', ') || '-';
+      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleLabel)+' · '+escapeHtml(teamName(i.teamId))+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div>'+
         '<button type="button" class="btn btn-sm btn-danger" data-cancel-invite="'+escapeHtml(i.id)+'" data-email="'+escapeHtml(i.email)+'" style="margin-left:auto;">Cancel</button></div>';
     }).join('') : '<div class="empty-state">No pending invites.</div>';
     wireCancelInviteButtons(box);
   }).catch(function(){ var b=document.getElementById('allInvitesBox'); if(b) b.innerHTML = '<div class="empty-state">Could not load invites.</div>'; });
 
-  Promise.all([listTeams(), db.collection('profiles').get()]).then(function(res){
+  // round 8.8/schema_v10: listAllRoles() gives every employee's full role
+  // set in one query ({ [userId]: ['role1','role2',...] }) - every spot
+  // below that used to check the legacy single profiles.role column
+  // (admin-label, "actual managers", All employees roster/filter) now
+  // checks this map instead, so someone holding Manager AND a job-title
+  // role (or Admin AND anything else) is recognized correctly everywhere.
+  Promise.all([listTeams(), db.collection('profiles').get(), listAllRoles()]).then(function(res){
     var teams = res[0].slice().sort(function(a,b){ return (a.name||'').localeCompare(b.name||''); });
     var profiles = res[1].docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+    var rolesByUser = res[2];
+    function empRoles(uid){ var r = rolesByUser[uid]; return (r && r.length) ? r : []; }
+    function empHasRole(uid, role){ return empRoles(uid).indexOf(role)>-1; }
     var box = document.getElementById('teamsBox');
     // Anyone (including Admin) who's picked here as a team's Manager/point
     // of contact - but an Admin picked here keeps their Admin role as-is
@@ -2854,8 +2967,8 @@ function renderAdmin(){
     // already technically possible; "Managers" below just makes it visible.
     box.innerHTML = teams.map(function(t){
       var manager = profiles.filter(function(p){ return p.id===t.managerId; })[0];
-      var actualManagers = profiles.filter(function(p){ return p.role==='manager' && p.teamId===t.id; });
-      var memberOpts = profiles.map(function(p){ return '<option value="'+p.id+'"'+(p.id===t.managerId?' selected':'')+'>'+escapeHtml(p.displayName||p.email)+(p.role==='admin'?' (Admin)':(p.teamId?' ('+escapeHtml(teamName(p.teamId))+')':''))+'</option>'; }).join('');
+      var actualManagers = profiles.filter(function(p){ return empHasRole(p.id,'manager') && p.teamId===t.id; });
+      var memberOpts = profiles.map(function(p){ return '<option value="'+p.id+'"'+(p.id===t.managerId?' selected':'')+'>'+escapeHtml(p.displayName||p.email)+(empHasRole(p.id,'admin')?' (Admin)':(p.teamId?' ('+escapeHtml(teamName(p.teamId))+')':''))+'</option>'; }).join('');
       var teamServices = servicesCache.filter(function(s){ return s.teamId===t.id; });
       return '<div class="panel" style="margin-bottom:12px;"><h3>'+escapeHtml(t.name)+'</h3>'+
         '<div style="font-size:13px;color:var(--muted);margin-bottom:4px;">Point of contact: '+(manager?escapeHtml(manager.displayName||manager.email):'- none assigned -')+'</div>'+
@@ -2890,12 +3003,13 @@ function renderAdmin(){
           return;
         }
         var picked = profiles.filter(function(p){ return p.id===sel.value; })[0];
-        var task = (picked && picked.role==='admin')
+        var pickedIsAdmin = picked && empHasRole(picked.id,'admin');
+        var task = pickedIsAdmin
           // Admin picked: just point teams.managerId at them for display -
           // never touch an Admin's own role/team.
           ? db.doc('teams/'+teamId).update({managerId: sel.value})
           : assignTeamManager(teamId, sel.value);
-        task.then(function(){ showToast('success', picked&&picked.role==='admin' ? 'Set as point of contact' : 'Manager assigned'); refreshTeamsCache().then(route); }).catch(function(err){ showToast('error', errMsg(err)); });
+        task.then(function(){ showToast('success', pickedIsAdmin ? 'Set as point of contact' : 'Manager assigned'); refreshTeamsCache().then(route); }).catch(function(err){ showToast('error', errMsg(err)); });
       });
     });
     Array.prototype.forEach.call(box.querySelectorAll('[data-invite-mgr]'), function(input){
@@ -2904,7 +3018,7 @@ function renderAdmin(){
         ev.preventDefault();
         var email = input.value.trim();
         if(!email) return;
-        createInvite(email, 'manager', input.getAttribute('data-invite-mgr'), myUid).then(function(invite){
+        createInvite(email, ['manager'], input.getAttribute('data-invite-mgr'), myUid).then(function(invite){
           input.value='';
           showInviteCodeModal(email, 'Manager', invite.id);
           route();
@@ -2912,16 +3026,25 @@ function renderAdmin(){
       });
     });
 
-    // ---- All employees: change anyone's role and/or team ----
+    // ---- All employees: change anyone's role(s) and/or team ----
+    // round 8.8/schema_v10: the single Role <select> is now a multi-select
+    // checkbox group (same "pick several" pattern as the invite modals
+    // above) wired to assignRoles(uid, roles) - the diff-based writer in
+    // teams.js - instead of overwriting the legacy profiles.role column
+    // directly. empHasRole()/empRoles() come from listAllRoles() (see the
+    // Promise.all above), not the single p.role field.
     var empBox = document.getElementById('employeesBox');
-    var employees = profiles.filter(function(p){ return p.role!=='admin'; }).sort(function(a,b){ return (a.displayName||a.email||'').localeCompare(b.displayName||b.email||''); });
+    var employees = profiles.filter(function(p){ return !empHasRole(p.id,'admin'); }).sort(function(a,b){ return (a.displayName||a.email||'').localeCompare(b.displayName||b.email||''); });
     empBox.innerHTML = employees.length ? '<div class="roster-table">'+employees.map(function(p){
-      var roleOpts = ASSIGNABLE_ROLES.map(function(r){ return '<option value="'+r.key+'"'+(r.key===p.role?' selected':'')+'>'+escapeHtml(r.label)+'</option>'; }).join('');
-      return '<div class="roster-row" style="justify-content:space-between;">'+
-        '<span class="presence-dot'+(isOnline(p.id)?' online':'')+'"></span>'+
+      var roleChecksHtml = ASSIGNABLE_ROLES.map(function(r){
+        var checked = empHasRole(p.id, r.key);
+        return '<label style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;"><input type="checkbox" value="'+r.key+'" '+(checked?'checked':'')+' style="width:14px;height:14px;">'+escapeHtml(r.label)+'</label>';
+      }).join('');
+      return '<div class="roster-row" style="justify-content:space-between;align-items:flex-start;">'+
+        '<span class="presence-dot'+(isOnline(p.id)?' online':'')+'" style="margin-top:4px;"></span>'+
         '<div style="min-width:0;flex:1;"><div class="roster-name">'+escapeHtml(p.displayName||p.email)+'</div><div class="roster-role">'+escapeHtml(p.email)+'</div></div>'+
-        '<div class="field-row" style="flex:none;gap:8px;">'+
-        '<select data-emp-role="'+p.id+'" style="width:auto;">'+roleOpts+'</select>'+
+        '<div class="field-row" style="flex:none;gap:8px;align-items:flex-start;">'+
+        '<div data-emp-roles="'+p.id+'" style="display:flex;flex-wrap:wrap;gap:4px 10px;max-width:220px;">'+roleChecksHtml+'</div>'+
         '<select data-emp-team="'+p.id+'" style="width:auto;">'+teamOptionsHtml(p.teamId, true)+'</select>'+
         '</div></div>';
     }).join('')+'</div>' : '<div class="empty-state">No employees yet - invite your first one.</div>';
@@ -2929,8 +3052,15 @@ function renderAdmin(){
     function saveEmployeeField(uid, patch){
       db.doc('profiles/'+uid).update(patch).then(function(){ showToast('success','Updated'); }).catch(function(err){ showToast('error', errMsg(err)); });
     }
-    Array.prototype.forEach.call(empBox.querySelectorAll('[data-emp-role]'), function(sel){
-      sel.addEventListener('change', function(){ saveEmployeeField(sel.getAttribute('data-emp-role'), {role: sel.value}); });
+    Array.prototype.forEach.call(empBox.querySelectorAll('[data-emp-roles]'), function(rolesBox){
+      var uid = rolesBox.getAttribute('data-emp-roles');
+      Array.prototype.forEach.call(rolesBox.querySelectorAll('input[type=checkbox]'), function(cb){
+        cb.addEventListener('change', function(){
+          var checked = Array.prototype.filter.call(rolesBox.querySelectorAll('input[type=checkbox]'), function(c){ return c.checked; }).map(function(c){ return c.value; });
+          if(!checked.length){ cb.checked = true; showToast('error','Must keep at least one role.'); return; }
+          assignRoles(uid, checked).then(function(){ showToast('success','Updated'); }).catch(function(err){ cb.checked = !cb.checked; showToast('error', errMsg(err)); });
+        });
+      });
     });
     Array.prototype.forEach.call(empBox.querySelectorAll('[data-emp-team]'), function(sel){
       sel.addEventListener('change', function(){ saveEmployeeField(sel.getAttribute('data-emp-team'), {teamId: sel.value||null}); });
@@ -3219,7 +3349,7 @@ function hideIdleWarningOverlay(){
     if(!session){
       clearSubs();
       if(profileUnsub){ profileUnsub(); profileUnsub = null; }
-      myUid = null; myRole = null; myProfile = null; myTeamId = null; lastUid = null; boundOnce = false;
+      myUid = null; myRole = null; myRoles = []; myProfile = null; myTeamId = null; lastUid = null; boundOnce = false;
       stopPresence();
       hangupCall();
       if(pendingRingCall){ if(pendingRingCall.timer) clearTimeout(pendingRingCall.timer); pendingRingCall = null; }
@@ -3252,8 +3382,18 @@ function hideIdleWarningOverlay(){
         var wasFirstLoad = !myProfile;
         var p = snap.exists ? snap.data() : null;
         myProfile = p;
-        myRole = p ? p.role : null;
         myTeamId = p ? p.teamId : null;
+        // myRoles (round 8.7/schema_v10): the profile doc's own onSnapshot
+        // doesn't carry profileRoles rows (a separate table), so those are
+        // fetched here every time the profile itself changes - cheap (one
+        // small query, one row per role this one person holds) and it means
+        // an Admin granting/revoking a role updates this person's own
+        // access immediately via the realtime subscription that already
+        // re-fires this whole callback on ANY profiles row write, without
+        // needing a second live subscription on profileRoles just for this.
+        (p ? listRolesFor(myUid) : Promise.resolve([])).then(function(roles){
+        myRoles = roles.length ? roles : (p && p.role ? [p.role] : []);
+        myRole = myRoles.length ? myRoles[0] : null; // legacy fallback, kept in sync - see myRoles' own comment above
         document.getElementById('navAddClient').hidden = !canManage();
         // 2026-09-21: Admin used to also see this "Team" link, redirected
         // to point at #/admin - but that made it a second nav item leading
@@ -3287,6 +3427,7 @@ function hideIdleWarningOverlay(){
             if(!timelog.isClockedIn()) setTimeout(showClockInOverlay, 600);
           });
         }
+        }); // end listRolesFor(...).then - myRoles block
       }, function(){ renderRoleBoxFallback(); route(); });
     }
   });
