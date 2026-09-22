@@ -262,10 +262,24 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .task-check{-webkit-appearance:none;appearance:none;width:20px;height:20px;flex:none;margin-top:1px;cursor:pointer;border:1.6px solid var(--line);border-radius:6px;background:var(--surface);position:relative;transition:background .15s ease,border-color .15s ease,transform .1s ease;}
 .task-check:hover:not([disabled]){border-color:var(--good);}
 .task-check:active:not([disabled]){transform:scale(.88);}
-.task-check:checked{background:var(--good);border-color:var(--good);}
-.task-check:checked::after{content:'';position:absolute;left:7px;top:5px;width:5px;height:10px;border:solid #fff;border-width:0 2px 2px 0;transform:rotate(45deg);animation:checkPop .18s cubic-bezier(.34,1.56,.64,1);}
+/* Checkmark - was a hand-positioned rotated-border pseudo-element (a fixed
+   left/top pixel offset trying to center an asymmetric rotated shape by
+   guesswork), and it was genuinely off-center - two rounds of pixel-value
+   guesses (including one "verified" by eye in an isolated test page at 4x
+   zoom that still didn't hold up in the real app) confirmed guessing
+   offsets isn't reliable here. Replaced with a background-image SVG
+   checkmark instead: background-position:center does exact centering
+   natively, so there is no offset value to get wrong ever again. The pop
+   animation now scales the whole checkbox briefly instead of the
+   checkmark shape specifically - simpler, and still a satisfying "pop". */
+.task-check:checked{
+  background-color:var(--good);border-color:var(--good);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='5 13 10 18 19 7'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:center;background-size:13px 13px;
+  animation:checkPop .18s cubic-bezier(.34,1.56,.64,1);
+}
 .task-check[disabled]{cursor:default;opacity:.65;}
-@keyframes checkPop{from{transform:rotate(45deg) scale(0);}to{transform:rotate(45deg) scale(1);}}
+@keyframes checkPop{from{transform:scale(.75);}to{transform:scale(1);}}
 .task-body{flex:1;min-width:0;}
 .task-label{font-size:14px;font-weight:500;transition:color .2s ease;}
 .task-row.done .task-label{text-decoration:line-through;color:var(--muted);}

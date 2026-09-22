@@ -12,21 +12,24 @@ import { MOODS } from './lib/music.js';
 import { connectConfigured, listenForConnects, newCallId, ring, declineRing, joinCallRoom, startLocalSession, pullRemoteTrack, endSession } from './lib/connect.js';
 
 // ---------- constants ----------
-var ROLES = [
-  {key:'outreach_va', label:'Outreach Expert/VA', color:'var(--r-outreach_va)'},
-  {key:'sr_video_editor', label:'Sr. Video Editor', color:'var(--r-sr_video_editor)'},
-  {key:'jr_video_editor', label:'Jr. Video Editor', color:'var(--r-jr_video_editor)'},
-  {key:'packaging_expert', label:'Packaging Expert', color:'var(--r-packaging_expert)'},
-  {key:'seo_specialist', label:'SEO Content Specialist', color:'var(--r-seo_specialist)'},
-  {key:'manager', label:'Manager', color:'var(--r-manager)'},
-  {key:'admin', label:'Admin', color:'var(--r-admin)'}
-];
-var INVITABLE_ROLES = ROLES.filter(function(r){ return r.key!=='manager' && r.key!=='admin'; });
+// Roles used to be this exact array, hardcoded - Phase 3 ("fully dynamic
+// role system: Admin can create/rename/delete roles from the Admin panel,
+// no code changes needed for future roster changes", design confirmed
+// 2026-09-21) replaces it with a live-loaded cache off the new `roles`
+// table (schema_v15.sql), same "empty until refreshRolesCache() resolves
+// once at boot, refreshed again after any mutation" pattern already used
+// for teamsCache/servicesCache just below. Admin and Manager are seeded
+// rows in that table too (for one consistent label/color source across
+// every role, admin-editable or not) but the Admin panel's own UI never
+// offers to edit or delete those two specifically - see renderAdmin's
+// roles section.
+var ROLES = [];
+var INVITABLE_ROLES = [];
 // Everything an Admin can hand out to an existing employee or a fresh
 // invite, short of the (single, effectively-permanent) Admin role itself -
 // this is what lets multiple people share 'manager' on the same team, since
 // it's just a per-person role+team assignment, not a one-slot field.
-var ASSIGNABLE_ROLES = ROLES.filter(function(r){ return r.key!=='admin'; });
+var ASSIGNABLE_ROLES = [];
 var CLIENT_COLORS = ['#2f8fd1','#3f6b8a','#7a5ea8','#4f8f6b','#b8567a','#a15c2f'];
 var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
@@ -183,37 +186,126 @@ function showToast(type, message, opts){
 
 // Undo toast for destructive actions (Phase 2.5 batch D, item #7: "a brief
 // toast with an Undo button appears right after a destructive/consequential
-// action" - Humayun's confirmed scope, 2026-09-26. Deliberately NOT "do the
-// write, then try to reverse it if Undo is clicked" - for a cascading
-// delete (deleting a client takes its templates/episodes/tasks/comments
-// down with it via the database's own "on delete cascade" foreign keys,
-// see schema.sql) that would mean snapshotting and faithfully restoring an
-// entire subtree, a much bigger and riskier feature than "I clicked the
-// wrong delete button" calls for. Instead the actual write is DELAYED:
-// nothing happens until the window passes with no click, so clicking Undo
-// just means the write never runs at all - correct by construction,
-// regardless of how deep whatever it's deleting cascades. This replaces
-// the old confirm()/prompt() dialogs on every destructive action they were
-// asked to cover; the client permanent-delete flow keeps ITS OWN stronger
-// "type the name back" gate in front of this on top, since that one is
-// singled out as needing more friction than a plain click.
+// action" - Humayun's confirmed scope, 2026-09-26).
+//
+// REVISED 2026-09-28 (Humayun, after testing round 12): the first version
+// DELAYED the actual write for 6 seconds so Undo could just mean "never
+// run it" - correct by construction, but it made every delete genuinely
+// FEEL slow (nothing visibly happened until the delay passed), which is a
+// worse trade than the problem it solved. Flipped around: the caller
+// performs the write IMMEDIATELY (no delay at all - same speed as any
+// other action in this app) and passes `undoFn`, a compensating write
+// built from data snapshotted right before deleting (re-insert the row(s),
+// or restore a previous field value) - Undo now means "reverse what
+// happened," not "it never happened." For a single row this is trivial;
+// for something that cascades (an episode takes its tasks down with it, a
+// client takes everything down with it - see schema.sql's "on delete
+// cascade" foreign keys) the caller fetches the full subtree BEFORE
+// deleting and re-inserts all of it, parents first, if Undo is clicked -
+// see deleteEpisodeWithUndo()/deleteClientWithUndo() below for the two
+// deep cases (restoreSnapshot() is the shared "write these rows back,
+// wave by wave" helper both use); everything else here just needs the one
+// row it already had in hand from the page's own render data.
 var UNDO_WINDOW_MS = 6000;
-// onUndo (optional) is for callers that optimistically hid something in
-// the DOM directly - a row still sitting right there in a list the user is
-// actively looking at needs to disappear the instant they click delete,
-// not up to 6 seconds later when the real write finally happens, so those
-// callers hide the element themselves and pass a callback to un-hide it if
-// Undo is clicked. Callers where the user has already navigated away from
-// whatever they deleted (episode/client delete) don't need this - there's
-// nothing left on screen to restore.
-function actionWithUndo(message, commitFn, onUndo){
-  var cancelled = false;
-  var timer = setTimeout(function(){ if(!cancelled) commitFn(); }, UNDO_WINDOW_MS);
+function actionWithUndo(message, undoFn){
   showToast('success', message, {
     duration: UNDO_WINDOW_MS,
     actionLabel: 'Undo',
-    onAction: function(){ cancelled = true; clearTimeout(timer); if(onUndo) onUndo(); showToast('info', 'Undone'); }
+    onAction: function(){ undoFn(); showToast('info', 'Undone'); }
   });
+}
+// Restores a snapshot taken before a cascading delete, respecting foreign
+// key order: `waves` is an array of batches ({col,id,data} rows), each
+// batch written in parallel via db.doc(col/id).set(data), one batch fully
+// finishing before the next starts - e.g. [ [client], [templates, rules,
+// episodes], [tasks], [comments/links/attachments] ] so a child row is
+// never written before the parent it references exists yet.
+function restoreSnapshot(waves){
+  return waves.reduce(function(p, wave){
+    return p.then(function(){
+      return Promise.all(wave.map(function(row){ return db.doc(row.col+'/'+row.id).set(row.data); }));
+    });
+  }, Promise.resolve());
+}
+function tuples(col, docs){ return docs.map(function(d){ return {col:col, id:d.id, data:d.data()}; }); }
+
+// Deletes an episode (and everything under it) with a real undo - snapshots
+// the episode, its tasks, and every comment/link/attachment on either the
+// episode itself or any of its tasks BEFORE deleting, so Undo can write it
+// all back. Navigates to the client page immediately either way, same as
+// before - there's nothing left to look at once the episode's gone.
+function deleteEpisodeWithUndo(episodeId, title, clientId){
+  Promise.all([
+    db.doc('episodes/'+episodeId).get(),
+    db.collection('tasks').where('episodeId','==',episodeId).get(),
+    db.collection('episodeComments').where('episodeId','==',episodeId).get(),
+    db.collection('episodeLinks').where('episodeId','==',episodeId).get(),
+    db.collection('episodeAttachments').where('episodeId','==',episodeId).get(),
+  ]).then(function(res){
+    var episodeData = res[0].data();
+    var tasks = tuples('tasks', res[1].docs);
+    var epChildren = tuples('episodeComments', res[2].docs).concat(tuples('episodeLinks', res[3].docs)).concat(tuples('episodeAttachments', res[4].docs));
+    var taskIds = tasks.map(function(t){ return t.id; });
+    return Promise.all([
+      taskIds.length ? db.collection('taskComments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}),
+      taskIds.length ? db.collection('taskLinks').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}),
+      taskIds.length ? db.collection('taskAttachments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}),
+    ]).then(function(subs){
+      var taskChildren = tuples('taskComments', subs[0].docs).concat(tuples('taskLinks', subs[1].docs)).concat(tuples('taskAttachments', subs[2].docs));
+      return db.doc('episodes/'+episodeId).delete().then(function(){
+        actionWithUndo('"'+title+'" deleted (with all its tasks, comments and attachments)', function(){
+          restoreSnapshot([
+            [{col:'episodes', id:episodeId, data:episodeData}],
+            tasks,
+            epChildren.concat(taskChildren)
+          ]).then(function(){ showToast('success','Restored'); }).catch(function(err){ showToast('error','Restore failed - '+errMsg(err)); });
+        });
+      });
+    });
+  }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+// Same idea, one level deeper: a client takes its templates, schedule
+// rules, episodes and every one of THEIR tasks/comments/links/attachments
+// down with it. Fetches the whole subtree before deleting, same reasoning
+// as deleteEpisodeWithUndo above.
+function deleteClientWithUndo(clientId, clientName){
+  Promise.all([
+    db.doc('clients/'+clientId).get(),
+    db.collection('templates').where('clientId','==',clientId).get(),
+    db.collection('scheduleRules').where('clientId','==',clientId).get(),
+    db.collection('episodes').where('clientId','==',clientId).get(),
+    db.collection('tasks').where('clientId','==',clientId).get(),
+  ]).then(function(res){
+    var clientData = res[0].data();
+    var templates = tuples('templates', res[1].docs);
+    var rules = tuples('scheduleRules', res[2].docs);
+    var episodes = tuples('episodes', res[3].docs);
+    var tasks = tuples('tasks', res[4].docs);
+    var episodeIds = episodes.map(function(e){ return e.id; });
+    var taskIds = tasks.map(function(t){ return t.id; });
+    return Promise.all([
+      taskIds.length ? db.collection('taskComments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}),
+      taskIds.length ? db.collection('taskLinks').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}),
+      taskIds.length ? db.collection('taskAttachments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}),
+      episodeIds.length ? db.collection('episodeComments').where('episodeId','in',episodeIds).get() : Promise.resolve({docs:[]}),
+      episodeIds.length ? db.collection('episodeLinks').where('episodeId','in',episodeIds).get() : Promise.resolve({docs:[]}),
+      episodeIds.length ? db.collection('episodeAttachments').where('episodeId','in',episodeIds).get() : Promise.resolve({docs:[]}),
+    ]).then(function(subs){
+      var children = tuples('taskComments', subs[0].docs).concat(tuples('taskLinks', subs[1].docs)).concat(tuples('taskAttachments', subs[2].docs))
+        .concat(tuples('episodeComments', subs[3].docs)).concat(tuples('episodeLinks', subs[4].docs)).concat(tuples('episodeAttachments', subs[5].docs));
+      return db.doc('clients/'+clientId).delete().then(function(){
+        actionWithUndo(clientName+' deleted (with everything under it)', function(){
+          restoreSnapshot([
+            [{col:'clients', id:clientId, data:clientData}],
+            templates.concat(rules).concat(episodes),
+            tasks,
+            children
+          ]).then(function(){ showToast('success','Restored'); }).catch(function(err){ showToast('error','Restore failed - '+errMsg(err)); });
+        });
+      });
+    });
+  }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 
 // A short beep, embedded as base64 so a screenshot notice never depends on
@@ -300,6 +392,18 @@ async function refreshTeamsCache(){
 }
 async function refreshServicesCache(){
   try{ servicesCache = await listServices(); }catch(e){ servicesCache = []; }
+}
+// Phase 3: loads ROLES from the live `roles` table instead of a hardcoded
+// array - see that var's own comment above. Fails open to whatever ROLES
+// already held (not an empty array) on a transient fetch error, so a
+// flaky connection doesn't wipe every role chip/dropdown in the app blank.
+async function refreshRolesCache(){
+  try{
+    var snap = await db.collection('roles').orderBy('sortOrder','asc').get();
+    if(snap.docs.length) ROLES = snap.docs.map(function(d){ return d.data(); });
+  }catch(e){}
+  INVITABLE_ROLES = ROLES.filter(function(r){ return r.key!=='manager' && r.key!=='admin'; });
+  ASSIGNABLE_ROLES = ROLES.filter(function(r){ return r.key!=='admin'; });
 }
 function teamName(id){ return (teamsCache[id] && teamsCache[id].name) || '-'; }
 // Every team <select> in the app used to list teams in creation order
@@ -886,12 +990,10 @@ function renderClient(clientId){
       // schema.sql) - real, irreversible history loss, so this asks for
       // the client's exact name typed back rather than just a yes/no
       // confirm, the same weight as any other "type to confirm" delete.
-      var typed = prompt('This permanently deletes "'+c.name+'" and ALL of its episodes, tasks, comments and attachments. This cannot be undone.\n\nType the client\'s name to confirm:');
+      var typed = prompt('This permanently deletes "'+c.name+'" and ALL of its episodes, tasks, comments and attachments (a few seconds\' Undo is offered right after, but not longer than that).\n\nType the client\'s name to confirm:');
       if(typed===null) return;
       if(typed.trim()!==c.name){ showToast('error','Name didn\'t match - nothing was deleted.'); return; }
-      actionWithUndo(c.name+' deleted (with everything under it)', function(){
-        db.doc('clients/'+clientId).delete().catch(function(err){ showToast('error', errMsg(err)); });
-      });
+      deleteClientWithUndo(clientId, c.name);
       location.hash = '#/';
     });
 
@@ -972,9 +1074,13 @@ function renderClient(clientId){
       Array.prototype.forEach.call(box.querySelectorAll('[data-rule]'), function(btn){
         btn.addEventListener('click', function(){
           var ruleId = btn.getAttribute('data-rule');
-          actionWithUndo('Rule removed (episodes already generated from it are kept)', function(){
-            db.doc('scheduleRules/'+ruleId).delete().catch(function(err){ showToast('error', errMsg(err)); });
-          });
+          var ruleDoc = rows.filter(function(x){ return x.id===ruleId; })[0];
+          var data = ruleDoc && ruleDoc.data();
+          db.doc('scheduleRules/'+ruleId).delete().then(function(){
+            actionWithUndo('Rule removed (episodes already generated from it are kept)', function(){
+              if(data) db.doc('scheduleRules/'+ruleId).set(data).catch(function(err){ showToast('error', errMsg(err)); });
+            });
+          }).catch(function(err){ showToast('error', errMsg(err)); });
         });
       });
     }, function(){});
@@ -1617,9 +1723,7 @@ function renderEpisode(episodeId){
     });
     var deleteEpBtn = document.getElementById('deleteEpisodeBtn');
     if(deleteEpBtn) deleteEpBtn.addEventListener('click', function(){
-      actionWithUndo('"'+e.title+'" deleted (with all its tasks, comments and attachments)', function(){
-        db.doc('episodes/'+episodeId).delete().catch(function(err){ showToast('error', errMsg(err)); });
-      });
+      deleteEpisodeWithUndo(episodeId, e.title, e.clientId);
       location.hash = '#/client/'+e.clientId;
     });
     loadCollab('episode', episodeId, document.getElementById('epCollab'));
@@ -1820,9 +1924,21 @@ function renderEpisode(episodeId){
           var label = btn.getAttribute('data-label');
           var row = btn.closest('.task-row');
           if(row) row.classList.add('pending-remove');
-          actionWithUndo('"'+label+'" deleted', function(){
-            db.doc('tasks/'+taskId).delete().catch(function(err){ showToast('error', errMsg(err)); if(row) row.classList.remove('pending-remove'); });
-          }, function(){ if(row) row.classList.remove('pending-remove'); });
+          var taskData = taskById[taskId];
+          Promise.all([
+            db.collection('taskComments').where('taskId','==',taskId).get(),
+            db.collection('taskLinks').where('taskId','==',taskId).get(),
+            db.collection('taskAttachments').where('taskId','==',taskId).get(),
+          ]).then(function(subs){
+            var children = tuples('taskComments', subs[0].docs).concat(tuples('taskLinks', subs[1].docs)).concat(tuples('taskAttachments', subs[2].docs));
+            return db.doc('tasks/'+taskId).delete().then(function(){
+              actionWithUndo('"'+label+'" deleted', function(){
+                restoreSnapshot([[{col:'tasks', id:taskId, data:taskData}], children])
+                  .then(function(){ showToast('success','Restored'); })
+                  .catch(function(err){ showToast('error','Restore failed - '+errMsg(err)); });
+              });
+            });
+          }).catch(function(err){ showToast('error', errMsg(err)); if(row) row.classList.remove('pending-remove'); });
         });
       });
       Array.prototype.forEach.call(box.querySelectorAll('[data-collab]'), function(btn){
@@ -2359,12 +2475,18 @@ function loadCollab(kind, id, panel){
             var cid = btn.getAttribute('data-delete-comment');
             var row = btn.closest('.comment-row');
             if(row) row.classList.add('pending-remove');
-            actionWithUndo('Comment deleted', function(){
-              supabase.from(cfg.comments).delete().eq('id', cid).then(function(res2){
-                if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
-                loadCollab(kind, id, panel);
+            var commentData = comments.filter(function(c){ return c.id===cid; })[0];
+            supabase.from(cfg.comments).delete().eq('id', cid).then(function(res2){
+              if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
+              actionWithUndo('Comment deleted', function(){
+                if(!commentData) return;
+                supabase.from(cfg.comments).insert(commentData).then(function(res3){
+                  if(res3.error){ showToast('error', errMsg(res3.error)); return; }
+                  loadCollab(kind, id, panel);
+                });
               });
-            }, function(){ if(row) row.classList.remove('pending-remove'); });
+              loadCollab(kind, id, panel);
+            });
           });
         });
 
@@ -2390,12 +2512,18 @@ function loadCollab(kind, id, panel){
             var lid = btn.getAttribute('data-delete-link');
             var row = btn.closest('.link-row');
             if(row) row.classList.add('pending-remove');
-            actionWithUndo('Link deleted', function(){
-              supabase.from(cfg.links).delete().eq('id', lid).then(function(res2){
-                if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
-                loadCollab(kind, id, panel);
+            var linkData = links.filter(function(l){ return l.id===lid; })[0];
+            supabase.from(cfg.links).delete().eq('id', lid).then(function(res2){
+              if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
+              actionWithUndo('Link deleted', function(){
+                if(!linkData) return;
+                supabase.from(cfg.links).insert(linkData).then(function(res3){
+                  if(res3.error){ showToast('error', errMsg(res3.error)); return; }
+                  loadCollab(kind, id, panel);
+                });
               });
-            }, function(){ if(row) row.classList.remove('pending-remove'); });
+              loadCollab(kind, id, panel);
+            });
           });
         });
 
@@ -2407,15 +2535,26 @@ function loadCollab(kind, id, panel){
             var key = btn.getAttribute('data-key');
             var row = btn.closest('.attachment-thumb, .attachment-file');
             if(row) row.classList.add('pending-remove');
-            actionWithUndo('Attachment deleted', function(){
-              supabase.from(cfg.attachments).delete().eq('id', attId).then(function(res2){
-                if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
-                // Best-effort - the row is already gone either way, so a failure
-                // here just means an orphaned object in the bucket, not a stuck UI.
-                deleteRemoteFile(key).catch(function(){});
-                loadCollab(kind, id, panel);
+            var attData = attachments.filter(function(a){ return a.id===attId; })[0];
+            supabase.from(cfg.attachments).delete().eq('id', attId).then(function(res2){
+              if(res2.error){ showToast('error', errMsg(res2.error)); if(row) row.classList.remove('pending-remove'); return; }
+              // The DB row is gone right away (so Undo can just re-insert
+              // it), but the R2 file itself is only ever deleted once - so
+              // THAT half stays behind the undo window rather than firing
+              // immediately: best-effort, and if Undo is clicked the
+              // scheduled deletion is simply never allowed to run, leaving
+              // the file untouched for the row to point back at again.
+              var fileDeleteTimer = setTimeout(function(){ deleteRemoteFile(key).catch(function(){}); }, UNDO_WINDOW_MS);
+              actionWithUndo('Attachment deleted', function(){
+                clearTimeout(fileDeleteTimer);
+                if(!attData) return;
+                supabase.from(cfg.attachments).insert(attData).then(function(res3){
+                  if(res3.error){ showToast('error', errMsg(res3.error)); return; }
+                  loadCollab(kind, id, panel);
+                });
               });
-            }, function(){ if(row) row.classList.remove('pending-remove'); });
+              loadCollab(kind, id, panel);
+            });
           });
         });
 
@@ -3218,9 +3357,16 @@ function wireCancelInviteButtons(box){
       var email = btn.getAttribute('data-email');
       var row = btn.closest('.roster-row');
       if(row) row.classList.add('pending-remove');
-      actionWithUndo('Invite for '+email+' canceled', function(){
-        cancelInvite(id).then(function(){ route(); }).catch(function(err){ if(row) row.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
-      }, function(){ if(row) row.classList.remove('pending-remove'); });
+      db.doc('invites/'+id).get().then(function(snap){
+        var data = snap.data();
+        return cancelInvite(id).then(function(){
+          actionWithUndo('Invite for '+email+' canceled', function(){
+            if(!data) return;
+            db.doc('invites/'+id).set(data).then(function(){ route(); }).catch(function(err){ showToast('error', errMsg(err)); });
+          });
+          route();
+        });
+      }).catch(function(err){ if(row) row.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
     });
   });
 }
@@ -3273,9 +3419,16 @@ function renderTeamSettings(){
       var svcId = btn.getAttribute('data-del-svc');
       var tag = btn.closest('.tag');
       if(tag) tag.classList.add('pending-remove');
-      actionWithUndo('Service deleted', function(){
-        deleteService(svcId).then(function(){ refreshServicesCache().then(function(){ route(); }); }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
-      }, function(){ if(tag) tag.classList.remove('pending-remove'); });
+      var svcData = servicesCache.filter(function(s){ return s.id===svcId; })[0];
+      deleteService(svcId).then(function(){
+        return refreshServicesCache().then(function(){
+          actionWithUndo('Service deleted', function(){
+            if(!svcData) return;
+            db.doc('services/'+svcId).set(svcData).then(function(){ return refreshServicesCache(); }).then(function(){ route(); }).catch(function(err){ showToast('error', errMsg(err)); });
+          });
+          route();
+        });
+      }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
     });
   });
 }
@@ -3369,6 +3522,9 @@ function renderAdmin(){
     '<div class="section"><div class="section-head"><h2 class="section-title">Pending invites</h2></div>'+
     '<div class="page-sub" style="margin:-6px 0 12px;">Across every team - this used to only be visible from a Manager\'s own Team page.</div>'+
     '<div id="allInvitesBox"><div class="skeleton" style="height:40px;"></div></div></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Job-title roles</h2><button type="button" class="btn btn-sm" id="newRoleBtn">+ New role</button></div>'+
+    '<div class="page-sub" style="margin:-6px 0 12px;">Roles employees/invites can hold, alongside Manager and Admin (fixed tiers, not editable here) - used for task assignment, role-based visibility, and workflow step ownership. Renaming keeps everything already assigned to a role intact; deleting doesn\'t touch anyone/anything already holding it, it just stops showing up for new assignments.</div>'+
+    '<div id="rolesBox"></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'
   );
   document.getElementById('newTeamBtn').addEventListener('click', function(){
@@ -3382,6 +3538,8 @@ function renderAdmin(){
   });
   document.getElementById('newGlobalServiceBtn').addEventListener('click', function(){ openCreateServiceTypeModal(null); });
   document.getElementById('adminInviteBtn').addEventListener('click', openAdminInviteModal);
+  document.getElementById('newRoleBtn').addEventListener('click', function(){ openRoleModal(null); });
+  renderRolesBox();
 
   // Ported over from the Manager's Team Settings page (renderTeamSettings) -
   // that page only ever showed a Manager their OWN team's pending invites,
@@ -3444,9 +3602,16 @@ function renderAdmin(){
         var svcId = btn.getAttribute('data-del-svc');
         var tag = btn.closest('.tag');
         if(tag) tag.classList.add('pending-remove');
-        actionWithUndo('Service deleted', function(){
-          deleteService(svcId).then(function(){ refreshServicesCache().then(route); }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
-        }, function(){ if(tag) tag.classList.remove('pending-remove'); });
+        var svcData = servicesCache.filter(function(s){ return s.id===svcId; })[0];
+        deleteService(svcId).then(function(){
+          return refreshServicesCache().then(function(){
+            actionWithUndo('Service deleted', function(){
+              if(!svcData) return;
+              db.doc('services/'+svcId).set(svcData).then(function(){ return refreshServicesCache(); }).then(route).catch(function(err){ showToast('error', errMsg(err)); });
+            });
+            route();
+          });
+        }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
       });
     });
 
@@ -3520,13 +3685,17 @@ function renderAdmin(){
           if(!checked.length){ cb.checked = true; showToast('error','Must keep at least one role.'); return; }
           // Role change (Phase 2.5 batch D, item #7 - named explicitly as
           // an undo-toast candidate) - the checkbox already flips instantly
-          // (native browser behavior, before this handler even runs), so
-          // undo here means reverting IT specifically back, not re-deriving
-          // anything from the write.
+          // (native browser behavior, before this handler even runs).
+          // Commits right away; Undo reverts the checkbox AND re-runs
+          // assignRoles with the set this role held just before the click.
           var justChecked = cb.checked;
-          actionWithUndo('Role updated', function(){
-            assignRoles(uid, checked).catch(function(err){ cb.checked = !justChecked; showToast('error', errMsg(err)); });
-          }, function(){ cb.checked = !justChecked; });
+          var previousChecked = justChecked ? checked.filter(function(v){ return v!==cb.value; }) : checked.concat([cb.value]);
+          assignRoles(uid, checked).then(function(){
+            actionWithUndo('Role updated', function(){
+              cb.checked = !justChecked;
+              assignRoles(uid, previousChecked).catch(function(err){ showToast('error', errMsg(err)); });
+            });
+          }).catch(function(err){ cb.checked = !justChecked; showToast('error', errMsg(err)); });
         });
       });
     });
@@ -3543,11 +3712,100 @@ function renderAdmin(){
       var svcId = btn.getAttribute('data-del-svc');
       var tag = btn.closest('.tag');
       if(tag) tag.classList.add('pending-remove');
-      actionWithUndo('Global service deleted', function(){
-        deleteService(svcId).then(function(){ refreshServicesCache().then(route); }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
-      }, function(){ if(tag) tag.classList.remove('pending-remove'); });
+      var svcData = servicesCache.filter(function(s){ return s.id===svcId; })[0];
+      deleteService(svcId).then(function(){
+        return refreshServicesCache().then(function(){
+          actionWithUndo('Global service deleted', function(){
+            if(!svcData) return;
+            db.doc('services/'+svcId).set(svcData).then(function(){ return refreshServicesCache(); }).then(route).catch(function(err){ showToast('error', errMsg(err)); });
+          });
+          route();
+        });
+      }).catch(function(err){ if(tag) tag.classList.remove('pending-remove'); showToast('error', errMsg(err)); });
     });
   });
+}
+
+// Phase 3 - Admin panel role management (create/rename/delete a job-title
+// role, see schema_v15.sql and the ROLES cache comment near the top of
+// this file). "Rename" only ever updates label/color, never the row's own
+// `key` - see openRoleModal - so nothing that already references a role by
+// key (profileRoles, tasks, invites, template steps) can ever be orphaned
+// by a rename. Delete uses the same commit-immediately-offer-undo pattern
+// as every other destructive action (Phase 2.5 batch D) on top of its own
+// confirm() - a role's blast radius (every dropdown/assignment company-
+// wide) is bigger than a single row, so it keeps a touch more friction
+// than a plain undo toast alone, same reasoning as client delete keeping
+// its own "type the name back" gate. Nothing needs cleaning up if a role
+// that's still in use gets deleted - every place that reads a role already
+// falls back gracefully (roleOf() returning null shows the raw key or a
+// grey chip instead of breaking) if the role it points at is gone.
+function renderRolesBox(){
+  var box = document.getElementById('rolesBox');
+  if(!box) return;
+  var editable = ROLES.filter(function(r){ return r.key!=='admin' && r.key!=='manager'; });
+  box.innerHTML = editable.length ? editable.map(function(r){
+    return '<div class="roster-row"><span class="role-chip" style="background:'+escapeHtml(r.color)+'">'+escapeHtml(r.label)+'</span>'+
+      '<div style="margin-left:auto;display:flex;gap:8px;">'+
+      '<button type="button" class="btn btn-sm" data-edit-role="'+escapeHtml(r.key)+'">Edit</button>'+
+      '<button type="button" class="btn btn-sm btn-danger" data-delete-role="'+escapeHtml(r.key)+'">Delete</button>'+
+      '</div></div>';
+  }).join('') : '<div class="empty-state">No roles yet - add your first one.</div>';
+  Array.prototype.forEach.call(box.querySelectorAll('[data-edit-role]'), function(btn){
+    btn.addEventListener('click', function(){ openRoleModal(btn.getAttribute('data-edit-role')); });
+  });
+  Array.prototype.forEach.call(box.querySelectorAll('[data-delete-role]'), function(btn){
+    btn.addEventListener('click', function(){
+      var key = btn.getAttribute('data-delete-role');
+      var roleData = ROLES.filter(function(r){ return r.key===key; })[0];
+      if(!confirm('Delete "'+(roleData?roleData.label:key)+'"? Anyone or any task already assigned it keeps showing it - this only stops it from being offered for new assignments.')) return;
+      db.doc('roles/'+key).delete().then(function(){
+        return refreshRolesCache().then(function(){
+          actionWithUndo('"'+(roleData?roleData.label:key)+'" deleted', function(){
+            if(!roleData) return;
+            db.doc('roles/'+key).set(roleData).then(function(){ return refreshRolesCache(); }).then(route).catch(function(err){ showToast('error', errMsg(err)); });
+          });
+          route();
+        });
+      }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+  });
+}
+
+function slugifyRoleKey(label){
+  var base = label.toLowerCase().trim().replace(/[^a-z0-9]+/g,'_').replace(/^_+|_+$/g,'');
+  return base || 'role';
+}
+
+function openRoleModal(existingKey){
+  var existing = existingKey ? ROLES.filter(function(r){ return r.key===existingKey; })[0] : null;
+  openModal(existing ? 'Edit role' : 'New role',
+    '<div class="field"><label>Label</label><input required name="label" type="text" value="'+(existing?escapeHtml(existing.label):'')+'" placeholder="e.g. Audio Engineer"></div>'+
+    '<div class="field"><label>Color</label><input name="color" type="color" value="'+(existing?escapeHtml(existing.color):'#5b6472')+'" style="height:38px;width:70px;padding:2px;"></div>'+
+    '<div class="field-hint">Role labels are always shown in white text on this color - pick something mid-to-dark so it stays readable.</div>',
+    function(fd){
+      var label = (fd.get('label')||'').trim();
+      if(!label){ showModalError('Name the role.'); return; }
+      var color = fd.get('color') || '#5b6472';
+      setModalBusy(true);
+      if(existing){
+        db.doc('roles/'+existing.key).update({label:label, color:color}).then(function(){
+          return refreshRolesCache();
+        }).then(function(){
+          closeModal(); showToast('success','Role updated'); route();
+        }).catch(function(err){ showModalError(errMsg(err)); });
+      } else {
+        var base = slugifyRoleKey(label);
+        var key = base, n = 2;
+        while(ROLES.some(function(r){ return r.key===key; })){ key = base+'_'+n; n++; }
+        var maxOrder = ROLES.reduce(function(m,r){ return Math.max(m, r.sortOrder||0); }, 0);
+        db.doc('roles/'+key).set({key:key, label:label, color:color, sortOrder:maxOrder+1, createdAt:new Date().toISOString()}).then(function(){
+          return refreshRolesCache();
+        }).then(function(){
+          closeModal(); showToast('success','Role created'); route();
+        }).catch(function(err){ showModalError(errMsg(err)); });
+      }
+    }, existing?'Save':'Create');
 }
 
 document.getElementById('navAddClient').addEventListener('click', openAddClientModal);
@@ -3908,7 +4166,7 @@ function hideIdleWarningOverlay(){
         var adminNav = document.getElementById('navAdmin'); if(adminNav) adminNav.hidden = !isAdmin();
         var workflowsNav = document.getElementById('navWorkflows'); if(workflowsNav) workflowsNav.hidden = !canManage();
         renderIdentityCard();
-        Promise.all([refreshTeamsCache(), refreshServicesCache()]).then(route);
+        Promise.all([refreshTeamsCache(), refreshServicesCache(), refreshRolesCache()]).then(route);
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
           listenForConnects(myUid, { onRing: handleIncomingRing, onRingMissed: handleRingMissed });
