@@ -11,6 +11,22 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        // Phase 2.5 batch A: launch on Windows startup, enabled by default -
+        // nobody has to find a setting and turn it on themselves.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .setup(|app| {
+            // enable() is idempotent (a no-op if already enabled), so this
+            // is safe to call on every launch. There's no in-app toggle yet
+            // to remember someone explicitly turned this off, so it's
+            // effectively "always on" for now - worth pairing with a real
+            // Settings switch later if that's ever wanted.
+            use tauri_plugin_autostart::ManagerExt;
+            let _ = app.autolaunch().enable();
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             timelog::timelog_start,
             timelog::timelog_stop,
