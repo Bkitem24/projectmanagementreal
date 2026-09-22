@@ -751,10 +751,10 @@ function openAddClientModal(){
 function renderClient(clientId){
   paint('<div class="skeleton" style="height:120px;margin-bottom:20px;"></div><div class="skeleton" style="height:260px;"></div>');
   var unsub = db.doc('clients/'+clientId).onSnapshot(function(snap){
-    if(!snap.exists){ app.innerHTML='<div class="empty-state"><strong>Client not found</strong>It may have been removed.</div>'; return; }
+    if(!snap.exists){ paint('<div class="empty-state"><strong>Client not found</strong>It may have been removed.</div>'); return; }
     var c = snap.data();
     var mgr = canManage();
-    app.innerHTML =
+    paint(
       '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+(c.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+'</h1>'+
       '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'-')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div>'+
       '<div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">'+
@@ -785,7 +785,8 @@ function renderClient(clientId){
       '</div>'+
       '</div>'+
       '<div id="episodeList" class="episode-list"><div class="skeleton" style="height:50px;"></div></div></div>'+
-      (mgr?'<div class="section"><div class="section-head"><h2 class="section-title">Workflow templates</h2><button type="button" class="btn btn-sm" id="addTemplateBtn">+ New template</button></div><div id="templateBox"></div></div>':'');
+      (mgr?'<div class="section"><div class="section-head"><h2 class="section-title">Workflow templates</h2><button type="button" class="btn btn-sm" id="addTemplateBtn">+ New template</button></div><div id="templateBox"></div></div>':'')
+    );
 
     var genBtn = document.getElementById('genEpisodesBtn');
     if(genBtn) genBtn.addEventListener('click', function(){
@@ -946,7 +947,7 @@ function renderClient(clientId){
       var tplBox = document.getElementById('templateBox');
       if(tplBox) activeUnsubs.push(mountTemplatesBox(clientId, tplBox));
     }
-  }, function(){ app.innerHTML='<div class="empty-state">Could not load this client.</div>'; });
+  }, function(){ paint('<div class="empty-state">Could not load this client.</div>'); });
   activeUnsubs.push(unsub);
 }
 
@@ -1348,9 +1349,9 @@ var expandedTasks = {};
 function renderEpisode(episodeId){
   paint('<div class="skeleton" style="height:100px;margin-bottom:20px;"></div><div class="skeleton" style="height:300px;"></div>');
   var unsub = db.doc('episodes/'+episodeId).onSnapshot(function(snap){
-    if(!snap.exists){ app.innerHTML='<div class="empty-state"><strong>Episode not found</strong></div>'; return; }
+    if(!snap.exists){ paint('<div class="empty-state"><strong>Episode not found</strong></div>'); return; }
     var e = snap.data();
-    app.innerHTML =
+    paint(
       '<div class="page-head"><div><div class="eyebrow"><a href="#/client/'+e.clientId+'" style="color:var(--muted);text-decoration:none;">'+escapeHtml(e.clientName)+'</a></div>'+
       '<h1 class="page-title">'+escapeHtml(e.title)+(e.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+'</h1>'+
       '<div class="page-sub">'+fmtDateFull(e.dueDate)+(e.paid?' · Paid appearance ($'+e.amount+')':'')+'</div></div>'+
@@ -1362,7 +1363,8 @@ function renderEpisode(episodeId){
       '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>'+
       '<div class="section"><div class="section-head"><h2 class="section-title">Discussion</h2></div>'+
       '<div class="page-sub" style="margin:-6px 0 12px;">General chat about this episode as a whole - for a specific subtask, use "Comments, links & files" on that task instead.</div>'+
-      '<div id="epCollab"></div></div>';
+      '<div id="epCollab"></div></div>'
+    );
 
     var addCustomBtn = document.getElementById('addCustomTaskBtn');
     if(addCustomBtn) addCustomBtn.addEventListener('click', function(){ openAddCustomTaskModal(episodeId, e); });
@@ -1415,12 +1417,29 @@ function renderEpisode(episodeId){
         taskById[t._id] = t;
         if(t.done) doneCount++;
       });
+      // Live step order (Phase 2.5 batch A): a task's position used to be
+      // permanently baked into its own orderNum at the moment it was
+      // created, exactly the trap dependencies were in before round 8.5 -
+      // dragging steps into a new order on the Workflows page updated the
+      // TEMPLATE, but every already-generated episode kept showing its
+      // tasks in the old order forever. Since a task's id is always
+      // "<episodeId>_<stepId>" (custom tasks are the one exception, id
+      // "<episodeId>_custom_<xxxx>", which simply won't match any live
+      // step and falls back to its own orderNum below - custom tasks were
+      // never part of a template's order anyway), the live step is just a
+      // lookup away, same liveStepById already fetched for dependencies.
+      function liveOrderNum(t){
+        var stepId = t._id.indexOf(episodeId+'_')===0 ? t._id.slice(episodeId.length+1) : null;
+        var liveStep = stepId ? liveStepById[stepId] : null;
+        return liveStep ? (liveStep.order||0) : (t.orderNum||0);
+      }
+      var liveOrderedDocs = ts.docs.slice().sort(function(a,b){ return liveOrderNum(taskById[a.id]) - liveOrderNum(taskById[b.id]); });
       // Second pass: sort each task into its open group, or - added
       // 2026-09-22 - into a separate "Completed" bucket instead, so a
       // finished task moves out of the working checklist rather than
       // staying interleaved (still checked, just no longer where you're
       // looking for what's left to do).
-      ts.docs.forEach(function(d){
+      liveOrderedDocs.forEach(function(d){
         var t = taskById[d.id];
         if(t.done){ completed.push(t); return; }
         var g = t.group||'Tasks';
@@ -1450,12 +1469,30 @@ function renderEpisode(episodeId){
         var status = pct===100 ? 'done' : dueStatus(e.dueDate,false);
         badge.innerHTML = '<span class="badge badge-'+status+'">'+statusLabel(status)+' · '+doneCount+'/'+ts.size+'</span>';
       }
-      function taskRowHtml(t){
+      // Comment-count badge on "Comments, links & files" (Phase 2.5 batch
+      // A): one grouped query for every task on this episode, rather than
+      // one query per task row - counted client-side same as
+      // listAllRoles() groups profileRoles by userId. Not a live
+      // subscription of its own: it refreshes whenever this episode's task
+      // list itself re-fires (a task added/checked/deleted), same
+      // "Reload to see the latest" tradeoff the rest of the app already
+      // has for anything not on its own realtime channel.
+      var taskIds = ts.docs.map(function(d){ return d.id; });
+      (taskIds.length ? db.collection('taskComments').where('taskId','in',taskIds).get() : Promise.resolve({docs:[]}))
+        .then(function(cSnap){
+          var counts = {};
+          cSnap.docs.forEach(function(d){ var row=d.data(); counts[row.taskId]=(counts[row.taskId]||0)+1; });
+          renderChecklist(counts);
+        })
+        .catch(function(){ renderChecklist({}); }); // fails open - still render the checklist without counts if this one query fails
+
+      function taskRowHtml(t, commentCounts){
         var r = roleOf(t.role);
         var unmet = depTasksFor(t).filter(function(dt){ return !dt.done; });
         var isBlocked = unmet.length>0;
         var canCheck = (myRoles.indexOf(t.role)>-1 || canManage()) && !isBlocked;
         var waitingLabel = unmet.map(function(dt){ return dt.label; }).join(', ');
+        var cCount = commentCounts[t._id]||0;
         return '<div class="task-row '+(t.done?'done':'')+(isBlocked?' task-blocked':'')+'" style="--role-color:'+(r?r.color:'var(--line)')+'">'+
           '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(waitingLabel)+'\' '+(unmet.length>1?'are':'is')+' done"':'')+'>'+
           '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+(t.custom?' <span class="task-custom-badge">custom</span>':'')+'</div>'+
@@ -1463,17 +1500,19 @@ function renderEpisode(episodeId){
           (isBlocked?'<span class="task-waiting">⛔ Waiting on: '+escapeHtml(waitingLabel)+'</span>':'')+
           (t.done && t.doneByUserId?profileChip(t.doneByUserId):'')+
           '</div>'+
-          '<button type="button" class="task-expand-btn" data-collab="'+t._id+'">'+(expandedTasks[t._id]?'Hide discussion':'Comments, links & files')+'</button>'+
+          '<button type="button" class="task-expand-btn" data-collab="'+t._id+'">'+(expandedTasks[t._id]?'Hide discussion':'Comments, links & files'+(cCount?' ('+cCount+')':''))+'</button>'+
           '<div class="task-collab" id="collab_'+t._id+'" '+(expandedTasks[t._id]?'':'hidden')+'></div>'+
           '</div>'+
           (canManage()?'<button type="button" class="icon-btn" data-delete-task="'+t._id+'" data-label="'+escapeHtml(t.label)+'" title="Delete task">'+ICON_TRASH+'</button>':'')+
           '</div>';
       }
+      function renderChecklist(commentCounts){
+      function rowHtml(t){ return taskRowHtml(t, commentCounts); }
       box.innerHTML = order.map(function(g){
         return '<div class="checklist-group"><div class="checklist-group-head"><span class="checklist-group-title">'+escapeHtml(g)+'</span></div>'+
-          groups[g].map(taskRowHtml).join('')+
+          groups[g].map(rowHtml).join('')+
           '</div>';
-      }).join('') + (completed.length ? '<div class="checklist-group checklist-completed"><div class="checklist-group-head"><span class="checklist-group-title">Completed ('+completed.length+')</span></div>'+completed.map(taskRowHtml).join('')+'</div>' : '');
+      }).join('') + (completed.length ? '<div class="checklist-group checklist-completed"><div class="checklist-group-head"><span class="checklist-group-title">Completed ('+completed.length+')</span></div>'+completed.map(rowHtml).join('')+'</div>' : '');
       hydrateProfiles(box);
       Array.prototype.forEach.call(box.querySelectorAll('.task-check:not([disabled])'), function(cb){
         cb.addEventListener('change', function(){
@@ -1503,17 +1542,18 @@ function renderEpisode(episodeId){
           if(!panel) return;
           var willShow = panel.hasAttribute('hidden');
           if(willShow){ panel.removeAttribute('hidden'); btn.textContent='Hide discussion'; expandedTasks[taskId]=true; loadTaskCollab(taskId, panel); }
-          else { panel.setAttribute('hidden',''); btn.textContent='Comments, links & files'; expandedTasks[taskId]=false; }
+          else { panel.setAttribute('hidden',''); btn.textContent='Comments, links & files'+(commentCounts[taskId]?' ('+commentCounts[taskId]+')':''); expandedTasks[taskId]=false; }
         });
         if(expandedTasks[taskId]){
           var panel = document.getElementById('collab_'+taskId);
           if(panel) loadTaskCollab(taskId, panel);
         }
       });
+      } // end renderChecklist
     }, function(){});
     activeUnsubs.push(unsubTasks);
     }); // end tplStepByIdPromise.then
-  }, function(){ app.innerHTML='<div class="empty-state">Could not load this episode.</div>'; });
+  }, function(){ paint('<div class="empty-state">Could not load this episode.</div>'); });
   activeUnsubs.push(unsub);
 }
 
