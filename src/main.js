@@ -919,7 +919,7 @@ function renderClient(clientId){
     var c = snap.data();
     var mgr = canManage();
     paint(
-      '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+(c.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+'</h1>'+
+      '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+(c.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+(mgr?' <button type="button" class="icon-btn" id="editClientNameBtn" title="Edit podcast name / host">'+ICON_PENCIL+'</button>':'')+'</h1>'+
       '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'-')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div>'+
       '<div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">'+
       (mgr?'<button type="button" class="btn btn-sm" id="archiveClientBtn">'+(c.archived?'Unarchive':'Archive')+'</button><button type="button" class="btn btn-sm btn-danger" id="deleteClientBtn">Delete permanently</button>':'')+
@@ -1007,6 +1007,24 @@ function renderClient(clientId){
       }).then(function(key){
         return db.doc('clients/'+clientId).update({imageUrl: fileUrl(key)});
       }).then(function(){ showToast('success','Photo updated'); }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+
+    // Podcast name + host - real fields since Phase 1 (openAddClientModal
+    // already writes both at creation) but never had an edit affordance
+    // afterward - flagged 2026-09-28. No schema change needed, both
+    // columns already exist.
+    var editClientNameBtn = document.getElementById('editClientNameBtn');
+    if(editClientNameBtn) editClientNameBtn.addEventListener('click', function(){
+      openModal('Edit podcast name & host', '<div class="field"><label>Podcast name</label><input required name="name" type="text" value="'+escapeHtml(c.name)+'"></div>'+
+        '<div class="field"><label>Host name(s)</label><input name="hostName" type="text" value="'+escapeHtml(c.hostName||'')+'" placeholder="e.g. Erica Bonser &amp; Steph Eggar"></div>',
+        function(fd){
+          var name = (fd.get('name')||'').trim();
+          if(!name){ showModalError('Name the podcast.'); return; }
+          setModalBusy(true);
+          db.doc('clients/'+clientId).update({name:name, hostName:(fd.get('hostName')||'').trim()}).then(function(){
+            closeModal(); showToast('success','Updated');
+          }).catch(function(err){ showModalError(errMsg(err)); });
+        }, 'Save');
     });
 
     var editOverviewBtn = document.getElementById('editOverviewBtn');
@@ -3830,7 +3848,7 @@ function renderAuthScreen(mode){
     '<div class="login-field"><label>Password</label><input required name="password" type="password" placeholder="••••••••" minlength="6"></div>'+
     (isSignup?'<div class="login-field"><label>Invite code (leave blank only if you\'re the first-ever account)</label><input name="inviteCode" type="text" placeholder="e.g. 9f2ac1"></div>':'')+
     (isSignup?'<div class="login-field"><label>Profile photo (must show your face)</label><div class="avatar-drop" id="avatarDrop"><div class="avatar-drop-hint" id="avatarHint">Click to choose a photo</div><input type="file" accept="image/*" id="avatarInput" style="display:none;"></div></div>':'')+
-    (isSignup?'<div class="login-field"><label>What do you prefer listening to when working?</label><div class="mood-grid" id="moodGrid">'+MOODS.map(function(m){return '<button type="button" class="mood-pick" data-mood="'+m.key+'">'+escapeHtml(m.label)+'</button>';}).join('')+'</div><input type="hidden" name="musicMood"></div>':'')+
+    (isSignup?'<div class="login-field"><label>What do you prefer listening to when working? (pick any number)</label><div class="mood-grid" id="moodGrid">'+MOODS.map(function(m){return '<button type="button" class="mood-pick" data-mood="'+m.key+'">'+escapeHtml(m.label)+'</button>';}).join('')+'</div><input type="hidden" name="musicMoods"></div>':'')+
     '<button type="submit" class="btn btn-primary" id="authSubmit">'+(isSignup?'Create account':'Sign in')+'</button>'+
     '</form>'+
     '<div class="login-switch">'+(isSignup?'Already have an account? <button type="button" id="authSwitch">Sign in</button>':'New here (have an invite code)? <button type="button" id="authSwitch">Create an account</button>')+'</div>'+
@@ -3848,12 +3866,28 @@ function renderAuthScreen(mode){
 
   if(isSignup){
     var moodGrid = document.getElementById('moodGrid');
-    var moodInput = document.querySelector('input[name=musicMood]');
+    var moodInput = document.querySelector('input[name=musicMoods]');
+    // Phase 4: multi-select (was one mood, click-to-replace) - any number
+    // of moods can be picked, and playback shuffles across all of them by
+    // default (see src/lib/music.js). "I'd rather not" stays mutually
+    // exclusive with everything else, same as before, since picking it
+    // means no music at all, not "shuffle between no-music and a mood."
+    function syncMoodInput(){
+      var picked = Array.prototype.filter.call(moodGrid.querySelectorAll('.mood-pick'), function(b){ return b.classList.contains('selected'); }).map(function(b){ return b.getAttribute('data-mood'); });
+      moodInput.value = picked.join(',');
+    }
     Array.prototype.forEach.call(moodGrid.querySelectorAll('.mood-pick'), function(btn){
       btn.addEventListener('click', function(){
-        Array.prototype.forEach.call(moodGrid.querySelectorAll('.mood-pick'), function(b){ b.classList.remove('selected'); });
-        btn.classList.add('selected');
-        moodInput.value = btn.getAttribute('data-mood');
+        var isNone = btn.getAttribute('data-mood')==='none';
+        if(isNone){
+          Array.prototype.forEach.call(moodGrid.querySelectorAll('.mood-pick'), function(b){ b.classList.remove('selected'); });
+          btn.classList.add('selected');
+        } else {
+          var noneBtn = moodGrid.querySelector('[data-mood="none"]');
+          if(noneBtn) noneBtn.classList.remove('selected');
+          btn.classList.toggle('selected');
+        }
+        syncMoodInput();
       });
     });
     var avatarDrop = document.getElementById('avatarDrop');
@@ -3891,7 +3925,7 @@ function renderAuthScreen(mode){
     task.then(function(result){
       if(isSignup && result && result.user){
         var uid = result.user.id;
-        var musicMood = fd.get('musicMood')||'';
+        var musicMoods = (fd.get('musicMoods')||'').split(',').filter(Boolean);
         var key = 'avatars/'+uid+'/photo.jpg';
         // These two used to be chained (mood-save only ran after the avatar
         // upload succeeded), so a single failed/slow upload silently took
@@ -3905,10 +3939,10 @@ function renderAuthScreen(mode){
             console.warn('[blue-kite-ops] avatar upload failed:', err);
             setTimeout(function(){ showToast('error', 'Your profile photo didn\'t save ('+errMsg(err)+'). Ask an admin to help you re-add it.'); }, 800);
           });
-        var moodDone = musicMood
-          ? db.doc('profiles/'+uid).update({ musicMood: musicMood }).catch(function(err){
+        var moodDone = musicMoods.length
+          ? db.doc('profiles/'+uid).update({ musicMoods: musicMoods }).catch(function(err){
               console.warn('[blue-kite-ops] music mood save failed:', err);
-              setTimeout(function(){ showToast('error', 'Your music mood didn\'t save ('+errMsg(err)+'). Ask an admin to help you set it.'); }, 800);
+              setTimeout(function(){ showToast('error', 'Your music mood(s) didn\'t save ('+errMsg(err)+'). Ask an admin to help you set them.'); }, 800);
             })
           : Promise.resolve();
         return Promise.all([avatarDone, moodDone]);
@@ -4170,7 +4204,8 @@ function hideIdleWarningOverlay(){
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
           listenForConnects(myUid, { onRing: handleIncomingRing, onRingMissed: handleRingMissed });
-          if(p.musicMood && p.musicMood!=='none'){ mountMusicPlayer(); musicPlayer.initPlayer('ytMusicMount', p.musicMood); }
+          var moods = profileMoods(p);
+          if(moods.length){ mountMusicPlayer(moods); musicPlayer.initPlayer('ytMusicMount', moods); }
           // Reconnect to an already-open clock-in (e.g. after a reload)
           // before ever deciding whether to show the "ready to start your
           // day?" prompt - showing that prompt to someone who's already
@@ -4187,8 +4222,18 @@ function hideIdleWarningOverlay(){
     }
   });
 })();
+// Phase 4: profiles.musicMood (one mood) is superseded by
+// profiles.musicMoods (an array) - falls back to wrapping the old single
+// value in a one-item array for anyone who signed up before this round,
+// same "live value, fall back to the old baked-in one" shape used
+// elsewhere in this file (e.g. stepDepIds()).
+function profileMoods(p){
+  if(p && p.musicMoods && p.musicMoods.length) return p.musicMoods;
+  if(p && p.musicMood && p.musicMood!=='none') return [p.musicMood];
+  return [];
+}
 var musicPlayerBuilt = false;
-function mountMusicPlayer(){
+function mountMusicPlayer(moods){
   var box = document.getElementById('musicPlayerBox');
   if(!box) return;
   if(!musicPlayerBuilt){
@@ -4198,6 +4243,16 @@ function mountMusicPlayer(){
     // regenerating this markup on every state change (as the old
     // self-hosted-<audio> version safely could) would tear that player
     // down and reconnect it constantly.
+    //
+    // The mood dropdown now lists only the moods THIS person actually
+    // picked (not every mood in the catalog), plus a "Mixed" option first -
+    // Phase 4: "playback shuffles across all selected moods by default,
+    // with ability to pick one specific category or continue mixed
+    // shuffle."
+    var moodOptions = '<option value="">Mixed (all selected)</option>'+(moods||[]).map(function(key){
+      var m = MOODS.filter(function(x){return x.key===key;})[0];
+      return '<option value="'+escapeHtml(key)+'">'+escapeHtml(m?m.label:key)+'</option>';
+    }).join('');
     box.innerHTML =
       '<div class="music-player">'+
         '<div class="music-frame" id="ytMusicMount"></div>'+
@@ -4208,13 +4263,13 @@ function mountMusicPlayer(){
           '<button type="button" class="music-btn" id="musicMuteBtn" title="Mute">🔊</button>'+
           '<input type="range" class="music-volume" id="musicVolume" min="0" max="100" value="70" title="Volume">'+
         '</div>'+
-        '<select class="music-mood-select" id="musicMoodSelect">'+MOODS.filter(function(m){return m.key!=='none';}).map(function(m){return '<option value="'+m.key+'">'+escapeHtml(m.label)+'</option>';}).join('')+'</select>'+
+        '<select class="music-mood-select" id="musicMoodSelect">'+moodOptions+'</select>'+
       '</div>';
     document.getElementById('musicToggleBtn').addEventListener('click', musicPlayer.toggle);
     document.getElementById('musicSkipBtn').addEventListener('click', musicPlayer.next);
     document.getElementById('musicMuteBtn').addEventListener('click', musicPlayer.toggleMute);
     document.getElementById('musicVolume').addEventListener('input', function(e){ musicPlayer.setVolume(+e.target.value); });
-    document.getElementById('musicMoodSelect').addEventListener('change', function(e){ musicPlayer.setMood(e.target.value); });
+    document.getElementById('musicMoodSelect').addEventListener('change', function(e){ musicPlayer.setFilter(e.target.value||null); });
   }
   musicPlayer.onPlayerChange(function(s){
     var meta = document.getElementById('musicMeta');
@@ -4224,14 +4279,14 @@ function mountMusicPlayer(){
     var moodSelect = document.getElementById('musicMoodSelect');
     if(!meta) return; // widget got torn down (e.g. sign-out) - nothing to update
     if(!s.hasTracks){
-      meta.textContent = 'No tracks in "'+(s.moodLabel||s.mood||'')+'" yet';
+      meta.textContent = 'No tracks in "'+(s.moodLabel||'')+'" yet';
       return;
     }
     meta.textContent = (s.track && s.track.title) ? s.track.title : (s.moodLabel||'Loading…');
     if(toggleBtn) toggleBtn.textContent = s.playing ? '❚❚' : '▶';
     if(muteBtn) muteBtn.textContent = s.muted ? '🔇' : '🔊';
     if(volume && document.activeElement!==volume) volume.value = s.volume;
-    if(moodSelect && moodSelect.value!==s.mood) moodSelect.value = s.mood;
+    if(moodSelect && document.activeElement!==moodSelect) moodSelect.value = s.filterMood || '';
   });
 }
 

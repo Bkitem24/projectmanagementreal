@@ -138,12 +138,22 @@ function loadYouTubeApi() {
 }
 
 let player = null;
-let currentMood = null;
+// Phase 4 (2026-09-28): signup moved from picking ONE mood to picking any
+// number of them - activeMoods is that full set; filterMood optionally
+// narrows playback down to just one of them (null means "shuffle across
+// every selected mood", the default, per Humayun's confirmed scope:
+// "playback shuffles across all selected moods by default, with ability to
+// pick one specific category or continue mixed shuffle").
+let activeMoods = [];
+let filterMood = null;
 let currentItem = null;
 let listeners = new Set();
 let pollTimer = null;
 
-function pool() { return (CATALOG[currentMood] && CATALOG[currentMood].items) || []; }
+function pool() {
+  const moods = filterMood ? [filterMood] : activeMoods;
+  return moods.reduce((acc, m) => acc.concat((CATALOG[m] && CATALOG[m].items) || []), []);
+}
 
 function pickRandom(excludeItem) {
   const items = pool();
@@ -173,8 +183,9 @@ function state() {
     try { volume = player.getVolume ? player.getVolume() : 70; } catch (e) {}
   }
   return {
-    mood: currentMood,
-    moodLabel: (CATALOG[currentMood] || {}).label || '',
+    activeMoods,
+    filterMood,
+    moodLabel: filterMood ? ((CATALOG[filterMood] || {}).label || '') : 'Mixed shuffle',
     hasTracks: items.length > 0,
     track: title ? { title } : null,
     isPlaylist: !!(currentItem && currentItem.type === 'playlist'),
@@ -206,9 +217,10 @@ function startPolling() {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-export function initPlayer(mountElId, mood) {
-  currentMood = mood && CATALOG[mood] ? mood : null;
-  if (!currentMood) { notify(); return; }
+export function initPlayer(mountElId, moods) {
+  activeMoods = (moods || []).filter((m) => CATALOG[m]);
+  filterMood = null;
+  if (!activeMoods.length) { notify(); return; }
   loadYouTubeApi().then((YT) => {
     if (player) { loadItem(pickRandom(), false); return; }
     player = new YT.Player(mountElId, {
@@ -236,10 +248,14 @@ export function initPlayer(mountElId, mood) {
 
 export function onPlayerChange(cb) { listeners.add(cb); cb(state()); return () => listeners.delete(cb); }
 
-export function setMood(mood) {
-  if (!CATALOG[mood]) return;
+// Narrows playback to just one already-selected mood, or (mood == null,
+// or anything not currently in activeMoods) back to shuffling across every
+// selected mood - the "pick one specific category or continue mixed
+// shuffle" half of the ask.
+export function setFilter(mood) {
+  const next = mood && activeMoods.indexOf(mood) > -1 ? mood : null;
   const wasPlaying = state().playing;
-  currentMood = mood;
+  filterMood = next;
   loadItem(pickRandom(), wasPlaying);
 }
 
@@ -251,7 +267,7 @@ export function toggle() { if (state().playing) pause(); else play(); }
 // playlist entry, step to its next track (YouTube's own order); for a
 // standalone video, jump to a new random pick from the category.
 export function next() {
-  if (!currentMood) return;
+  if (!activeMoods.length) return;
   if (currentItem && currentItem.type === 'playlist' && player && player.nextVideo) {
     player.nextVideo();
     notify();
