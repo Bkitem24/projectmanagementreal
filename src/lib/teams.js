@@ -55,6 +55,15 @@ export async function listInvites(teamId) {
   return data || [];
 }
 
+// Cancel a still-pending invite (never one that's already been used to
+// create an account - see schema_v9.sql's delete policy, which enforces
+// that at the database level too, not just here). Needs schema_v9.sql,
+// which is what actually adds the delete policy that lets this succeed at
+// all - before it, RLS denied every delete on `invites` outright.
+export async function cancelInvite(id) {
+  await db.doc('invites/' + id).delete();
+}
+
 // ---------------------------------------------------------------------------
 // Services - the controlled vocabulary. scope is 'global' or 'team'.
 // ---------------------------------------------------------------------------
