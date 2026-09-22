@@ -31,6 +31,24 @@ var CLIENT_COLORS = ['#2f8fd1','#3f6b8a','#7a5ea8','#4f8f6b','#b8567a','#a15c2f'
 var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
 function roleOf(key){ for(var i=0;i<ROLES.length;i++){ if(ROLES[i].key===key) return ROLES[i]; } return null; }
+// ---------- MULTIPLE DEPENDENCIES (2026-09-22) ----------
+// A step (and the tasks generated from it) can now wait on more than one
+// other step, not just one. Both helpers below fall back to the old
+// single-value field (dependsOnStepId) when the new array field
+// (dependsOnStepIds) isn't set - this is what lets a template step or a
+// task generated BEFORE this round keep working exactly as it did,
+// without any data migration: nothing has to rewrite old rows, they just
+// read as a one-item array.
+function stepDepIds(step){
+  if(step && step.dependsOnStepIds && step.dependsOnStepIds.length) return step.dependsOnStepIds;
+  if(step && step.dependsOnStepId) return [step.dependsOnStepId];
+  return [];
+}
+function taskDepStepIds(task){
+  if(task && task.dependsOnStepIds && task.dependsOnStepIds.length) return task.dependsOnStepIds;
+  if(task && task.dependsOnStepId) return [task.dependsOnStepId];
+  return [];
+}
 function ordinal(n){ if(n===-1) return 'Last'; var s=['','1st','2nd','3rd','4th']; return s[n]||(n+'th'); }
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
 // Turns bare URLs typed into plain comment text into real clickable links -
@@ -405,7 +423,7 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
             return db.doc('tasks/'+taskId).set({
               episodeId: epId, episodeTitle: rule.label, clientId: rule.clientId, clientName: clientMeta.name,
               role: s.role, label: s.label, group: s.group||'', orderNum: s.order||0,
-              dependsOnStepId: s.dependsOnStepId||null, dueDate: iso, done:false, doneByUserId:null, doneAt:null,
+              dependsOnStepIds: stepDepIds(s), dueDate: iso, done:false, doneByUserId:null, doneAt:null,
               createdAt: new Date().toISOString()
             });
           }));
@@ -477,11 +495,34 @@ document.addEventListener('keydown', function(e){
 // clocked in - clocks out for real (server-write, not just the local UI)
 // before actually letting the window close, exactly like the explicit
 // "Sign out" button already does (see signOutBtn.onclick below).
+//
+// Round 8 (2026-09-22): switched the confirmation itself from the browser's
+// own window.confirm() to the Tauri dialog plugin's confirm() (see the
+// dialogMod import below). This is a well-documented Tauri/WebView2 gap:
+// window.confirm() only reliably shows when it's called directly inside a
+// synchronous DOM click handler with a live "user activation" flag - every
+// OTHER confirm() in this file is wired that way (delete/archive buttons,
+// etc.) and those were never reported broken. This one is different: it
+// fires from appWindow.onCloseRequested(), which arrives asynchronously
+// over Tauri's own IPC/event system after the OS "X" button is clicked, not
+// as a direct click handler - by the time it runs, that activation flag is
+// gone, so window.confirm() silently no-ops (observed as "it still doesn't
+// confirm or give a warning" - it wasn't skipping the dialog on purpose, it
+// was trying to show one that WebView2 wouldn't render). Tauri's own
+// plugin-dialog confirm() goes through the Rust side instead, so it renders
+// a real native dialog regardless of gesture context. That plugin is
+// already a project dependency (see src/lib/r2.js's Save-As flow) and
+// already registered in src-tauri/src/main.rs, so this needed no new Cargo
+// dependency - only the "dialog:allow-message" permission added to
+// src-tauri/capabilities/default.json (confirm()/ask() are both thin
+// wrappers around the plugin's single "message" command).
 (async function wireCloseConfirmation(){
-  var appWindow;
+  var appWindow, dialogConfirm;
   try {
     var mod = await import('@tauri-apps/api/window');
     appWindow = mod.getCurrentWindow();
+    var dialogMod = await import('@tauri-apps/plugin-dialog');
+    dialogConfirm = dialogMod.confirm;
   } catch (e) { return; } // not running inside the Tauri shell (e.g. `npm run dev` in a plain browser) - nothing to wire up
   appWindow.onCloseRequested(async function(event){
     event.preventDefault();
@@ -489,7 +530,9 @@ document.addEventListener('keydown', function(e){
     var message = clockedIn
       ? 'You\'re currently clocked in - exiting will clock you out. Exit Blue Kite Ops?'
       : 'Exit Blue Kite Ops?';
-    if(!confirm(message)) return;
+    var ok = false;
+    try { ok = await dialogConfirm(message, { title: 'Blue Kite Ops', kind: 'warning' }); } catch (e) { ok = confirm(message); } // fall back to window.confirm() if the plugin call itself throws, rather than silently exiting with no prompt at all
+    if(!ok) return;
     if(clockedIn){
       // Race against a short timeout rather than awaiting the network write
       // unconditionally - someone who just confirmed "Exit" while offline
@@ -571,17 +614,22 @@ function renderHome(){
     '<div class="page-sub">Every project Blue Kite produces for'+(myTeamId&&!isAdmin()?' - '+escapeHtml(teamName(myTeamId)):'')+'.</div></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Due soon</h2></div>'+
     '<div id="dueSoonStrip" class="strip"><div class="skeleton" style="height:44px;"></div></div></div>'+
-    '<div class="section"><div class="section-head"><h2 class="section-title">Clients</h2></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Clients</h2>'+
+    (canManage()?'<label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="showArchivedClientsToggle"> Show archived</label>':'')+
+    '</div>'+
     '<div id="clientGrid" class="card-grid"><div class="skeleton" style="height:150px;"></div></div></div>'
   );
   renderSpotlight(document.getElementById('spotlightBox'));
 
   var today = todayISO();
-  var unsub1 = db.collection('episodes').where('dueDate','>=',today).orderBy('dueDate','asc').limit(6).onSnapshot(function(snap){
+  // Archived episodes shouldn't show up as "due soon" - they're meant to
+  // be out of the way, not still nudging someone toward them.
+  var unsub1 = db.collection('episodes').where('dueDate','>=',today).orderBy('dueDate','asc').limit(20).onSnapshot(function(snap){
     var strip = document.getElementById('dueSoonStrip');
     if(!strip) return;
-    if(snap.empty){ strip.innerHTML = '<div class="empty-state">Nothing due yet - generate episodes from a client\'s schedule.</div>'; return; }
-    strip.innerHTML = snap.docs.map(function(d){
+    var docs = snap.docs.filter(function(d){ return !d.data().archived; }).slice(0,6);
+    if(!docs.length){ strip.innerHTML = '<div class="empty-state">Nothing due yet - generate episodes from a client\'s schedule.</div>'; return; }
+    strip.innerHTML = docs.map(function(d){
       var e = d.data();
       var status = dueStatus(e.dueDate,false);
       return '<a class="strip-item" href="#/episode/'+d.id+'">'+
@@ -593,10 +641,16 @@ function renderHome(){
   }, function(){ var s=document.getElementById('dueSoonStrip'); if(s) s.innerHTML='<div class="empty-state">Could not load.</div>'; });
   activeUnsubs.push(unsub1);
 
-  var unsub2 = db.collection('clients').orderBy('createdAt','asc').onSnapshot(function(snap){
+  // Archived clients are kept out of the main grid by default - kept as a
+  // client-side filter (not a query filter) so toggling "Show archived"
+  // doesn't need a second subscription, just a re-render of the same data.
+  var lastClientSnap = null;
+  var showArchivedClients = false;
+  function renderClientGrid(){
     var grid = document.getElementById('clientGrid');
-    if(!grid) return;
-    var cards = snap.docs.map(function(d,i){
+    if(!grid || !lastClientSnap) return;
+    var docs = lastClientSnap.docs.filter(function(d){ return showArchivedClients || !d.data().archived; });
+    var cards = docs.map(function(d,i){
       var c = d.data();
       var color = c.color || CLIENT_COLORS[i%CLIENT_COLORS.length];
       return '<a class="client-card" href="#/client/'+d.id+'">'+
@@ -605,15 +659,21 @@ function renderHome(){
         '<div class="client-card-name">'+escapeHtml(c.name)+'</div>'+
         '<div class="client-card-host">Hosted by '+escapeHtml(c.hostName||'-')+'</div>'+
         '<div class="client-card-tagline">'+escapeHtml(c.tagline||'')+'</div>'+
-        '<div class="client-card-foot"><span>'+(c.services?c.services.length:0)+' services</span>'+(isAdmin()?'<span class="badge badge-team">'+escapeHtml(teamName(c.teamId))+'</span>':'')+(c.example?'<span class="badge badge-upcoming">Example</span>':'<span>View board →</span>')+'</div>'+
+        '<div class="client-card-foot"><span>'+(c.services?c.services.length:0)+' services</span>'+(isAdmin()?'<span class="badge badge-team">'+escapeHtml(teamName(c.teamId))+'</span>':'')+(c.archived?'<span class="badge" style="background:var(--line-soft);">Archived</span>':'')+(c.example?'<span class="badge badge-upcoming">Example</span>':'<span>View board →</span>')+'</div>'+
         '</div></a>';
     }).join('');
     if(canManage()) cards += '<button type="button" class="add-client-card" id="addClientCard">+ Add a client</button>';
-    grid.innerHTML = cards || '<div class="empty-state">No clients in your team yet.</div>';
+    grid.innerHTML = cards || '<div class="empty-state">No clients'+(showArchivedClients?' in your team yet':' - toggle "Show archived" above if you\'re looking for one you archived')+'.</div>';
     var btn = document.getElementById('addClientCard');
     if(btn) btn.addEventListener('click', openAddClientModal);
+  }
+  var unsub2 = db.collection('clients').orderBy('createdAt','asc').onSnapshot(function(snap){
+    lastClientSnap = snap;
+    renderClientGrid();
   }, function(){});
   activeUnsubs.push(unsub2);
+  var archToggle = document.getElementById('showArchivedClientsToggle');
+  if(archToggle) archToggle.addEventListener('change', function(){ showArchivedClients = archToggle.checked; renderClientGrid(); });
 }
 
 function openAddClientModal(){
@@ -652,9 +712,12 @@ function renderClient(clientId){
     var c = snap.data();
     var mgr = canManage();
     app.innerHTML =
-      '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+'</h1>'+
+      '<div class="page-head"><div><div class="eyebrow">Client</div><h1 class="page-title">'+escapeHtml(c.name)+(c.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+'</h1>'+
       '<div class="page-sub">Hosted by '+escapeHtml(c.hostName||'-')+' · <span id="clientTeamRow">Team: <b>'+escapeHtml(teamName(c.teamId))+'</b>'+(isAdmin()?' <button type="button" class="btn btn-sm" id="editTeamBtn" style="width:auto;padding:1px 8px;font-size:11px;vertical-align:middle;">Change</button>':'')+'</span></div></div>'+
+      '<div style="display:flex;align-items:flex-start;gap:8px;flex-wrap:wrap;">'+
+      (mgr?'<button type="button" class="btn btn-sm" id="archiveClientBtn">'+(c.archived?'Unarchive':'Archive')+'</button><button type="button" class="btn btn-sm btn-danger" id="deleteClientBtn">Delete permanently</button>':'')+
       (mgr?'<button type="button" class="btn btn-primary btn-sm" id="genEpisodesBtn">Generate upcoming episodes</button>':'')+
+      '</div>'+
       '</div>'+
       '<div class="client-card-rail'+(c.imageUrl?'':' no-image')+'" style="margin-bottom:18px;border-radius:14px;height:150px;position:relative;'+(c.imageUrl?'background-image:url(\''+escapeHtml(c.imageUrl)+'\');background-size:cover;background-position:center;':'background:linear-gradient(135deg,var(--blue-soft),var(--line-soft));')+'">'+
       (mgr?'<label class="btn btn-sm" style="position:absolute;bottom:10px;right:10px;cursor:pointer;">Change photo<input type="file" accept="image/*" id="clientImageInput" style="display:none;"></label>':'')+
@@ -673,7 +736,10 @@ function renderClient(clientId){
       (mgr?'<button type="button" class="btn btn-sm" id="addRuleBtn" style="margin-top:10px;">+ Add schedule rule</button>':'')+
       '</div></div>'+
       '<div class="section"><div class="section-head"><h2 class="section-title">Episodes</h2>'+
+      '<div style="display:flex;align-items:center;gap:10px;">'+
+      (mgr?'<label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;cursor:pointer;"><input type="checkbox" id="showArchivedEpisodesToggle"> Show archived</label>':'')+
       (mgr?'<button type="button" class="btn btn-sm" id="addEpisodeBtn">+ One-off episode</button>':'')+
+      '</div>'+
       '</div>'+
       '<div id="episodeList" class="episode-list"><div class="skeleton" style="height:50px;"></div></div></div>'+
       (mgr?'<div class="section"><div class="section-head"><h2 class="section-title">Workflow templates</h2><button type="button" class="btn btn-sm" id="addTemplateBtn">+ New template</button></div><div id="templateBox"></div></div>':'');
@@ -700,6 +766,29 @@ function renderClient(clientId){
         var made = created.filter(Boolean).length;
         showToast('success', made ? ('Generated '+made+' new episode'+(made===1?'':'s')) : 'Already up to date - nothing new to generate.');
       }).catch(function(err){ genBtn.disabled=false; genBtn.textContent='Generate upcoming episodes'; showToast('error', errMsg(err)); });
+    });
+
+    var archiveClientBtn = document.getElementById('archiveClientBtn');
+    if(archiveClientBtn) archiveClientBtn.addEventListener('click', function(){
+      var next = !c.archived;
+      if(!confirm(next ? 'Archive '+c.name+'? It will be hidden from the main client list but all its episodes, tasks, comments and attachments are kept - you can unarchive it later.' : 'Unarchive '+c.name+'?')) return;
+      db.doc('clients/'+clientId).update({archived: next}).then(function(){ showToast('success', next?'Client archived':'Client unarchived'); }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+    var deleteClientBtn = document.getElementById('deleteClientBtn');
+    if(deleteClientBtn) deleteClientBtn.addEventListener('click', function(){
+      // A permanent delete cascades away every episode, task, template,
+      // schedule rule, comment and attachment tied to this client (the
+      // database's own foreign keys already do this cleanly - see
+      // schema.sql) - real, irreversible history loss, so this asks for
+      // the client's exact name typed back rather than just a yes/no
+      // confirm, the same weight as any other "type to confirm" delete.
+      var typed = prompt('This permanently deletes "'+c.name+'" and ALL of its episodes, tasks, comments and attachments. This cannot be undone.\n\nType the client\'s name to confirm:');
+      if(typed===null) return;
+      if(typed.trim()!==c.name){ showToast('error','Name didn\'t match - nothing was deleted.'); return; }
+      db.doc('clients/'+clientId).delete().then(function(){
+        showToast('success', c.name+' deleted');
+        location.hash = '#/';
+      }).catch(function(err){ showToast('error', errMsg(err)); });
     });
 
     var imgInput = document.getElementById('clientImageInput');
@@ -785,21 +874,30 @@ function renderClient(clientId){
     }, function(){});
     activeUnsubs.push(unsubSched);
 
-    var unsubEp = db.collection('episodes').where('clientId','==',clientId).orderBy('dueDate','asc').limit(30).onSnapshot(function(es){
+    var lastEpSnap = null;
+    var showArchivedEpisodes = false;
+    function renderEpisodeList(){
       var list = document.getElementById('episodeList');
-      if(!list) return;
-      if(es.empty){ list.innerHTML = '<div class="empty-state"><strong>No episodes yet</strong>'+(mgr?'Add a schedule rule, then generate episodes.':'Ask a manager to set up this client\'s schedule.')+'</div>'; return; }
-      list.innerHTML = es.docs.map(function(d){
+      if(!list || !lastEpSnap) return;
+      var docs = lastEpSnap.docs.filter(function(d){ return showArchivedEpisodes || !d.data().archived; });
+      if(!docs.length){ list.innerHTML = '<div class="empty-state"><strong>No episodes yet</strong>'+(mgr?'Add a schedule rule, then generate episodes.':'Ask a manager to set up this client\'s schedule.')+'</div>'; return; }
+      list.innerHTML = docs.map(function(d){
         var e = d.data();
         var status = dueStatus(e.dueDate,false);
         return '<a class="episode-row" href="#/episode/'+d.id+'">'+
           '<span class="episode-date mono">'+fmtDate(e.dueDate)+'</span>'+
-          '<div class="episode-main"><div class="episode-title">'+escapeHtml(e.title)+'</div>'+
+          '<div class="episode-main"><div class="episode-title">'+escapeHtml(e.title)+(e.archived?' <span class="badge" style="background:var(--line-soft);">Archived</span>':'')+'</div>'+
           '<div class="episode-sub">'+(e.taskCount||0)+' tasks'+(e.paid?' · Paid $'+e.amount:'')+'</div></div>'+
           '<span class="badge badge-'+status+'">'+statusLabel(status)+'</span></a>';
       }).join('');
+    }
+    var unsubEp = db.collection('episodes').where('clientId','==',clientId).orderBy('dueDate','asc').limit(30).onSnapshot(function(es){
+      lastEpSnap = es;
+      renderEpisodeList();
     }, function(){});
     activeUnsubs.push(unsubEp);
+    var epArchToggle = document.getElementById('showArchivedEpisodesToggle');
+    if(epArchToggle) epArchToggle.addEventListener('change', function(){ showArchivedEpisodes = epArchToggle.checked; renderEpisodeList(); });
 
     if(mgr){
       var tplBox = document.getElementById('templateBox');
@@ -826,12 +924,12 @@ function mountTemplatesBox(clientId, box){
       return '<div class="panel" style="margin-bottom:12px;" data-tpl-panel="'+d.id+'"><h3>'+escapeHtml(t.name)+'</h3>'+
         '<div class="step-list" data-tpl-steps="'+d.id+'">'+steps.map(function(s,i){
           var r = roleOf(s.role);
-          var dep = s.dependsOnStepId ? stepById[s.dependsOnStepId] : null;
+          var deps = stepDepIds(s).map(function(id){ return stepById[id]; }).filter(Boolean);
           return '<div class="step-edit-row" draggable="true" data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" data-idx="'+i+'">'+
             '<span class="step-drag-handle" title="Drag to reorder">⋮⋮</span>'+
             '<span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):s.role)+'</span>'+
-            '<span style="flex:1;">'+escapeHtml(s.label)+(dep?' <span class="task-waiting">⛔ waits for: '+escapeHtml(dep.label)+'</span>':'')+'</span>'+
-            '<button type="button" class="step-edit-remove" data-set-dep data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" title="Choose which step this waits on">'+(dep?'Change dependency':'+ Depends on')+'</button>'+
+            '<span style="flex:1;">'+escapeHtml(s.label)+(deps.length?' <span class="task-waiting">⛔ waits for: '+deps.map(function(dd){return escapeHtml(dd.label);}).join(', ')+'</span>':'')+'</span>'+
+            '<button type="button" class="step-edit-remove" data-set-dep data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'" title="Choose which steps this waits on">'+(deps.length?'Change dependencies':'+ Depends on')+'</button>'+
             '<button type="button" class="step-edit-remove" data-remove-step data-tpl="'+d.id+'" data-step="'+escapeHtml(s.stepId)+'">remove</button></div>';
         }).join('')+'</div>'+
         '<div class="manager-only"><button type="button" class="btn btn-sm" data-add-step="'+d.id+'">+ Add step</button></div>'+
@@ -857,8 +955,16 @@ function mountTemplatesBox(clientId, box){
           var steps2 = (t2.steps||[]).filter(function(s){ return s.stepId!==stepId; });
           // A step that depended on the one being removed would otherwise
           // stay permanently blocked on a dependency that no longer exists -
-          // clear it instead of leaving a dangling reference.
-          steps2.forEach(function(s){ if(s.dependsOnStepId===stepId) s.dependsOnStepId=null; });
+          // drop just that one id from its list instead of leaving a
+          // dangling reference (the old single-value field is cleared too,
+          // for a step that was never edited since the multi-dependency
+          // change and still only has that field).
+          steps2.forEach(function(s){
+            if(s.dependsOnStepId===stepId) s.dependsOnStepId=null;
+            if(s.dependsOnStepIds && s.dependsOnStepIds.indexOf(stepId)>-1){
+              s.dependsOnStepIds = s.dependsOnStepIds.filter(function(id){ return id!==stepId; });
+            }
+          });
           return db.doc('templates/'+tplId).update({steps:steps2});
         }).catch(function(err){ showToast('error', errMsg(err)); });
       });
@@ -879,33 +985,38 @@ function openSetStepDependencyModal(tplId, stepId){
     var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
     var self = steps.filter(function(s){ return s.stepId===stepId; })[0];
     if(!self){ showToast('error','That step no longer exists - try refreshing.'); return; }
+    var selfDeps = stepDepIds(self);
     var choices = steps.filter(function(s){ return s.stepId!==stepId; });
-    var opts = '<option value="">No dependency</option>'+choices.map(function(s){
-      return '<option value="'+escapeHtml(s.stepId)+'" '+(self.dependsOnStepId===s.stepId?'selected':'')+'>'+escapeHtml(s.label)+'</option>';
-    }).join('');
-    openModal('Set dependency for "'+escapeHtml(self.label)+'"',
-      '<div class="field"><label>This step can\'t be checked off until…</label><select name="dependsOnStepId">'+opts+'</select></div>'+
+    var checksHtml = choices.length ? choices.map(function(s){
+      return '<div class="check-row"><input type="checkbox" name="dependsOnStepIds" value="'+escapeHtml(s.stepId)+'" id="dep_'+escapeHtml(s.stepId)+'" '+(selfDeps.indexOf(s.stepId)>-1?'checked':'')+'><label for="dep_'+escapeHtml(s.stepId)+'">'+escapeHtml(s.label)+'</label></div>';
+    }).join('') : '<div class="field-hint">No other steps on this template yet.</div>';
+    openModal('Set dependencies for "'+escapeHtml(self.label)+'"',
+      '<div class="field"><label>This step can\'t be checked off until ALL of these are done:</label>'+checksHtml+'</div>'+
       '<div class="field-hint">Applies to every future episode generated from this template. Episodes already generated keep whatever was set when they were created.</div>',
       function(fd){
         setModalBusy(true);
-        var val = fd.get('dependsOnStepId')||'';
-        // Guard against a dependency loop (A waits on B which waits on A,
-        // directly or through a longer chain) - that would leave every
-        // task in the cycle permanently unchecking, with no way out except
-        // editing the template again. Walk the chain from the chosen
-        // prerequisite and refuse if it ever leads back to this step.
-        var cur = val, seen = {}, loop = false;
-        while(cur){
-          if(cur===stepId){ loop = true; break; }
-          if(seen[cur]) break;
-          seen[cur] = true;
-          var next = steps.filter(function(s){ return s.stepId===cur; })[0];
-          cur = next ? next.dependsOnStepId : null;
+        var chosen = fd.getAll('dependsOnStepIds');
+        // Guard against a dependency loop (A waits on B which, directly or
+        // through others, waits back on A) - that would leave every task
+        // in the cycle permanently unable to check off, with no way out
+        // except editing the template again. Now that a step can depend on
+        // several others at once, this is a real graph search (does any
+        // path out of any chosen step lead back to this one), not just a
+        // single chain to walk.
+        var stepById2 = {}; steps.forEach(function(s){ stepById2[s.stepId]=s; });
+        function leadsBackToSelf(fromId, seen){
+          if(fromId===stepId) return true;
+          if(seen[fromId]) return false;
+          seen[fromId] = true;
+          var s = stepById2[fromId];
+          if(!s) return false;
+          return stepDepIds(s).some(function(id){ return leadsBackToSelf(id, seen); });
         }
-        if(loop){ showModalError('That would create a loop - two steps waiting on each other (directly or through other steps). Choose a different step.'); return; }
-        var updated = steps.map(function(s){ return s.stepId===stepId ? Object.assign({}, s, { dependsOnStepId: val||null }) : s; });
+        var loop = chosen.some(function(id){ return leadsBackToSelf(id, {}); });
+        if(loop){ showModalError('That would create a loop - one of these steps (directly or through others) already waits on this one. Choose different steps.'); return; }
+        var updated = steps.map(function(s){ return s.stepId===stepId ? Object.assign({}, s, { dependsOnStepIds: chosen, dependsOnStepId: null }) : s; });
         db.doc('templates/'+tplId).update({steps:updated}).then(function(){
-          closeModal(); showToast('success', val ? 'Dependency set' : 'Dependency cleared');
+          closeModal(); showToast('success', chosen.length ? 'Dependencies set' : 'Dependencies cleared');
         }).catch(function(err){ showModalError(errMsg(err)); });
       }, 'Save');
   }).catch(function(err){ showToast('error', errMsg(err)); });
@@ -1131,24 +1242,24 @@ function openAddStepModal(templateId){
   db.doc('templates/'+templateId).get().then(function(snap){
     var t = snap.data();
     var existingSteps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
-    var opts = '<option value="">No dependency</option>'+existingSteps.map(function(s){
-      return '<option value="'+escapeHtml(s.stepId)+'">'+escapeHtml(s.label)+'</option>';
-    }).join('');
+    var checksHtml = existingSteps.length ? existingSteps.map(function(s){
+      return '<div class="check-row"><input type="checkbox" name="dependsOnStepIds" value="'+escapeHtml(s.stepId)+'" id="newdep_'+escapeHtml(s.stepId)+'"><label for="newdep_'+escapeHtml(s.stepId)+'">'+escapeHtml(s.label)+'</label></div>';
+    }).join('') : '<div class="field-hint">No other steps yet.</div>';
     openModal('Add workflow step', '<div class="field"><label>Step description</label><input required name="label" type="text" placeholder="e.g. Edit trailer"></div>'+
       '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
       '<div class="field"><label>Group</label><input name="group" type="text" placeholder="e.g. Editing"></div></div>'+
-      '<div class="field"><label>Depends on (optional)</label><select name="dependsOnStepId">'+opts+'</select></div>'+
-      '<div class="field-hint">Every task generated from this step - in every future episode - is locked until the chosen step is checked off. You can change this later from the step\'s "Change dependency" button.</div>',
+      '<div class="field"><label>Depends on (optional, pick any number)</label>'+checksHtml+'</div>'+
+      '<div class="field-hint">Every task generated from this step - in every future episode - is locked until ALL chosen steps are checked off. You can change this later from the step\'s "Change dependencies" button.</div>',
       function(fd){
         var label = (fd.get('label')||'').trim();
         if(!label){ showModalError('Describe the step.'); return; }
         setModalBusy(true);
-        var dependsOnStepId = fd.get('dependsOnStepId')||null;
+        var dependsOnStepIds = fd.getAll('dependsOnStepIds');
         db.doc('templates/'+templateId).get().then(function(freshSnap){
           var ft = freshSnap.data();
           var freshSteps = (ft.steps||[]).slice();
           var maxOrder = freshSteps.reduce(function(m,s){return Math.max(m,s.order||0);},0);
-          freshSteps.push({stepId:'s'+uid8(), order:maxOrder+1, role:fd.get('role'), group:(fd.get('group')||'').trim(), label:label, dependsOnStepId: dependsOnStepId});
+          freshSteps.push({stepId:'s'+uid8(), order:maxOrder+1, role:fd.get('role'), group:(fd.get('group')||'').trim(), label:label, dependsOnStepIds: dependsOnStepIds});
           return db.doc('templates/'+templateId).update({steps:freshSteps});
         }).then(function(){
           closeModal(); showToast('success', 'Added step');
@@ -1166,9 +1277,11 @@ function renderEpisode(episodeId){
     var e = snap.data();
     app.innerHTML =
       '<div class="page-head"><div><div class="eyebrow"><a href="#/client/'+e.clientId+'" style="color:var(--muted);text-decoration:none;">'+escapeHtml(e.clientName)+'</a></div>'+
-      '<h1 class="page-title">'+escapeHtml(e.title)+'</h1>'+
+      '<h1 class="page-title">'+escapeHtml(e.title)+(e.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+'</h1>'+
       '<div class="page-sub">'+fmtDateFull(e.dueDate)+(e.paid?' · Paid appearance ($'+e.amount+')':'')+'</div></div>'+
-      '<div id="epStatusBadge"></div></div>'+
+      '<div style="display:flex;align-items:flex-start;gap:8px;">'+
+      (canManage()?'<button type="button" class="btn btn-sm" id="archiveEpisodeBtn">'+(e.archived?'Unarchive':'Archive')+'</button><button type="button" class="btn btn-sm btn-danger" id="deleteEpisodeBtn">Delete</button>':'')+
+      '<div id="epStatusBadge"></div></div></div>'+
       '<div class="progress-bar"><div class="progress-fill" id="epProgressFill" style="width:0%"></div></div>'+
       (canManage()?'<div style="margin-top:14px;"><button type="button" class="btn btn-sm" id="addCustomTaskBtn">+ Add custom task</button></div>':'')+
       '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>'+
@@ -1178,6 +1291,20 @@ function renderEpisode(episodeId){
 
     var addCustomBtn = document.getElementById('addCustomTaskBtn');
     if(addCustomBtn) addCustomBtn.addEventListener('click', function(){ openAddCustomTaskModal(episodeId, e); });
+    var archiveEpBtn = document.getElementById('archiveEpisodeBtn');
+    if(archiveEpBtn) archiveEpBtn.addEventListener('click', function(){
+      var next = !e.archived;
+      if(!confirm(next ? 'Archive "'+e.title+'"? It will be hidden from the client\'s episode list but all its tasks and discussion are kept - you can unarchive it later.' : 'Unarchive "'+e.title+'"?')) return;
+      db.doc('episodes/'+episodeId).update({archived: next}).then(function(){ showToast('success', next?'Episode archived':'Episode unarchived'); }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+    var deleteEpBtn = document.getElementById('deleteEpisodeBtn');
+    if(deleteEpBtn) deleteEpBtn.addEventListener('click', function(){
+      if(!confirm('Permanently delete "'+e.title+'" and all of its tasks, comments and attachments? This cannot be undone.')) return;
+      db.doc('episodes/'+episodeId).delete().then(function(){
+        showToast('success', 'Episode deleted');
+        location.hash = '#/client/'+e.clientId;
+      }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
     loadCollab('episode', episodeId, document.getElementById('epCollab'));
 
     var unsubTasks = db.collection('tasks').where('episodeId','==',episodeId).orderBy('orderNum','asc').onSnapshot(function(ts){
@@ -1185,25 +1312,42 @@ function renderEpisode(episodeId){
       if(!box) return;
       if(ts.empty){ box.innerHTML = '<div class="empty-state">No tasks on this episode.</div>'; return; }
       var groups = {}; var order = [];
+      var completed = [];
       var doneCount = 0;
       var taskById = {};
+      // Build the full lookup table first, in one pass over every sibling
+      // task (this query isn't filtered by done, unlike the Board's) - a
+      // dependency lookup below needs every task, done or not, already
+      // available regardless of grouping.
       ts.docs.forEach(function(d){
         var t = d.data(); t._id = d.id;
         taskById[t._id] = t;
         if(t.done) doneCount++;
+      });
+      // Second pass: sort each task into its open group, or - added
+      // 2026-09-22 - into a separate "Completed" bucket instead, so a
+      // finished task moves out of the working checklist rather than
+      // staying interleaved (still checked, just no longer where you're
+      // looking for what's left to do).
+      ts.docs.forEach(function(d){
+        var t = taskById[d.id];
+        if(t.done){ completed.push(t); return; }
         var g = t.group||'Tasks';
         if(!groups[g]){ groups[g]=[]; order.push(g); }
         groups[g].push(t);
       });
-      // Dependencies are now defined ONCE on the template step
-      // (dependsOnStepId - see openSetStepDependencyModal) and inherited by
-      // every task generated from it, instead of a free-text label typed
-      // onto each task by hand. Every sibling task for this episode is
-      // already in `ts.docs` above (the query isn't filtered by done), so
-      // the prerequisite's live done-state is just a lookup here - no
-      // extra fetch, and it can never drift out of sync with reality the
-      // way the old hand-typed label could.
-      function depTaskFor(t){ return t.dependsOnStepId ? taskById[t.episodeId+'_'+t.dependsOnStepId] : null; }
+      // Dependencies are defined on the template step (dependsOnStepIds -
+      // see openSetStepDependencyModal) and inherited by every task
+      // generated from it, instead of a free-text label typed onto each
+      // task by hand. A step (and so a task) can wait on more than one
+      // other step since 2026-09-22 - depTasksFor returns every
+      // prerequisite task doc it can find (a missing one, e.g. its step
+      // was removed from the template after this episode was generated,
+      // is just skipped - fails OPEN rather than leaving the task
+      // permanently locked on something that no longer exists).
+      function depTasksFor(t){
+        return taskDepStepIds(t).map(function(sid){ return taskById[t.episodeId+'_'+sid]; }).filter(Boolean);
+      }
       var pct = Math.round(100*doneCount/ts.size);
       var fill = document.getElementById('epProgressFill'); if(fill) fill.style.width = pct+'%';
       var badge = document.getElementById('epStatusBadge');
@@ -1211,30 +1355,30 @@ function renderEpisode(episodeId){
         var status = pct===100 ? 'done' : dueStatus(e.dueDate,false);
         badge.innerHTML = '<span class="badge badge-'+status+'">'+statusLabel(status)+' · '+doneCount+'/'+ts.size+'</span>';
       }
+      function taskRowHtml(t){
+        var r = roleOf(t.role);
+        var unmet = depTasksFor(t).filter(function(dt){ return !dt.done; });
+        var isBlocked = unmet.length>0;
+        var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
+        var waitingLabel = unmet.map(function(dt){ return dt.label; }).join(', ');
+        return '<div class="task-row '+(t.done?'done':'')+(isBlocked?' task-blocked':'')+'" style="--role-color:'+(r?r.color:'var(--line)')+'">'+
+          '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(waitingLabel)+'\' '+(unmet.length>1?'are':'is')+' done"':'')+'>'+
+          '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+(t.custom?' <span class="task-custom-badge">custom</span>':'')+'</div>'+
+          '<div class="task-meta"><span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):t.role)+'</span>'+
+          (isBlocked?'<span class="task-waiting">⛔ Waiting on: '+escapeHtml(waitingLabel)+'</span>':'')+
+          (t.done && t.doneByUserId?profileChip(t.doneByUserId):'')+
+          '</div>'+
+          '<button type="button" class="task-expand-btn" data-collab="'+t._id+'">'+(expandedTasks[t._id]?'Hide discussion':'Comments, links & files')+'</button>'+
+          '<div class="task-collab" id="collab_'+t._id+'" '+(expandedTasks[t._id]?'':'hidden')+'></div>'+
+          '</div>'+
+          (canManage()?'<button type="button" class="icon-btn" data-delete-task="'+t._id+'" data-label="'+escapeHtml(t.label)+'" title="Delete task">'+ICON_TRASH+'</button>':'')+
+          '</div>';
+      }
       box.innerHTML = order.map(function(g){
         return '<div class="checklist-group"><div class="checklist-group-head"><span class="checklist-group-title">'+escapeHtml(g)+'</span></div>'+
-          groups[g].map(function(t){
-            var r = roleOf(t.role);
-            var depTask = depTaskFor(t);
-            // A missing prerequisite (its step was removed from the
-            // template after this episode was generated) fails OPEN rather
-            // than leaving the task permanently locked on something that
-            // no longer exists.
-            var isBlocked = !!(depTask && !depTask.done);
-            var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
-            return '<div class="task-row '+(t.done?'done':'')+(isBlocked?' task-blocked':'')+'" style="--role-color:'+(r?r.color:'var(--line)')+'">'+
-              '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(depTask.label)+'\' is done"':'')+'>'+
-              '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+(t.custom?' <span class="task-custom-badge">custom</span>':'')+'</div>'+
-              '<div class="task-meta"><span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):t.role)+'</span>'+
-              (isBlocked?'<span class="task-waiting">⛔ Waiting on: '+escapeHtml(depTask.label)+'</span>':'')+
-              (t.done && t.doneByUserId?profileChip(t.doneByUserId):'')+
-              '</div>'+
-              '<button type="button" class="task-expand-btn" data-collab="'+t._id+'">'+(expandedTasks[t._id]?'Hide discussion':'Comments, links & files')+'</button>'+
-              '<div class="task-collab" id="collab_'+t._id+'" '+(expandedTasks[t._id]?'':'hidden')+'></div>'+
-              '</div></div>';
-          }).join('')+
+          groups[g].map(taskRowHtml).join('')+
           '</div>';
-      }).join('');
+      }).join('') + (completed.length ? '<div class="checklist-group checklist-completed"><div class="checklist-group-head"><span class="checklist-group-title">Completed ('+completed.length+')</span></div>'+completed.map(taskRowHtml).join('')+'</div>' : '');
       hydrateProfiles(box);
       Array.prototype.forEach.call(box.querySelectorAll('.task-check:not([disabled])'), function(cb){
         cb.addEventListener('change', function(){
@@ -1245,6 +1389,16 @@ function renderEpisode(episodeId){
             doneByUserId: checked ? myUid : null,
             doneAt: checked ? new Date().toISOString() : null
           }).catch(function(err){ cb.checked=!checked; showToast('error', errMsg(err)); });
+        });
+      });
+      Array.prototype.forEach.call(box.querySelectorAll('[data-delete-task]'), function(btn){
+        btn.addEventListener('click', function(){
+          var taskId = btn.getAttribute('data-delete-task');
+          var label = btn.getAttribute('data-label');
+          if(!confirm('Delete "'+label+'"? Its comments, links and attachments go with it. This cannot be undone.')) return;
+          db.doc('tasks/'+taskId).delete().then(function(){
+            showToast('success','Task deleted');
+          }).catch(function(err){ showToast('error', errMsg(err)); });
         });
       });
       Array.prototype.forEach.call(box.querySelectorAll('[data-collab]'), function(btn){
@@ -1278,7 +1432,7 @@ function openAddCustomTaskModal(episodeId, episode){
       var taskId = episodeId+'_custom_'+uid8();
       db.doc('tasks/'+taskId).set({
         episodeId: episodeId, episodeTitle: episode.title, clientId: episode.clientId, clientName: episode.clientName,
-        role: fd.get('role'), label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnStepId: null,
+        role: fd.get('role'), label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnStepIds: [],
         dueDate: episode.dueDate, done:false, doneByUserId:null, doneAt:null, custom:true, createdAt: new Date().toISOString()
       }).then(function(){
         closeModal(); showToast('success','Custom task added');
@@ -1726,10 +1880,12 @@ function renderBoard(){
     // tasks entirely - so a prerequisite that's ALREADY done (the normal
     // case once someone finishes it) won't be in `tasks` at all. Fetch
     // each referenced prerequisite by its deterministic id
-    // (episodeId + '_' + dependsOnStepId, same scheme generateEpisodesForRule
-    // uses) instead of assuming it's in this snapshot.
+    // (episodeId + '_' + stepId, same scheme generateEpisodesForRule uses)
+    // instead of assuming it's in this snapshot. A task can wait on more
+    // than one step since 2026-09-22, so this flattens every task's full
+    // dependency list first.
     var depIds = [];
-    tasks.forEach(function(t){ if(t.dependsOnStepId) depIds.push(t.episodeId+'_'+t.dependsOnStepId); });
+    tasks.forEach(function(t){ taskDepStepIds(t).forEach(function(sid){ depIds.push(t.episodeId+'_'+sid); }); });
     depIds = depIds.filter(function(id,i){ return depIds.indexOf(id)===i; });
     Promise.all(depIds.map(function(id){ return db.doc('tasks/'+id).get().catch(function(){ return {exists:false}; }); }))
       .then(function(depSnaps){
@@ -1752,15 +1908,17 @@ function renderBoardBody(box, tasks, depById, showingAll){
     return '<div class="board-group"><div class="board-group-title">'+o[1]+'</div>'+
       groups[o[0]].map(function(t){
         var rr = roleOf(t.role);
-        var depTask = t.dependsOnStepId ? depById[t.episodeId+'_'+t.dependsOnStepId] : null;
-        var isBlocked = !!(depTask && !depTask.done);
+        var depTasks = taskDepStepIds(t).map(function(sid){ return depById[t.episodeId+'_'+sid]; }).filter(Boolean);
+        var unmet = depTasks.filter(function(dt){ return !dt.done; });
+        var isBlocked = unmet.length>0;
         var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
+        var waitingLabel = unmet.map(function(dt){ return dt.label; }).join(', ');
         return '<div class="board-task'+(isBlocked?' task-blocked':'')+'" style="border-left:3px solid '+(rr?rr.color:'var(--line)')+'">'+
-          '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(depTask.label)+'\' is done"':'')+'>'+
+          '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(waitingLabel)+'\' '+(unmet.length>1?'are':'is')+' done"':'')+'>'+
           '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+'</div>'+
           '<div class="board-task-client">'+escapeHtml(t.clientName)+(showingAll?' <span class="role-chip" style="background:'+(rr?rr.color:'#888')+'">'+(rr?escapeHtml(rr.label):t.role)+'</span>':'')+'</div>'+
           '<div class="board-task-episode">'+escapeHtml(t.episodeTitle)+' · due '+fmtDate(t.dueDate)+'</div>'+
-          (isBlocked?'<div class="task-meta"><span class="task-waiting">⛔ Waiting on: '+escapeHtml(depTask.label)+'</span></div>':'')+
+          (isBlocked?'<div class="task-meta"><span class="task-waiting">⛔ Waiting on: '+escapeHtml(waitingLabel)+'</span></div>':'')+
           '</div></div>';
       }).join('')+
       '</div>';
@@ -1780,16 +1938,30 @@ function renderBoardBody(box, tasks, depById, showingAll){
 // that actually contains the screenshot's timestamp, falling back to the
 // closest one if none lines up exactly (e.g. right at clock-in/out).
 function showScreenshotDetail(s, imgUrl){
+  var title = 'Screenshot - '+fmtDateTime(s.takenAt);
   var root = document.getElementById('modalRoot');
   root.innerHTML = '<div class="modal-backdrop" id="modalBackdrop"><div class="modal modal-lg">'+
-    '<div class="modal-head"><h3>Screenshot - '+escapeHtml(fmtDateTime(s.takenAt))+'</h3><button type="button" class="modal-close" id="modalClose">✕</button></div>'+
+    '<div class="modal-head"><h3>'+escapeHtml(title)+'</h3><button type="button" class="modal-close" id="modalClose">✕</button></div>'+
     '<div style="padding:17px 19px;display:flex;flex-direction:column;gap:14px;max-height:78vh;overflow-y:auto;">'+
-    '<img src="'+escapeHtml(imgUrl)+'" style="width:100%;border-radius:10px;border:1px solid var(--line);display:block;">'+
+    // Fixed at this modal's own width, which is nowhere near enough to make
+    // out real detail in a screenshot - added 2026-09-22: click (or the
+    // explicit button, for anyone who wouldn't think to click the image
+    // itself) opens the SAME full-size, zoomable lightbox already used for
+    // comment/chat image attachments (Ctrl +/-/0, Ctrl+wheel, on-screen
+    // buttons all already work there) instead of only ever showing this
+    // capped-width preview.
+    '<div style="position:relative;">'+
+    '<img src="'+escapeHtml(imgUrl)+'" id="shotThumb" style="width:100%;border-radius:10px;border:1px solid var(--line);display:block;cursor:zoom-in;">'+
+    '<button type="button" class="btn btn-sm" id="shotFullSizeBtn" style="position:absolute;bottom:10px;right:10px;">View full size</button>'+
+    '</div>'+
     '<div id="shotActivityBox"><div class="skeleton" style="height:50px;"></div></div>'+
     '</div></div></div>';
   root.classList.add('open');
   document.getElementById('modalClose').onclick = closeModal;
   document.getElementById('modalBackdrop').addEventListener('click', function(e){ if(e.target.id==='modalBackdrop') closeModal(); });
+  var openFullSize = function(){ showImageLightbox(imgUrl, title); };
+  document.getElementById('shotThumb').addEventListener('click', openFullSize);
+  document.getElementById('shotFullSizeBtn').addEventListener('click', openFullSize);
 
   var box = document.getElementById('shotActivityBox');
   if(!s.timeEntryId){ box.innerHTML = '<div class="empty-state">No activity data linked to this screenshot.</div>'; return; }
