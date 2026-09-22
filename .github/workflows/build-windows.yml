@@ -1,10 +1,24 @@
 name: Build Windows exe
 
-# This is how you get the actual .exe/.msi installer — Tauri builds against
-# the target OS, and this container can't build a Windows binary, so a
-# GitHub Actions Windows runner does it instead. Push to main, or run this
-# manually from the Actions tab, and download the installer from the run's
-# "Artifacts" section (or from Releases, if you also push a version tag).
+# This is how you get the actual .exe installer — Tauri builds against the
+# target OS, and this container can't build a Windows binary, so a GitHub
+# Actions Windows runner does it instead.
+#
+# Phase 2.5 batch A (2026-09-26): only the NSIS installer is built now (MSI
+# dropped, both here and in src-tauri/tauri.conf.json's bundle.targets) -
+# one installer instead of two. For a real "just download one .exe, no zip"
+# result, push a VERSION TAG for each release build (not just a push to
+# main) - GitHub always wraps an Actions run's "Artifacts" tab download in
+# a zip regardless of how many files are inside, but a GitHub Release
+# serves each attached file raw. Easiest way to push a tag with no local
+# git: go to the repo's "Releases" page -> "Draft a new release" -> click
+# "Choose a tag" -> type a new tag like v8.9 -> "+ Create new tag: v8.9 on
+# publish" -> fill in a title -> "Publish release". That tag push triggers
+# this workflow (see the tags trigger below), and this workflow's own
+# tauri-action step then attaches the built blue-kite-ops.exe to that same
+# release as a plain downloadable file - no zip. A plain push to main (no
+# tag) still works exactly as before for a quick test build, just keep
+# downloading that one from the Artifacts tab as usual.
 
 on:
   push:
@@ -46,7 +60,7 @@ jobs:
           releaseName: ${{ github.ref_type == 'tag' && format('Blue Kite Ops {0}', github.ref_name) || '' }}
           releaseDraft: true
           prerelease: false
-          args: --bundles nsis,msi
+          args: --bundles nsis
 
       - name: Upload installer as a build artifact
         uses: actions/upload-artifact@v4
@@ -54,4 +68,3 @@ jobs:
           name: blue-kite-ops-windows
           path: |
             src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
