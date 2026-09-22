@@ -19,12 +19,13 @@ serde_json = "1"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
 
-# Phase 2.5 batch A follow-up: launch on Windows startup is now done with a
-# direct schtasks.exe Scheduled Task call from src/main.rs's .setup() hook
-# (register_autostart_task()) instead of a plugin - see the long comment
-# there for why the registry-based tauri-plugin-autostart approach (removed
-# here) didn't actually work on this app. No autostart crate needed at all
-# any more; std::process::Command is enough.
+# Launch on Windows startup needs no crate and no Rust code at all - it's a
+# schtasks.exe Scheduled Task created by the NSIS INSTALLER itself
+# (installer-hooks.nsh), not by the running app. See src/main.rs's header
+# comment for the two earlier approaches (a registry Run-key plugin, then a
+# runtime schtasks.exe call from this app's own .setup() hook) and why both
+# were replaced - the second one worked but got the app deleted by Windows
+# Defender as a malware-persistence false positive.
 
 # TimeLog (src/timelog.rs): screen capture + global keyboard/mouse activity.
 #

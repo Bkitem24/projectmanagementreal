@@ -951,38 +951,6 @@ function renderClient(clientId){
   activeUnsubs.push(unsub);
 }
 
-// Stable header order for a template's groups (Phase 2.5 batch A follow-up,
-// 2026-09-27). A step's own `order` field is one flat sequence across the
-// WHOLE template - it decides each group's steps' order relative to EACH
-// OTHER, but the episode checklist used to also use it to decide which
-// group's header shows first, by just taking groups in the order their
-// first step was hit while walking that flat sequence. That meant dragging
-// a single step from Group A to a position ahead of Group B's steps (on the
-// Workflows page) could drag Group A's entire header ahead of Group B's on
-// every episode's checklist too - reported 2026-09-26: "if I re-order a
-// step that is from another group, above the step that is from another
-// group, the entire group gets reordered instead of just that one step."
-// groupOrder is a separate, append-only list of this template's group
-// names, touched ONLY when a brand-new group name is introduced (never by
-// reordering existing steps - see wireStepDrag, which only ever writes
-// `steps`), so from now on a step drag can only ever move that one step
-// within its own group - never its group's position relative to others.
-// Falls back to deriving the order from the current steps (today's old
-// behavior) for a template that hasn't been touched since this shipped -
-// mountTemplatesBox below self-heals that onto the template the first time
-// it's viewed, so this fallback path is only ever hit once per template.
-function tplGroupOrder(t){
-  var steps = (t && t.steps) || [];
-  var derived = [];
-  steps.slice().sort(function(a,b){return (a.order||0)-(b.order||0);}).forEach(function(s){
-    var g = (s.group||'').trim() || 'Tasks';
-    if(derived.indexOf(g)===-1) derived.push(g);
-  });
-  var stored = ((t && t.groupOrder) || []).slice();
-  derived.forEach(function(g){ if(stored.indexOf(g)===-1) stored.push(g); });
-  return stored;
-}
-
 // Renders a client's workflow templates + steps into `box`, and keeps it
 // live. Shared by the Client Detail page's own "Workflow templates" section
 // and the centralized Workflows nav page (renderWorkflows) below - added
@@ -992,18 +960,6 @@ function tplGroupOrder(t){
 function mountTemplatesBox(clientId, box){
   var unsub = db.collection('templates').where('clientId','==',clientId).onSnapshot(function(ts){
     if(ts.empty){ box.innerHTML = '<div class="empty-state"><strong>No templates yet</strong>Templates define the checklist each episode type generates, and the "waits for" links between their steps.</div>'; return; }
-    // Self-heal groupOrder (see tplGroupOrder above) onto any template that
-    // doesn't have one yet, or that picked up a group some other way
-    // without it - a silent, idempotent catch-up write, not something
-    // worth a toast either way.
-    ts.docs.forEach(function(d){
-      var t = d.data();
-      var computed = tplGroupOrder(t);
-      var stored = t.groupOrder||[];
-      if(computed.length!==stored.length || computed.some(function(g,i){return g!==stored[i];})){
-        db.doc('templates/'+d.id).update({groupOrder:computed}).catch(function(){});
-      }
-    });
     var stepById = {};
     ts.docs.forEach(function(d){ (d.data().steps||[]).forEach(function(s){ stepById[s.stepId] = s; }); });
     box.innerHTML = ts.docs.map(function(d){
@@ -1350,14 +1306,7 @@ function openAddStepModal(templateId){
           var maxOrder = freshSteps.reduce(function(m,s){return Math.max(m,s.order||0);},0);
           newStep.order = maxOrder+1;
           freshSteps.push(newStep);
-          // Append the group to groupOrder right away if it's a new one -
-          // see tplGroupOrder's comment. A brand-new group lands at the
-          // END of the header order, after every existing group, same as
-          // you'd expect from "just added it."
-          var g = (newStep.group||'').trim() || 'Tasks';
-          var freshGroupOrder = (ft.groupOrder||[]).slice();
-          if(freshGroupOrder.indexOf(g)===-1) freshGroupOrder.push(g);
-          return db.doc('templates/'+templateId).update({steps:freshSteps, groupOrder:freshGroupOrder});
+          return db.doc('templates/'+templateId).update({steps:freshSteps});
         }).then(function(){
           // Backfill onto episodes already on the board. Before this, a
           // brand-new step only ever affected FUTURE episodes
@@ -1447,13 +1396,9 @@ function renderEpisode(episodeId){
           var tplData = (tplSnap.exists && tplSnap.data()) || {};
           var stepById = {};
           (tplData.steps||[]).forEach(function(s){ stepById[s.stepId] = s; });
-          // groupOrder (Phase 2.5 batch A follow-up) - see tplGroupOrder's
-          // comment - is what keeps a group's header position on this
-          // checklist stable no matter how its steps get reordered on the
-          // Workflows page.
-          return { stepById: stepById, groupOrder: tplGroupOrder(tplData) };
-        }).catch(function(){ return { stepById: {}, groupOrder: [] }; }) // fails open - a template fetch error shouldn't block the checklist from rendering, just means dependencies fall back to each task's own baked-in copy
-      : Promise.resolve({ stepById: {}, groupOrder: [] });
+          return { stepById: stepById };
+        }).catch(function(){ return { stepById: {} }; }) // fails open - a template fetch error shouldn't block the checklist from rendering, just means dependencies fall back to each task's own baked-in copy
+      : Promise.resolve({ stepById: {} });
 
     tplStepByIdPromise.then(function(tplInfo){
     var liveStepById = tplInfo.stepById;
@@ -1467,7 +1412,6 @@ function renderEpisode(episodeId){
       var box = document.getElementById('taskGroups');
       if(!box) return;
       if(ts.empty){ box.innerHTML = '<div class="empty-state">No tasks on this episode.</div>'; return; }
-      var groups = {}; var order = [];
       var completed = [];
       var doneCount = 0;
       var taskById = {};
@@ -1497,33 +1441,33 @@ function renderEpisode(episodeId){
         return liveStep ? (liveStep.order||0) : (t.orderNum||0);
       }
       var liveOrderedDocs = ts.docs.slice().sort(function(a,b){ return liveOrderNum(taskById[a.id]) - liveOrderNum(taskById[b.id]); });
-      // Seed the group HEADER order from the template's stable groupOrder
-      // (Phase 2.5 batch A follow-up) rather than letting it fall out of
-      // whichever task happens to sort first below - see tplGroupOrder's
-      // comment for the bug this fixes (dragging one step past a step from
-      // another group used to drag that group's whole header along with
-      // it). A one-off episode has no template (tplInfo.groupOrder is []),
-      // so its groups still just appear in first-encountered order, same
-      // as before.
-      tplInfo.groupOrder.forEach(function(g){ if(!groups[g]){ groups[g]=[]; order.push(g); } });
-      // Second pass: sort each task into its open group, or - added
-      // 2026-09-22 - into a separate "Completed" bucket instead, so a
-      // finished task moves out of the working checklist rather than
-      // staying interleaved (still checked, just no longer where you're
-      // looking for what's left to do). Within a group, tasks still land in
-      // liveOrderNum order (that part of the reorder fix already worked) -
-      // only the HEADER position is now decoupled from it.
+      // Group HEADER blocks (re-fixed 2026-09-28, replacing the "stable
+      // groupOrder" approach from Phase 2.5 batch A). That earlier fix
+      // pinned every group name to ONE fixed header slot, independent of
+      // step order - which stopped one step's drag from dragging its whole
+      // group's header along with it, but broke a different, more literal
+      // expectation: dragging a step OUT of its own group's run and into
+      // the middle of another group's steps should show that step under
+      // its OWN group's header, right where it landed - splitting the
+      // group it landed inside into two separate header blocks around it
+      // (e.g. drag "xyz" from "Editing" to between two "Publishing"
+      // steps -> Publishing, then a one-item "Editing" block, then
+      // Publishing continues). A fixed one-slot-per-name order can never
+      // show that split. Fixed for real by deriving header blocks straight
+      // from live step order: walk the live-ordered tasks and start a NEW
+      // block every time the group changes from the previous task, even if
+      // that group name was already seen earlier. Within a block, tasks
+      // are already in liveOrderNum order since blocks are built by
+      // walking liveOrderedDocs in order.
+      var blocks = [];
       liveOrderedDocs.forEach(function(d){
         var t = taskById[d.id];
         if(t.done){ completed.push(t); return; }
         var g = t.group||'Tasks';
-        if(!groups[g]){ groups[g]=[]; order.push(g); }
-        groups[g].push(t);
+        var last = blocks[blocks.length-1];
+        if(!last || last.group!==g){ last = {group:g, tasks:[]}; blocks.push(last); }
+        last.tasks.push(t);
       });
-      // A group seeded from groupOrder but with nothing open right now
-      // (every task in it is done, or it's a brand-new unused group)
-      // shouldn't show an empty header.
-      order = order.filter(function(g){ return groups[g].length>0; });
       // Dependencies are defined on the template step (dependsOnStepIds -
       // see openSetStepDependencyModal) and inherited by every task
       // generated from it, instead of a free-text label typed onto each
@@ -1605,9 +1549,9 @@ function renderEpisode(episodeId){
       }
       function renderChecklist(commentCounts){
       function rowHtml(t){ return taskRowHtml(t, commentCounts); }
-      box.innerHTML = order.map(function(g){
-        return '<div class="checklist-group"><div class="checklist-group-head"><span class="checklist-group-title">'+escapeHtml(g)+'</span></div>'+
-          groups[g].map(rowHtml).join('')+
+      box.innerHTML = blocks.map(function(block){
+        return '<div class="checklist-group"><div class="checklist-group-head"><span class="checklist-group-title">'+escapeHtml(block.group)+'</span></div>'+
+          block.tasks.map(rowHtml).join('')+
           '</div>';
       }).join('') + (completed.length ? '<div class="checklist-group checklist-completed"><div class="checklist-group-head"><span class="checklist-group-title">Completed ('+completed.length+')</span></div>'+completed.map(rowHtml).join('')+'</div>' : '');
       hydrateProfiles(box);
