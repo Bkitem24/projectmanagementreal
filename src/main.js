@@ -1,7 +1,7 @@
 import { supabase, supabaseConfigured } from './lib/supabaseClient.js';
 import { db, randomId } from './lib/db.js';
 import { signUp, signIn, signOut, getSession, onAuthStateChange, fetchProfiles, updateEmail, updatePassword } from './lib/auth.js';
-import { listTeams, createTeam, assignTeamManager, clearTeamManager, createInvite, listInvites, listServices, createService, deleteService } from './lib/teams.js';
+import { listTeams, createTeam, assignTeamManager, clearTeamManager, createInvite, listInvites, cancelInvite, listServices, createService, deleteService } from './lib/teams.js';
 import { startPresence, stopPresence, isOnline, onPresenceChange } from './lib/presence.js';
 import { compressImage } from './lib/imageCompress.js';
 import { imageHasFace } from './lib/faceDetect.js';
@@ -48,6 +48,37 @@ function taskDepStepIds(task){
   if(task && task.dependsOnStepIds && task.dependsOnStepIds.length) return task.dependsOnStepIds;
   if(task && task.dependsOnStepId) return [task.dependsOnStepId];
   return [];
+}
+// ---------- LIVE DEPENDENCY LOOKUP (2026-09-23) ----------
+// taskDepStepIds() above reads a task's OWN copy of its dependency, baked in
+// once at the moment its episode was generated from a template (see
+// generateEpisodesForRule) - editing a step's dependency in Workflows after
+// that never reached any episode already generated from it, which is
+// exactly what Humayun reported as a dependency "still" not showing up on
+// the checklist. Per his explicit call, a dependency edit should apply
+// everywhere immediately, not just to episodes generated afterward - so
+// both the episode page and My Board now look up a task's dependency LIVE,
+// straight off the current template step, and only fall back to the task's
+// own baked-in copy when there's no live step to check at all: a custom
+// task (openAddCustomTaskModal - never had a template step to begin with),
+// a one-off episode (no template), or a step that's since been deleted from
+// the template (fails open onto the old snapshot rather than leaving the
+// task locked forever on something that no longer exists).
+//
+// A task's own stepId isn't stored as its own field - it's the second half
+// of its deterministic id (episodeId + '_' + stepId, see
+// generateEpisodesForRule) - so it's recovered here by stripping the
+// episodeId prefix rather than needing a schema change. `stepById` is a
+// plain {stepId: step} map built once per template fetch by the caller
+// (renderEpisode fetches its one template; renderBoard fetches every
+// distinct template its visible tasks span) - callers with no template at
+// all (or while it's still loading) pass {}, which safely falls through to
+// the old baked-in behavior below.
+function liveDepStepIds(t, stepById){
+  var prefix = (t && t.episodeId ? t.episodeId : '')+'_';
+  var stepId = (t && t._id && t._id.indexOf(prefix)===0) ? t._id.slice(prefix.length) : null;
+  var liveStep = (stepId && stepById) ? stepById[stepId] : null;
+  return liveStep ? stepDepIds(liveStep) : taskDepStepIds(t);
 }
 function ordinal(n){ if(n===-1) return 'Last'; var s=['','1st','2nd','3rd','4th']; return s[n]||(n+'th'); }
 function escapeHtml(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
@@ -1307,6 +1338,22 @@ function renderEpisode(episodeId){
     });
     loadCollab('episode', episodeId, document.getElementById('epCollab'));
 
+    // Fetch this episode's template once (recurring episodes only - a
+    // one-off has no templateId) so the checklist below can look up each
+    // task's dependency LIVE off the current template step, rather than the
+    // fixed copy baked into the task at generation time - see
+    // liveDepStepIds() for why. A plain .get(), not a live subscription:
+    // editing a dependency while this exact page is already open just needs
+    // a reload to pick up, same as any other template edit.
+    var tplStepByIdPromise = e.templateId
+      ? db.doc('templates/'+e.templateId).get().then(function(tplSnap){
+          var stepById = {};
+          ((tplSnap.exists && tplSnap.data().steps) || []).forEach(function(s){ stepById[s.stepId] = s; });
+          return stepById;
+        }).catch(function(){ return {}; }) // fails open - a template fetch error shouldn't block the checklist from rendering, just means dependencies fall back to each task's own baked-in copy
+      : Promise.resolve({});
+
+    tplStepByIdPromise.then(function(liveStepById){
     var unsubTasks = db.collection('tasks').where('episodeId','==',episodeId).orderBy('orderNum','asc').onSnapshot(function(ts){
       var box = document.getElementById('taskGroups');
       if(!box) return;
@@ -1344,9 +1391,13 @@ function renderEpisode(episodeId){
       // prerequisite task doc it can find (a missing one, e.g. its step
       // was removed from the template after this episode was generated,
       // is just skipped - fails OPEN rather than leaving the task
-      // permanently locked on something that no longer exists).
+      // permanently locked on something that no longer exists). Reads the
+      // dependency LIVE off the current template (liveStepById, fetched
+      // above) rather than each task's own baked-in copy - see
+      // liveDepStepIds() - so an edit made in Workflows shows up here
+      // immediately, on this episode, without needing to be regenerated.
       function depTasksFor(t){
-        return taskDepStepIds(t).map(function(sid){ return taskById[t.episodeId+'_'+sid]; }).filter(Boolean);
+        return liveDepStepIds(t, liveStepById).map(function(sid){ return taskById[t.episodeId+'_'+sid]; }).filter(Boolean);
       }
       var pct = Math.round(100*doneCount/ts.size);
       var fill = document.getElementById('epProgressFill'); if(fill) fill.style.width = pct+'%';
@@ -1417,6 +1468,7 @@ function renderEpisode(episodeId){
       });
     }, function(){});
     activeUnsubs.push(unsubTasks);
+    }); // end tplStepByIdPromise.then
   }, function(){ app.innerHTML='<div class="empty-state">Could not load this episode.</div>'; });
   activeUnsubs.push(unsub);
 }
@@ -1466,6 +1518,24 @@ function attachmentIcon(a){
 // screen +/-/reset buttons make it discoverable for anyone who'd never try
 // the hotkey. The listener is added/removed with the lightbox itself so it
 // never lingers and steals +/-/0 keystrokes once the lightbox is closed.
+//
+// Round 8.5 (2026-09-23): rebuilt zoom + added real click-and-drag panning,
+// after Humayun reported zoom as "very glitchy" with no way to drag around
+// a zoomed-in image and a Reset button that didn't work. Root cause of
+// both: the old version only ever set `transform: scale(...)` on the img
+// and relied on the container's native `overflow:auto` to scroll around
+// once zoomed - but a CSS transform changes how an element is PAINTED, not
+// its layout/scroll size, so the container never actually gained any extra
+// scrollable area to pan into. Zooming in just visually grew the image from
+// its top-left corner and clipped whatever fell outside the frame, with
+// genuinely no way to reach it - not a minor bug, there was nothing to
+// scroll. Reset (`zoom=1`) was technically correct but looked "broken" for
+// the same reason: it un-scaled the image, but nothing about the old code
+// ever moved it back into view either, since panning was never implemented.
+// Fixed by dropping native scrolling entirely and driving both zoom and
+// pan through the same transform in JS - `translate(panX,panY) scale(zoom)`
+// - with pan tracked in panX/panY and clamped so the image can never be
+// dragged fully out of the frame. Reset now zeroes zoom AND pan together.
 var LIGHTBOX_ZOOM_MIN = 1, LIGHTBOX_ZOOM_MAX = 5, LIGHTBOX_ZOOM_STEP = 0.25;
 function showImageLightbox(url, title){
   var root = document.getElementById('modalRoot');
@@ -1477,16 +1547,37 @@ function showImageLightbox(url, title){
       '<button type="button" id="lightboxZoomIn" title="Zoom in (Ctrl +)">+</button>'+
       '<button type="button" id="lightboxZoomReset" title="Reset zoom (Ctrl 0)">Reset</button>'+
     '</div>'+
-    '<div class="lightbox-img-scroll"><img id="lightboxImg" src="'+escapeHtml(url)+'" alt="'+escapeHtml(title||'')+'"></div></div></div>';
+    '<div class="lightbox-img-scroll" id="lightboxScroll"><img id="lightboxImg" src="'+escapeHtml(url)+'" alt="'+escapeHtml(title||'')+'" draggable="false"></div></div></div>';
   root.classList.add('open');
-  var zoom = 1;
+  var zoom = 1, panX = 0, panY = 0;
   var img = document.getElementById('lightboxImg');
+  var scroll = document.getElementById('lightboxScroll');
   var levelEl = document.getElementById('lightboxZoomLevel');
+  // Keeps the image from ever being dragged (or left, after a zoom-out)
+  // fully out of the frame - based on the image's own LAID-OUT size
+  // (offsetWidth/Height, unaffected by the transform below, since
+  // transform never changes layout) vs. that same size scaled up by the
+  // current zoom. At zoom 1 the allowed range is always exactly 0, so this
+  // alone is what snaps pan back to 0,0 on every zoom-out past 100%, not
+  // just on an explicit Reset.
+  function clampPan(){
+    var baseW = img.offsetWidth, baseH = img.offsetHeight;
+    var maxPanX = Math.max(0, (baseW*zoom - baseW)/2);
+    var maxPanY = Math.max(0, (baseH*zoom - baseH)/2);
+    panX = Math.max(-maxPanX, Math.min(maxPanX, panX));
+    panY = Math.max(-maxPanY, Math.min(maxPanY, panY));
+  }
+  function render(){
+    img.style.transform = 'translate('+panX+'px,'+panY+'px) scale('+zoom+')';
+    levelEl.textContent = Math.round(zoom*100)+'%';
+    img.style.cursor = zoom>1 ? 'grab' : 'zoom-in';
+  }
   function applyZoom(){
     zoom = Math.max(LIGHTBOX_ZOOM_MIN, Math.min(LIGHTBOX_ZOOM_MAX, zoom));
-    img.style.transform = 'scale('+zoom+')';
-    levelEl.textContent = Math.round(zoom*100)+'%';
+    clampPan();
+    render();
   }
+  function resetZoom(){ zoom=1; panX=0; panY=0; render(); }
   function zoomBy(delta){ zoom += delta; applyZoom(); }
   function closeLightbox(){ closeModal(); } // closeModal() itself clears activeLightboxKeydown
   function onKeydown(e){
@@ -1494,20 +1585,57 @@ function showImageLightbox(url, title){
     if(!(e.ctrlKey||e.metaKey)) return;
     if(e.key==='='||e.key==='+'){ e.preventDefault(); e.stopImmediatePropagation(); zoomBy(LIGHTBOX_ZOOM_STEP); }
     else if(e.key==='-'){ e.preventDefault(); e.stopImmediatePropagation(); zoomBy(-LIGHTBOX_ZOOM_STEP); }
-    else if(e.key==='0'){ e.preventDefault(); e.stopImmediatePropagation(); zoom=1; applyZoom(); }
+    else if(e.key==='0'){ e.preventDefault(); e.stopImmediatePropagation(); resetZoom(); }
   }
   activeLightboxKeydown = onKeydown;
   document.addEventListener('keydown', onKeydown);
-  document.getElementById('lightboxImg').parentElement.addEventListener('wheel', function(e){
+  scroll.addEventListener('wheel', function(e){
     if(!(e.ctrlKey||e.metaKey)) return;
     e.preventDefault();
     zoomBy(e.deltaY<0 ? LIGHTBOX_ZOOM_STEP : -LIGHTBOX_ZOOM_STEP);
   }, { passive:false });
   document.getElementById('lightboxZoomIn').addEventListener('click', function(){ zoomBy(LIGHTBOX_ZOOM_STEP); });
   document.getElementById('lightboxZoomOut').addEventListener('click', function(){ zoomBy(-LIGHTBOX_ZOOM_STEP); });
-  document.getElementById('lightboxZoomReset').addEventListener('click', function(){ zoom=1; applyZoom(); });
+  document.getElementById('lightboxZoomReset').addEventListener('click', resetZoom);
   document.getElementById('modalClose').onclick = closeLightbox;
   document.getElementById('modalBackdrop').addEventListener('click', function(e){ if(e.target.id==='modalBackdrop') closeLightbox(); });
+
+  // Click-and-drag panning once zoomed in. Pointer events (not mouse
+  // events) so a single capture handles the drag even if the cursor moves
+  // off the image mid-drag - no document-level listeners to remember to
+  // clean up. The transition is switched off for the duration of a drag so
+  // panning tracks the cursor instantly instead of catching up on a delay
+  // (the CSS transition stays on for button/hotkey/wheel zoom, where a
+  // brief animated step still looks right).
+  var dragging = false, dragStartX = 0, dragStartY = 0, panStartX = 0, panStartY = 0;
+  img.addEventListener('dragstart', function(e){ e.preventDefault(); }); // stop the browser's own native image-drag-ghost from fighting with this
+  img.addEventListener('pointerdown', function(e){
+    if(zoom<=1) return;
+    dragging = true;
+    dragStartX = e.clientX; dragStartY = e.clientY;
+    panStartX = panX; panStartY = panY;
+    img.style.transition = 'none';
+    img.style.cursor = 'grabbing';
+    try { img.setPointerCapture(e.pointerId); } catch(err){}
+  });
+  img.addEventListener('pointermove', function(e){
+    if(!dragging) return;
+    panX = panStartX + (e.clientX - dragStartX);
+    panY = panStartY + (e.clientY - dragStartY);
+    clampPan();
+    img.style.transform = 'translate('+panX+'px,'+panY+'px) scale('+zoom+')';
+  });
+  function endDrag(e){
+    if(!dragging) return;
+    dragging = false;
+    img.style.transition = '';
+    img.style.cursor = zoom>1 ? 'grab' : 'zoom-in';
+    try { img.releasePointerCapture(e.pointerId); } catch(err){}
+  }
+  img.addEventListener('pointerup', endDrag);
+  img.addEventListener('pointercancel', endDrag);
+
+  render();
 }
 
 // kind is 'task' or 'episode' - same comments/links/attachments UI, just
@@ -1875,29 +2003,65 @@ function renderBoard(){
     if(!box) return;
     if(snap.empty){ box.innerHTML = '<div class="empty-state"><strong>Nothing open</strong>Every task for this view is checked off.</div>'; return; }
     var tasks = snap.docs.map(function(d){ var t=d.data(); t._id=d.id; return t; });
-    // Unlike the episode page (which already has every sibling task,
-    // including done ones, in one query), this board's query excludes done
-    // tasks entirely - so a prerequisite that's ALREADY done (the normal
-    // case once someone finishes it) won't be in `tasks` at all. Fetch
-    // each referenced prerequisite by its deterministic id
-    // (episodeId + '_' + stepId, same scheme generateEpisodesForRule uses)
-    // instead of assuming it's in this snapshot. A task can wait on more
-    // than one step since 2026-09-22, so this flattens every task's full
-    // dependency list first.
-    var depIds = [];
-    tasks.forEach(function(t){ taskDepStepIds(t).forEach(function(sid){ depIds.push(t.episodeId+'_'+sid); }); });
-    depIds = depIds.filter(function(id,i){ return depIds.indexOf(id)===i; });
-    Promise.all(depIds.map(function(id){ return db.doc('tasks/'+id).get().catch(function(){ return {exists:false}; }); }))
-      .then(function(depSnaps){
-        var depById = {};
-        depSnaps.forEach(function(s,i){ if(s.exists) depById[depIds[i]] = s.data(); });
-        renderBoardBody(box, tasks, depById, showingAll);
+    // Same live-dependency-lookup as the episode page (see
+    // liveDepStepIds()) - a dependency a task waits on is read off the
+    // CURRENT template step, not the fixed copy baked in when the episode
+    // was generated, so an edit made in Workflows shows up here
+    // immediately too. The board spans many different episodes/clients at
+    // once (unlike the episode page's single template), so this fetches
+    // each distinct episode referenced by the visible tasks to find its
+    // templateId, then each distinct template those point at, before it
+    // knows which steps to check - two small batched round trips, bounded
+    // by however many different episodes/templates are actually in view
+    // (this board's own query is already capped at 200 tasks).
+    var episodeIds = tasks.map(function(t){ return t.episodeId; }).filter(function(id,i,arr){ return arr.indexOf(id)===i; });
+    Promise.all(episodeIds.map(function(id){ return db.doc('episodes/'+id).get().catch(function(){ return {exists:false}; }); }))
+      .then(function(epSnaps){
+        var templateIdByEpisodeId = {};
+        var templateIds = [];
+        epSnaps.forEach(function(s,i){
+          var tplId = (s.exists && s.data().templateId) || null;
+          templateIdByEpisodeId[episodeIds[i]] = tplId;
+          if(tplId && templateIds.indexOf(tplId)===-1) templateIds.push(tplId);
+        });
+        return Promise.all(templateIds.map(function(id){ return db.doc('templates/'+id).get().catch(function(){ return {exists:false}; }); }))
+          .then(function(tplSnaps){
+            var stepsByTemplateId = {};
+            tplSnaps.forEach(function(s,i){ stepsByTemplateId[templateIds[i]] = (s.exists && s.data().steps) || []; });
+            var liveStepByEpisodeId = {};
+            episodeIds.forEach(function(epId){
+              var stepById = {};
+              (stepsByTemplateId[templateIdByEpisodeId[epId]]||[]).forEach(function(s){ stepById[s.stepId] = s; });
+              liveStepByEpisodeId[epId] = stepById;
+            });
+            return liveStepByEpisodeId;
+          });
+      })
+      .then(function(liveStepByEpisodeId){
+        // Unlike the episode page (which already has every sibling task,
+        // including done ones, in one query), this board's query excludes
+        // done tasks entirely - so a prerequisite that's ALREADY done (the
+        // normal case once someone finishes it) won't be in `tasks` at
+        // all. Fetch each referenced prerequisite by its deterministic id
+        // (episodeId + '_' + stepId, same scheme generateEpisodesForRule
+        // uses) instead of assuming it's in this snapshot. A task can wait
+        // on more than one step since 2026-09-22, so this flattens every
+        // task's full (live) dependency list first.
+        var depIds = [];
+        tasks.forEach(function(t){ liveDepStepIds(t, liveStepByEpisodeId[t.episodeId]).forEach(function(sid){ depIds.push(t.episodeId+'_'+sid); }); });
+        depIds = depIds.filter(function(id,i){ return depIds.indexOf(id)===i; });
+        Promise.all(depIds.map(function(id){ return db.doc('tasks/'+id).get().catch(function(){ return {exists:false}; }); }))
+          .then(function(depSnaps){
+            var depById = {};
+            depSnaps.forEach(function(s,i){ if(s.exists) depById[depIds[i]] = s.data(); });
+            renderBoardBody(box, tasks, depById, showingAll, liveStepByEpisodeId);
+          });
       });
   }, function(){ var b=document.getElementById('boardBody'); if(b) b.innerHTML='<div class="empty-state">Could not load your board.</div>'; });
   activeUnsubs.push(unsub);
 }
 
-function renderBoardBody(box, tasks, depById, showingAll){
+function renderBoardBody(box, tasks, depById, showingAll, liveStepByEpisodeId){
   var groups = {overdue:[], 'due-soon':[], upcoming:[]};
   tasks.forEach(function(t){
     var s = dueStatus(t.dueDate,false);
@@ -1908,7 +2072,7 @@ function renderBoardBody(box, tasks, depById, showingAll){
     return '<div class="board-group"><div class="board-group-title">'+o[1]+'</div>'+
       groups[o[0]].map(function(t){
         var rr = roleOf(t.role);
-        var depTasks = taskDepStepIds(t).map(function(sid){ return depById[t.episodeId+'_'+sid]; }).filter(Boolean);
+        var depTasks = liveDepStepIds(t, liveStepByEpisodeId[t.episodeId]).map(function(sid){ return depById[t.episodeId+'_'+sid]; }).filter(Boolean);
         var unmet = depTasks.filter(function(dt){ return !dt.done; });
         var isBlocked = unmet.length>0;
         var canCheck = myRole && (myRole===t.role || canManage()) && !isBlocked;
@@ -2373,6 +2537,25 @@ function renderConnect(){
   }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 
+// Shared by both places a pending-invites list is rendered (Team Settings'
+// own team, Admin's across every team) - added 2026-09-23, there was
+// previously no way to cancel an invite at all once created, even a
+// mistyped email or one sent to the wrong role/team. Needs schema_v9.sql
+// (adds the missing delete policy on `invites` - RLS denies every delete
+// on that table without it, so this call would otherwise just silently
+// affect zero rows).
+function wireCancelInviteButtons(box){
+  Array.prototype.forEach.call(box.querySelectorAll('[data-cancel-invite]'), function(btn){
+    btn.addEventListener('click', function(){
+      var id = btn.getAttribute('data-cancel-invite');
+      var email = btn.getAttribute('data-email');
+      if(!confirm('Cancel the invite for '+email+'? Its code stops working immediately - they will need a brand new invite if you change your mind.')) return;
+      btn.disabled = true;
+      cancelInvite(id).then(function(){ showToast('success','Invite canceled'); route(); }).catch(function(err){ btn.disabled=false; showToast('error', errMsg(err)); });
+    });
+  });
+}
+
 // ---------- TEAM SETTINGS (Manager) ----------
 function renderTeamSettings(){
   paint(
@@ -2399,8 +2582,10 @@ function renderTeamSettings(){
     var box = document.getElementById('invitesBox');
     var pending = invites.filter(function(i){ return !i.usedAt; });
     box.innerHTML = pending.length ? pending.map(function(i){
-      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleOf(i.role)?roleOf(i.role).label:i.role)+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div></div>';
+      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleOf(i.role)?roleOf(i.role).label:i.role)+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div>'+
+        '<button type="button" class="btn btn-sm btn-danger" data-cancel-invite="'+escapeHtml(i.id)+'" data-email="'+escapeHtml(i.email)+'" style="margin-left:auto;">Cancel</button></div>';
     }).join('') : '<div class="empty-state">No pending invites.</div>';
+    wireCancelInviteButtons(box);
   }).catch(function(){ document.getElementById('invitesBox').innerHTML = '<div class="empty-state">Could not load invites.</div>'; });
 
   var svcBox = document.getElementById('teamServicesBox');
@@ -2510,8 +2695,10 @@ function renderAdmin(){
     if(!box) return;
     var pending = invites.filter(function(i){ return !i.usedAt; });
     box.innerHTML = pending.length ? pending.map(function(i){
-      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleOf(i.role)?roleOf(i.role).label:i.role)+' · '+escapeHtml(teamName(i.teamId))+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div></div>';
+      return '<div class="roster-row"><div><div class="roster-name">'+escapeHtml(i.email)+'</div><div class="roster-role">'+escapeHtml(roleOf(i.role)?roleOf(i.role).label:i.role)+' · '+escapeHtml(teamName(i.teamId))+' · code <span class="mono">'+escapeHtml(i.id)+'</span></div></div>'+
+        '<button type="button" class="btn btn-sm btn-danger" data-cancel-invite="'+escapeHtml(i.id)+'" data-email="'+escapeHtml(i.email)+'" style="margin-left:auto;">Cancel</button></div>';
     }).join('') : '<div class="empty-state">No pending invites.</div>';
+    wireCancelInviteButtons(box);
   }).catch(function(){ var b=document.getElementById('allInvitesBox'); if(b) b.innerHTML = '<div class="empty-state">Could not load invites.</div>'; });
 
   Promise.all([listTeams(), db.collection('profiles').get()]).then(function(res){

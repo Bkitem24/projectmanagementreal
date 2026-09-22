@@ -341,8 +341,13 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .lightbox-frame img{max-width:92vw;max-height:92vh;border-radius:10px;display:block;box-shadow:var(--shadow-lg);}
 .lightbox-close{position:absolute;top:-14px;right:-14px;background:var(--ink);color:var(--paper);border-radius:50%;width:30px;height:30px;}
 .lightbox-close:hover{background:var(--ink);}
-.lightbox-img-scroll{max-width:92vw;max-height:92vh;overflow:auto;border-radius:10px;}
-.lightbox-frame img{transition:transform .08s linear;transform-origin:top left;}
+/* Round 8.5 (2026-09-23): overflow:hidden, not auto - panning is now done
+   entirely via JS (translate+scale on the img itself, see
+   showImageLightbox), not native container scrolling, which never actually
+   worked here: a CSS transform doesn't grow an element's scrollable area,
+   so there was never anything for overflow:auto to let you scroll to. */
+.lightbox-img-scroll{max-width:92vw;max-height:92vh;overflow:hidden;border-radius:10px;}
+.lightbox-frame img{transition:transform .08s linear;transform-origin:center center;touch-action:none;}
 .lightbox-zoom-controls{position:absolute;top:-14px;left:0;display:flex;align-items:center;gap:6px;background:var(--ink);color:var(--paper);border-radius:99px;padding:5px 10px;font-size:12px;z-index:2;}
 .lightbox-zoom-controls button{background:none;border:none;color:inherit;cursor:pointer;font-size:14px;line-height:1;padding:2px 4px;}
 .lightbox-zoom-controls button:hover{opacity:.7;}
