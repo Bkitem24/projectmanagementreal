@@ -7,22 +7,28 @@ name: Build Windows exe
 # Phase 2.5 batch A (2026-09-26): only the NSIS installer is built now (MSI
 # dropped, both here and in src-tauri/tauri.conf.json's bundle.targets) -
 # one installer instead of two. For a real "just download one .exe, no zip"
-# result, push a VERSION TAG for each release build (not just a push to
-# main) - GitHub always wraps an Actions run's "Artifacts" tab download in
-# a zip regardless of how many files are inside, but a GitHub Release
-# serves each attached file raw. Easiest way to push a tag with no local
-# git: go to the repo's "Releases" page -> "Draft a new release" -> click
-# "Choose a tag" -> type a new tag like v8.9 -> "+ Create new tag: v8.9 on
-# publish" -> fill in a title -> "Publish release". That tag push triggers
-# this workflow (see the tags trigger below), and this workflow's own
-# tauri-action step then attaches the built blue-kite-ops.exe to that same
-# release as a plain downloadable file - no zip. A plain push to main (no
-# tag) still works exactly as before for a quick test build, just keep
-# downloading that one from the Artifacts tab as usual.
+# result, push a VERSION TAG for each release build - GitHub always wraps
+# an Actions run's "Artifacts" tab download in a zip regardless of how many
+# files are inside, but a GitHub Release serves each attached file raw.
+# Easiest way to push a tag with no local git: go to the repo's "Releases"
+# page -> "Draft a new release" -> click "Choose a tag" -> type a new tag
+# like v8.9 -> "+ Create new tag: v8.9 on publish" -> fill in a title ->
+# "Publish release". That tag push triggers this workflow (see the tags
+# trigger below), and this workflow's own tauri-action step then attaches
+# the built blue-kite-ops.exe to that same release as a plain downloadable
+# file - no zip.
+#
+# Changed 2026-09-26: this used to also build on every plain push to main,
+# which meant a routine file edit (even one with a typo to fix) kicked off
+# a full ~10 minute Windows build every time. Now a push to main by itself
+# does NOT trigger a build - only a version-tag push does (above), or a
+# manual run: go to the repo's "Actions" tab -> "Build Windows exe" (left
+# sidebar) -> "Run workflow" button (top right) -> "Run workflow" again to
+# confirm. Use the manual run for a quick one-off test build without
+# minting a version tag/release for it.
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
   workflow_dispatch: {}
 
