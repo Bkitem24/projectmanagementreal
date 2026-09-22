@@ -4660,10 +4660,17 @@ function mountMusicPlayer(moods){
     var moodSelect = document.getElementById('musicMoodSelect');
     if(!meta) return; // widget got torn down (e.g. sign-out) - nothing to update
     if(!s.hasTracks){
+      meta.hidden = false;
       meta.textContent = 'No tracks in "'+(s.moodLabel||'')+'" yet';
       return;
     }
-    meta.textContent = (s.track && s.track.title) ? s.track.title : (s.moodLabel||'Loading…');
+    // Phase 5: track title text hidden per Humayun's request - the player
+    // still needs SOME feedback while a track is cueing (title not fetched
+    // from YouTube yet), so the "Loading…" state still shows briefly, it's
+    // just the actual song title that stays hidden once playback starts.
+    if(s.track && s.track.title){ meta.hidden = true; return; }
+    meta.hidden = false;
+    meta.textContent = s.moodLabel || 'Loading…';
     if(toggleBtn) toggleBtn.textContent = s.playing ? '❚❚' : '▶';
     if(muteBtn) muteBtn.textContent = s.muted ? '🔇' : '🔊';
     if(volume && document.activeElement!==volume) volume.value = s.volume;

@@ -137,6 +137,26 @@ function loadYouTubeApi() {
   return ytApiPromise;
 }
 
+// Phase 5 (2026-09-29): "autoplay on first click/interaction rather than
+// requiring an explicit play button" - browsers still require a real user
+// gesture before they'll allow audio to start (autoplay:1 on the embed
+// itself gets silently blocked), so this can't just be `autoplay:1` in
+// playerVars. Instead, the very first click or keypress anywhere in the
+// app after the player's mounted plays it - satisfies both the browser's
+// gesture requirement and "don't make me hunt for the play button".
+let autoplayArmed = false;
+function armAutoplayOnFirstGesture() {
+  if (autoplayArmed) return;
+  autoplayArmed = true;
+  const handler = () => {
+    document.removeEventListener('click', handler, true);
+    document.removeEventListener('keydown', handler, true);
+    if (player && player.playVideo) player.playVideo();
+  };
+  document.addEventListener('click', handler, true);
+  document.addEventListener('keydown', handler, true);
+}
+
 let player = null;
 // Phase 4 (2026-09-28): signup moved from picking ONE mood to picking any
 // number of them - activeMoods is that full set; filterMood optionally
@@ -221,6 +241,7 @@ export function initPlayer(mountElId, moods) {
   activeMoods = (moods || []).filter((m) => CATALOG[m]);
   filterMood = null;
   if (!activeMoods.length) { notify(); return; }
+  armAutoplayOnFirstGesture();
   loadYouTubeApi().then((YT) => {
     if (player) { loadItem(pickRandom(), false); return; }
     player = new YT.Player(mountElId, {
