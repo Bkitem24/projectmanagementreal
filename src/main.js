@@ -855,17 +855,17 @@ function renderSpotlight(container){
     }
     if(!s || !s.employeeId){
       if(!canManage()) { container.innerHTML=''; return; }
-      container.innerHTML = '<div class="spotlight-banner" style="background:linear-gradient(120deg,var(--line-soft),var(--line));color:var(--ink);">'+
-        '<div class="spotlight-body"><div class="spotlight-eyebrow" style="opacity:.7;">Employee of the month</div>'+
+      container.innerHTML = '<div class="spotlight-banner">'+
+        '<div class="spotlight-body"><div class="spotlight-eyebrow">Employee of the month</div>'+
         '<div class="spotlight-name">Not set yet</div><div class="spotlight-note">Pick this month\'s spotlight.</div></div>'+
-        '<button type="button" class="btn spotlight-edit" id="spotlightEditBtn" style="background:var(--surface);color:var(--ink);border-color:var(--line);">Set spotlight</button></div>';
+        '<button type="button" class="btn spotlight-edit" id="spotlightEditBtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg> Set spotlight</button></div>';
       wireEditBtn();
     } else {
       fetchProfiles([s.employeeId]).then(function(ps){
         var p = ps[s.employeeId] || {name:'Someone', initial:'?', color:'#888', avatarUrl:''};
         container.innerHTML = '<div class="spotlight-banner">'+
           (p.avatarUrl ? '<img class="spotlight-photo" src="'+escapeHtml(p.avatarUrl)+'">' : '<div class="spotlight-photo" style="display:flex;align-items:center;justify-content:center;font-family:var(--font-display);font-size:28px;font-weight:700;background:'+p.color+';color:#fff;">'+escapeHtml(p.initial)+'</div>')+
-          '<div class="spotlight-body"><div class="spotlight-eyebrow">🏆 Employee of the month</div>'+
+          '<div class="spotlight-body"><div class="spotlight-eyebrow">Employee of the month</div>'+
           '<div class="spotlight-name">'+escapeHtml(p.name)+'</div>'+
           (s.note?'<div class="spotlight-note">'+escapeHtml(s.note)+'</div>':'')+'</div>'+
           (canManage()?'<button type="button" class="btn spotlight-edit" id="spotlightEditBtn">Edit</button>':'')+
@@ -2322,7 +2322,16 @@ function getMentionRoster(){
 }
 function loadCollab(kind, id, panel){
   var cfg = COLLAB_TABLES[kind];
-  panel.innerHTML = '<div class="skeleton" style="height:40px;"></div>';
+  // Phase 5 polish: this used to blank the whole thread to a shimmering
+  // skeleton on EVERY reload, including right after sending your own
+  // message - meaning the message you just typed, the composer, and the
+  // rest of the thread all flashed away and reloaded from scratch on every
+  // single send. Only do that jarring full-blank on the true first load;
+  // every reload after that (send/edit/delete/react/etc., all of which
+  // call this same function to refresh) now keeps the current thread
+  // visible while refetching, then fades the refreshed content in.
+  var isReload = panel.getAttribute('data-collab-ready')==='1';
+  if(!isReload) panel.innerHTML = '<div class="skeleton" style="height:40px;"></div>';
   Promise.all([
     supabase.from(cfg.comments).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
     supabase.from(cfg.links).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
@@ -2483,8 +2492,9 @@ function loadCollab(kind, id, panel){
         // "grouped" against whatever the last top-level message happened
         // to be.
         var prevTop = null;
+        panel.setAttribute('data-collab-ready','1');
         panel.innerHTML =
-          '<div class="collab-list">'+
+          '<div class="collab-list collab-fade-in">'+
             (topLevelComments.length ? topLevelComments.map(function(c){
               var topGrouped = isContinuation(prevTop, c);
               prevTop = c;

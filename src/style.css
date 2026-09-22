@@ -7,21 +7,21 @@
    no explicit choice has been made (data-theme absent).
    ========================================================================== */
 :root{
-  --ink:#12151b;
-  --ink-soft:#434b56;
-  --paper:#f4f8fc;
+  --ink:#16244a;
+  --ink-soft:#44567f;
+  --paper:#eef3fb;
   --surface:#ffffff;
-  --line:#dbe6f0;
-  --line-soft:#eaf1f8;
-  --muted:#6b7480;
+  --line:#e1e9f7;
+  --line-soft:#eef3fb;
+  --muted:#7c88a8;
 
-  /* Sampled directly from the Blue Kite Media logo/site (bluekitemedia.com):
-     the mark's own two-tone blue gradient (vivid blue -> deep navy), its pale
-     circle backdrop, and the warm gold-orange used for accents/borders there. */
-  --blue:#1c47d6;
-  --blue-2:#0d1c6e;
+  /* Phase 5 "Take Flight" palette - sampled directly from the sky/mountain
+     hero banner + light/dark home mockups (2026-09 UI/UX overhaul), not the
+     old bluekitemedia.com site swatch this replaced. */
+  --blue:#2f6fed;
+  --blue-2:#1c4fc0;
   --blue-ink:#ffffff;
-  --blue-soft:#dde7fb;
+  --blue-soft:#e2edfd;
 
   --accent:#e2941f;
   --accent-2:#b9740f;
@@ -45,12 +45,12 @@
 
   --online:#2fb463;
 
-  --shadow-sm:0 1px 2px rgba(18,25,38,.05);
-  --shadow:0 1px 2px rgba(18,25,38,.05),0 10px 24px -8px rgba(18,25,38,.12);
-  --shadow-lg:0 6px 16px rgba(18,25,38,.10),0 26px 50px -14px rgba(18,25,38,.22);
-  --radius:12px;
-  --font-display:'Barlow Condensed',system-ui,sans-serif;
-  --font-body:'IBM Plex Sans',system-ui,sans-serif;
+  --shadow-sm:0 1px 3px rgba(22,36,74,.06);
+  --shadow:0 2px 6px rgba(22,36,74,.05),0 14px 32px -12px rgba(22,36,74,.16);
+  --shadow-lg:0 8px 20px rgba(22,36,74,.10),0 30px 60px -16px rgba(22,36,74,.26);
+  --radius:16px;
+  --font-display:'Plus Jakarta Sans',system-ui,sans-serif;
+  --font-body:'Plus Jakarta Sans',system-ui,sans-serif;
   --font-mono:'IBM Plex Mono',ui-monospace,monospace;
   --ease:cubic-bezier(.16,1,.3,1);
 }
@@ -58,9 +58,9 @@
 /* Dark mode: follows the OS automatically... */
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
-    --ink:#eef2f6; --ink-soft:#c3ccd6; --paper:#0c0f14; --surface:#151a22;
-    --line:#262e3a; --line-soft:#1c222c; --muted:#8b95a3;
-    --blue:#5b84f5; --blue-2:#2f4fc7; --blue-ink:#08132f; --blue-soft:#16224a;
+    --ink:#eef4ff; --ink-soft:#bfd2f0; --paper:#071b38; --surface:#0f2748;
+    --line:#1c3a63; --line-soft:#122c50; --muted:#93aed6;
+    --blue:#4d8dff; --blue-2:#2f6fed; --blue-ink:#08132f; --blue-soft:#163f74;
     --accent:#f2b955; --accent-2:#d99a2e; --accent-ink:#2a1502; --accent-soft:#3a2b13;
     --good:#5ac787; --good-soft:#173425; --waiting:#e0b467; --waiting-soft:#3a2b13;
     --overdue:#f28a7d; --overdue-soft:#3a1e1b;
@@ -71,9 +71,9 @@
 }
 /* ...or is forced on regardless of the OS, via the in-app toggle. */
 :root[data-theme="dark"]{
-  --ink:#eef2f6; --ink-soft:#c3ccd6; --paper:#0c0f14; --surface:#151a22;
-  --line:#262e3a; --line-soft:#1c222c; --muted:#8b95a3;
-  --blue:#5b84f5; --blue-2:#2f4fc7; --blue-ink:#08132f; --blue-soft:#16224a;
+  --ink:#eef4ff; --ink-soft:#bfd2f0; --paper:#071b38; --surface:#0f2748;
+  --line:#1c3a63; --line-soft:#122c50; --muted:#93aed6;
+  --blue:#4d8dff; --blue-2:#2f6fed; --blue-ink:#08132f; --blue-soft:#163f74;
   --accent:#f2b955; --accent-2:#d99a2e; --accent-ink:#2a1502; --accent-soft:#3a2b13;
   --good:#5ac787; --good-soft:#173425; --waiting:#e0b467; --waiting-soft:#3a2b13;
   --overdue:#f28a7d; --overdue-soft:#3a1e1b;
@@ -86,8 +86,8 @@
 html,body{height:100%;margin:0;}
 body{
   background:
-    radial-gradient(1200px 560px at 10% -10%, rgba(28,71,214,.10), transparent 60%),
-    radial-gradient(900px 480px at 100% 0%, rgba(226,148,31,.06), transparent 55%),
+    radial-gradient(1200px 560px at 10% -10%, rgba(47,111,237,.09), transparent 60%),
+    radial-gradient(900px 480px at 100% 0%, rgba(226,148,31,.05), transparent 55%),
     var(--paper);
   color:var(--ink);font-family:var(--font-body);
   transition:background-color .25s ease,color .25s ease;
@@ -100,14 +100,14 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 #main::-webkit-scrollbar,#sidebar::-webkit-scrollbar{width:8px;}
 #main::-webkit-scrollbar-thumb,#sidebar::-webkit-scrollbar-thumb{background:var(--line);border-radius:8px;}
 #shell{display:flex;min-height:100vh;}
-#sidebar{width:256px;flex:none;background:rgba(255,255,255,.72);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:16px;padding:18px 14px;position:sticky;top:0;height:100vh;overflow-y:auto;}
-:root[data-theme="dark"] #sidebar{ background:rgba(21,26,34,.78);}
-@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) #sidebar{ background:rgba(21,26,34,.78);} }
-.brand{display:flex;align-items:center;gap:10px;padding:2px 2px 14px;border-bottom:1px solid var(--line);}
-.brand-mark{width:40px;height:40px;border-radius:12px;background:var(--blue-soft);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 3px 10px -2px rgba(28,63,214,.28);}
-.brand-mark img{width:74%;height:74%;object-fit:contain;}
-.brand-name{font-family:var(--font-display);font-weight:600;font-size:19px;line-height:1;}
-.brand-sub{font-size:11px;color:var(--muted);letter-spacing:1.4px;text-transform:uppercase;margin-top:4px;}
+#sidebar{width:264px;flex:none;background:rgba(255,255,255,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-right:1px solid var(--line);display:flex;flex-direction:column;gap:16px;padding:18px 14px;position:sticky;top:0;height:100vh;overflow-y:auto;}
+:root[data-theme="dark"] #sidebar{ background:rgba(9,30,66,.86);}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) #sidebar{ background:rgba(9,30,66,.86);} }
+.brand{display:flex;align-items:center;gap:11px;padding:2px 2px 14px;border-bottom:1px solid var(--line);}
+.brand-mark{width:42px;height:42px;border-radius:13px;background:var(--blue-soft);display:flex;align-items:center;justify-content:center;flex:none;box-shadow:0 3px 10px -2px rgba(47,111,237,.28);}
+.brand-mark img{width:76%;height:76%;object-fit:contain;}
+.brand-name{font-family:var(--font-display);font-weight:700;font-size:18px;line-height:1.15;letter-spacing:-.1px;}
+.brand-sub{font-size:13px;font-weight:500;color:var(--blue);opacity:.8;line-height:1;margin-top:4px;}
 .role-box{background:var(--paper);border:1px solid var(--line);border-radius:var(--radius);padding:11px;}
 .role-box-label{font-size:10px;text-transform:uppercase;letter-spacing:1.2px;color:var(--muted);margin-bottom:7px;font-weight:600;}
 .role-current{display:flex;align-items:center;gap:8px;}
@@ -140,7 +140,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .nav-add{margin:8px 10px 0;font-size:12.5px;color:var(--accent-2);background:none;border:none;cursor:pointer;text-align:left;padding:4px 0;font-weight:600;}
 .nav-add:hover{text-decoration:underline;}
 .sidebar-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:10px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);}
-.theme-toggle{background:none;border:1px solid var(--line);border-radius:8px;width:30px;height:30px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-soft);transition:border-color .15s ease,transform .12s ease,background .15s ease;}
+.theme-toggle{background:none;border:1px solid var(--line);border-radius:9px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:var(--ink-soft);transition:border-color .15s ease,transform .12s ease,background .15s ease;}
 .theme-toggle:hover{border-color:var(--blue);transform:translateY(-1px) rotate(8deg);background:var(--blue-soft);}
 /* Notification bell (Phase 4: @mentions + a real notification path) -
    #notifBellBtn reuses .theme-toggle's own square-icon-button look so it
@@ -204,10 +204,10 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .btn-sm{padding:6px 11px;font-size:12.5px;width:auto;}
 .btn-danger{color:var(--overdue);border-color:var(--overdue-soft);}
 .btn-danger:hover{border-color:var(--overdue);background:var(--overdue-soft);}
-.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:15px;}
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:18px;}
 .client-card{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:0;box-shadow:var(--shadow);text-decoration:none;color:var(--ink);overflow:hidden;display:flex;flex-direction:column;transition:transform .18s var(--ease),box-shadow .18s ease,border-color .18s ease;}
 .client-card:hover{border-color:var(--blue);transform:translateY(-4px);box-shadow:var(--shadow-lg);}
-.client-card-rail{height:64px;background-size:cover;background-position:center;position:relative;overflow:hidden;}
+.client-card-rail{height:92px;background-size:cover;background-position:center;position:relative;overflow:hidden;}
 /* Edit/delete straight from the home card (2026-09-28) - sits on the rail
    so it reads the same regardless of whether the rail is a photo or a
    plain color gradient; hover-revealed like every other row-action this
@@ -338,6 +338,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
    the message (top-right) instead of a row that pushes layout around. See
    loadCollab()'s isContinuation()/renderComment() in main.js. */
 .collab-list{display:flex;flex-direction:column;gap:10px;padding:4px 2px;}
+.collab-fade-in{animation:fadeIn .16s ease;}
 .collab-empty{font-size:13px;color:var(--muted);padding:14px 2px;}
 .comment-row{font-size:13.5px;display:flex;gap:11px;padding:5px 10px;border-radius:10px;transition:background .1s ease;position:relative;}
 .comment-row:hover{background:var(--paper);}
@@ -561,16 +562,15 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .avatar-drop img{width:84px;height:84px;object-fit:cover;border-radius:14px;margin-bottom:8px;}
 .avatar-drop-hint{font-size:12px;color:var(--muted);}
 
-/* ---------- spotlight banner ---------- */
-.spotlight-banner{position:relative;overflow:hidden;border-radius:18px;padding:26px 26px;margin-bottom:30px;display:flex;align-items:center;gap:20px;background:linear-gradient(120deg,var(--blue),var(--blue-2));color:#fff;box-shadow:var(--shadow-lg);}
-.spotlight-banner::after{content:'';position:absolute;inset:0;background:radial-gradient(400px 220px at 90% -20%, rgba(226,148,31,.35), transparent 60%);}
+/* ---------- spotlight / hero banner ("Take Flight") ---------- */
+.spotlight-banner{position:relative;overflow:hidden;border-radius:20px;min-height:196px;padding:26px 30px;margin-bottom:30px;display:flex;align-items:center;gap:20px;background:linear-gradient(100deg,rgba(10,22,48,.55) 0%,rgba(10,22,48,.08) 55%,transparent 80%),url('/hero-banner.webp') center/cover no-repeat,linear-gradient(120deg,var(--blue),var(--blue-2));color:#fff;box-shadow:var(--shadow-lg);}
 .spotlight-photo{width:76px;height:76px;border-radius:16px;object-fit:cover;border:3px solid rgba(255,255,255,.5);flex:none;position:relative;z-index:1;box-shadow:var(--shadow);}
 .spotlight-body{position:relative;z-index:1;flex:1;}
-.spotlight-eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;opacity:.85;font-weight:700;}
-.spotlight-name{font-family:var(--font-display);font-size:26px;font-weight:700;margin-top:2px;}
-.spotlight-note{font-size:13.5px;opacity:.92;margin-top:4px;max-width:520px;}
-.spotlight-edit{position:relative;z-index:1;background:rgba(255,255,255,.16);border:1px solid rgba(255,255,255,.4);color:#fff;}
-.spotlight-edit:hover{background:rgba(255,255,255,.28);border-color:#fff;}
+.spotlight-eyebrow{font-size:11px;text-transform:uppercase;letter-spacing:1.6px;opacity:.9;font-weight:700;text-shadow:0 1px 6px rgba(0,0,0,.35);}
+.spotlight-name{font-family:var(--font-display);font-size:27px;font-weight:800;margin-top:3px;text-shadow:0 2px 14px rgba(0,0,0,.4);}
+.spotlight-note{font-size:13.5px;opacity:.95;margin-top:4px;max-width:460px;text-shadow:0 1px 8px rgba(0,0,0,.35);}
+.spotlight-edit{position:relative;z-index:1;background:#fff;border:1px solid #fff;color:#16244a;font-weight:600;border-radius:999px;box-shadow:0 4px 14px -2px rgba(8,20,48,.35);}
+.spotlight-edit:hover{background:#e2edfd;border-color:#e2edfd;transform:translateY(-1px);}
 
 /* ---------- clock-in overlay ---------- */
 .clockin-overlay{position:fixed;inset:0;z-index:80;background:rgba(10,14,20,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .18s ease;}
