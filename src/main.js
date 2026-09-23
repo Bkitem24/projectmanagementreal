@@ -875,6 +875,25 @@ function heroBackgroundStyle(hero){
   return 'background-image:linear-gradient(100deg,rgba(10,22,48,.55) 0%,rgba(10,22,48,.08) 55%,transparent 80%),url(\''+escapeHtml(url)+'\');'+
     'background-position:0 0,'+x+'% '+y+'%;background-size:auto,cover;background-repeat:no-repeat,no-repeat;';
 }
+// Zoom beyond a plain cover fit (see openHeroEditModal's own applyZoom for
+// the full reasoning) needs the image's real natural dimensions, which
+// aren't known synchronously while building the inline style string above -
+// this runs right after the banner element actually exists in the DOM and
+// swaps in an explicit pixel background-size for just the photo layer once
+// the image has loaded, leaving the gradient layer (layer 1) alone. A
+// no-op whenever zoom is unset/100 (the common case), so nothing async
+// happens at all unless someone's actually used the zoom control.
+function applyHeroZoomToBanner(bannerEl, hero){
+  if(!bannerEl || !hero || !hero.heroZoom || hero.heroZoom<=100) return;
+  var img = new Image();
+  img.onload = function(){
+    var rect = bannerEl.getBoundingClientRect();
+    var coverScale = Math.max(rect.width/img.naturalWidth, rect.height/img.naturalHeight);
+    var w = img.naturalWidth*coverScale*(hero.heroZoom/100), h = img.naturalHeight*coverScale*(hero.heroZoom/100);
+    bannerEl.style.backgroundSize = 'auto, '+w+'px '+h+'px';
+  };
+  img.src = hero.heroImageUrl || '/hero-banner.webp';
+}
 
 function renderSpotlight(container){
   var monthKey = currentMonthKey();
@@ -899,6 +918,7 @@ function renderSpotlight(container){
         '<div class="spotlight-name">Not set yet</div><div class="spotlight-note">Pick this month\'s spotlight.</div></div>'+
         '<button type="button" class="btn spotlight-edit" id="spotlightEditBtn"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg> Set spotlight</button></div>';
       wireCommon();
+      applyHeroZoomToBanner(container.querySelector('.spotlight-banner'), latestHero);
     } else {
       fetchProfiles([s.employeeId]).then(function(ps){
         var p = ps[s.employeeId] || {name:'Someone', initial:'?', color:'#888', avatarUrl:''};
@@ -910,6 +930,7 @@ function renderSpotlight(container){
           (mgr?'<button type="button" class="btn spotlight-edit" id="spotlightEditBtn">Edit</button>':'')+
           '</div>';
         wireCommon();
+        applyHeroZoomToBanner(container.querySelector('.spotlight-banner'), latestHero);
       }).catch(function(){ container.innerHTML=''; });
     }
   }
@@ -941,49 +962,81 @@ function openHeroEditModal(existingHero){
   if(activeHeroDragUp){ document.removeEventListener('mouseup', activeHeroDragUp); activeHeroDragUp = null; }
   var posX = (existingHero && existingHero.heroPosX!=null) ? existingHero.heroPosX : 53;
   var posY = (existingHero && existingHero.heroPosY!=null) ? existingHero.heroPosY : 56;
+  var zoom = (existingHero && existingHero.heroZoom!=null) ? existingHero.heroZoom : 100;
   var imageUrl = (existingHero && existingHero.heroImageUrl) || '/hero-banner.webp';
   var pendingBlob = null;
+  var naturalW = null, naturalH = null;
 
   openModal('Edit hero image', '<div class="field">'+
     '<div class="hero-edit-preview" id="heroEditPreview" style="background-image:url(\''+escapeHtml(imageUrl)+'\');background-position:'+posX+'% '+posY+'%;">'+
     '<div class="hero-edit-hint">Drag to reposition</div></div>'+
     '</div>'+
+    '<div class="field"><label>Zoom</label><input type="range" id="heroZoomInput" min="100" max="250" value="'+zoom+'"></div>'+
     '<div class="field"><label>Replace image</label><input type="file" accept="image/*" id="heroImageFileInput"></div>'+
-    '<div class="field-hint">Position is saved automatically when you drag - "Save" just confirms it.</div>',
+    '<div class="field-hint">Position and zoom save automatically as you adjust them - "Save" just confirms it.</div>',
     function(){
       setModalBusy(true);
       var uploadStep = pendingBlob
         ? uploadFile(new File([pendingBlob],'hero.jpg',{type:'image/jpeg'}), 'settings/hero_'+Date.now()+'.jpg').then(fileUrl)
         : Promise.resolve(imageUrl);
       uploadStep.then(function(url){
-        return db.doc('appSettings/hero').set({ heroImageUrl:url, heroPosX:posX, heroPosY:posY, updatedBy:myUid, updatedAt:new Date().toISOString() });
+        return db.doc('appSettings/hero').set({ heroImageUrl:url, heroPosX:posX, heroPosY:posY, heroZoom:zoom, updatedBy:myUid, updatedAt:new Date().toISOString() });
       }).then(function(){ closeModal(); showToast('success','Hero image updated'); route(); })
         .catch(function(err){ showModalError(errMsg(err)); });
     }, 'Save', {large:true});
 
   var preview = document.getElementById('heroEditPreview');
   var fileInput = document.getElementById('heroImageFileInput');
+  var zoomInput = document.getElementById('heroZoomInput');
+
+  // Zoom (2026-09-29 ask: "there should also be an option to zoom in, zoom
+  // out on the photo so I can position it perfectly"). background-size:
+  // cover alone has no "amount" to dial up - to zoom BEYOND a plain cover
+  // fit, this computes the image's own cover-equivalent pixel size for the
+  // preview box's actual current dimensions, then scales that by the zoom
+  // percentage and sets background-size in real pixels. Needs the image's
+  // natural (unscaled) dimensions, so this waits for it to load once per
+  // image (existing photo on open, or a freshly uploaded one).
+  function applyZoom(){
+    if(zoom<=100 || !naturalW){ preview.style.backgroundSize = 'cover'; return; }
+    var rect = preview.getBoundingClientRect();
+    var coverScale = Math.max(rect.width/naturalW, rect.height/naturalH);
+    var w = naturalW*coverScale*(zoom/100), h = naturalH*coverScale*(zoom/100);
+    preview.style.backgroundSize = w+'px '+h+'px';
+  }
+  function loadNaturalDims(url){
+    naturalW = null; naturalH = null;
+    var img = new Image();
+    img.onload = function(){ naturalW = img.naturalWidth; naturalH = img.naturalHeight; applyZoom(); };
+    img.src = url;
+  }
+  loadNaturalDims(imageUrl);
+  zoomInput.addEventListener('input', function(){ zoom = +zoomInput.value; applyZoom(); });
+
   fileInput.addEventListener('change', function(){
     var file = fileInput.files[0]; if(!file) return;
     // Wide banner crop, not square - kept at generous resolution since,
     // unlike a small avatar/card thumbnail, this renders at full page
-    // width. No forced aspect crop: background-size:cover handles fitting
-    // whatever shape is uploaded, same as the built-in hero image.
+    // width. No forced aspect crop: background-size:cover (or the zoomed
+    // pixel size above) handles fitting whatever shape is uploaded, same
+    // as the built-in hero image.
     compressImage(file, {maxWidth:2400, maxHeight:900, quality:.85}).then(function(blob){
       pendingBlob = blob;
       imageUrl = URL.createObjectURL(blob);
       preview.style.backgroundImage = "url('"+imageUrl+"')";
+      loadNaturalDims(imageUrl);
     }).catch(function(err){ showToast('error', errMsg(err)); });
   });
 
-  var dragging = false, startMouseX=0, startMouseY=0, startPosX=posX, startPosY=posY;
+  var dragging = false, dragMoved = false, startMouseX=0, startMouseY=0, startPosX=posX, startPosY=posY;
   preview.addEventListener('mousedown', function(ev){
-    dragging = true; startMouseX = ev.clientX; startMouseY = ev.clientY; startPosX = posX; startPosY = posY;
+    dragging = true; dragMoved = false; startMouseX = ev.clientX; startMouseY = ev.clientY; startPosX = posX; startPosY = posY;
     preview.classList.add('dragging');
     ev.preventDefault();
   });
   activeHeroDragMove = function(ev){
     if(!dragging) return;
+    dragMoved = true;
     var rect = preview.getBoundingClientRect();
     // Dragging right/down should visually move the PHOTO right/down (the
     // way dragging a photo under your finger works everywhere else), which
@@ -995,7 +1048,23 @@ function openHeroEditModal(existingHero){
     posY = Math.max(0, Math.min(100, startPosY - dy));
     preview.style.backgroundPosition = posX+'% '+posY+'%';
   };
-  activeHeroDragUp = function(){ if(dragging){ dragging=false; preview.classList.remove('dragging'); } };
+  activeHeroDragUp = function(){
+    if(dragging){
+      dragging=false;
+      preview.classList.remove('dragging');
+      // Real bug (2026-09-29): dragging far enough (toward an extreme
+      // left/right/top/bottom position) can end with the mouse outside the
+      // small preview box, over the modal's dark backdrop - the browser
+      // then fires a click there, which openModal()'s own "click the
+      // backdrop to close" handler treats as "close the modal", even
+      // though the intent was just finishing a drag. One capturing click-
+      // swallower, used once, stops that single synthesized click from
+      // ever reaching the backdrop's own listener - only armed when a real
+      // drag happened (dragMoved), so an ordinary click elsewhere still
+      // closes the modal normally.
+      if(dragMoved) document.addEventListener('click', function swallow(ev){ ev.stopPropagation(); }, {capture:true, once:true});
+    }
+  };
   document.addEventListener('mousemove', activeHeroDragMove);
   document.addEventListener('mouseup', activeHeroDragUp);
 }
@@ -2514,7 +2583,15 @@ function loadCollab(kind, id, panel){
       : Promise.resolve({ data: [] });
     return reactionsPromise.then(function(rres){
       var reactions = (rres && rres.data) || [];
-      var ids = comments.map(function(c){return c.authorId;}).concat(links.map(function(l){return l.addedBy;})).concat(attachments.map(function(a){return a.uploadedBy;})).concat(reactions.map(function(r){return r.userId;})).filter(Boolean);
+      // Real bug (2026-09-29): mentioned people weren't in this list at all,
+      // only authors/link-adders/uploaders/reactors - so who(uid) fell back
+      // to "Someone" for anyone mentioned who hadn't ALSO posted something
+      // else in this exact thread, and mentionifyHtml() deliberately skips
+      // highlighting a "Someone". Looked like a task-vs-episode difference
+      // (worked in one discussion, not another) but was really just "does
+      // this thread happen to already include the mentioned person" -
+      // mentioned ids now always get fetched too.
+      var ids = comments.map(function(c){return c.authorId;}).concat(links.map(function(l){return l.addedBy;})).concat(attachments.map(function(a){return a.uploadedBy;})).concat(reactions.map(function(r){return r.userId;})).concat(comments.reduce(function(acc,c){return acc.concat(c.mentions||[]);},[])).filter(Boolean);
       return fetchProfiles(ids).then(function(ps){
       var editingComment = null, editingLink = null; // id of the row currently in inline-edit mode, if any
       var pendingFile = null; // File staged for the NEXT send, via the composer's attach button
@@ -4839,12 +4916,32 @@ function hideIdleWarningOverlay(){
         var workflowsNav = document.getElementById('navWorkflows'); if(workflowsNav) workflowsNav.hidden = !canManage();
         renderIdentityCard();
         Promise.all([refreshTeamsCache(), refreshServicesCache(), refreshRolesCache()]).then(route);
+        // Real bug (2026-09-29, reported as "the music player never shows
+        // up for employees at all" - true even before the YouTube->Drive
+        // switch, so it was never about either backend): this used to be
+        // wasFirstLoad-only, meaning it got exactly ONE chance, on the
+        // very first profiles snapshot of the session, to see musicMoods
+        // already populated. If that field saved a moment AFTER the first
+        // snapshot fired (e.g. right after signup - see the independent
+        // avatar/mood save above, which is deliberately NOT chained before
+        // the profile even exists) or was set/changed by an admin later in
+        // the same session, profileMoods(p) came back empty on that one
+        // and only chance and the player permanently never mounted for the
+        // rest of the session - every later snapshot (with the real moods
+        // now in place) was simply never looked at again. Moved outside
+        // the wasFirstLoad gate: mountMusicPlayer()/initPlayer() already
+        // guard themselves against re-running (musicPlayerBuilt, the
+        // `if(audioEl) return` in initPlayer), so calling this on every
+        // snapshot is safe and just means it mounts as soon as real data
+        // is actually available, however many snapshots that takes.
+        if(p){
+          var moods = profileMoods(p);
+          if(moods.length){ mountMusicPlayer(moods); musicPlayer.initPlayer('ytMusicMount', moods); }
+        }
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
           listenForConnects(myUid, { onRing: handleIncomingRing, onRingMissed: handleRingMissed });
           startNotificationsListener();
-          var moods = profileMoods(p);
-          if(moods.length){ mountMusicPlayer(moods); musicPlayer.initPlayer('ytMusicMount', moods); }
           // Reconnect to an already-open clock-in (e.g. after a reload)
           // before ever deciding whether to show the "ready to start your
           // day?" prompt - showing that prompt to someone who's already

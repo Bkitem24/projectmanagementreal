@@ -123,7 +123,13 @@ async function listMoodFolders(env) {
   const now = Date.now();
   if (moodFoldersCache && moodFoldersCache.expAtMs > now) return moodFoldersCache.value;
   const q = `'${env.GDRIVE_ROOT_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
-  const data = await driveApiFetch(env, 'files?q=' + encodeURIComponent(q) + '&fields=' + encodeURIComponent('files(id,name)') + '&pageSize=100');
+  // supportsAllDrives/includeItemsFromAllDrives - without these, files.list
+  // can return an empty result for a folder that was shared with the
+  // service account (rather than one it created/owns itself), even though
+  // the share is completely valid - a well-documented Drive API gotcha,
+  // not specific to Shared Drives despite the parameter names (confirmed
+  // 2026-09-29: this was the actual "no tracks in any mood" bug).
+  const data = await driveApiFetch(env, 'files?q=' + encodeURIComponent(q) + '&fields=' + encodeURIComponent('files(id,name)') + '&pageSize=100&supportsAllDrives=true&includeItemsFromAllDrives=true');
   const value = (data.files || [])
     .filter((f) => MOOD_KEYS.indexOf(f.name) > -1)
     .map((f) => ({ key: f.name, folderId: f.id }));
@@ -150,7 +156,7 @@ export default {
         const mood = moods.filter((m) => m.key === moodKey)[0];
         if (!mood) return cors(new Response('[]', { headers: { 'content-type': 'application/json' } }));
         const q = `'${mood.folderId}' in parents and (mimeType contains 'audio/' or mimeType='video/mp4') and trashed=false`;
-        const data = await driveApiFetch(env, 'files?q=' + encodeURIComponent(q) + '&fields=' + encodeURIComponent('files(id,name,size)') + '&pageSize=1000');
+        const data = await driveApiFetch(env, 'files?q=' + encodeURIComponent(q) + '&fields=' + encodeURIComponent('files(id,name,size)') + '&pageSize=1000&supportsAllDrives=true&includeItemsFromAllDrives=true');
         return cors(new Response(JSON.stringify(data.files || []), { headers: { 'content-type': 'application/json' } }));
       }
 
@@ -181,7 +187,7 @@ export default {
         const driveHeaders = { Authorization: 'Bearer ' + token };
         if (range) driveHeaders.Range = range;
         const driveRes = await fetch(
-          'https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media',
+          'https://www.googleapis.com/drive/v3/files/' + fileId + '?alt=media&supportsAllDrives=true',
           { headers: driveHeaders }
         );
         if (!driveRes.ok && driveRes.status !== 206) {

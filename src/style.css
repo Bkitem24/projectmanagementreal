@@ -611,6 +611,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .hero-edit-preview{width:100%;aspect-ratio:21/9;border-radius:12px;background-size:cover;background-position:center;background-repeat:no-repeat;position:relative;cursor:grab;overflow:hidden;user-select:none;}
 .hero-edit-preview.dragging{cursor:grabbing;}
 .hero-edit-hint{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);background:rgba(10,20,40,.55);color:#fff;font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;pointer-events:none;}
+#heroZoomInput{width:100%;accent-color:var(--blue);}
 
 /* ---------- clock-in overlay ---------- */
 .clockin-overlay{position:fixed;inset:0;z-index:80;background:rgba(10,14,20,.6);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:20px;animation:fadeIn .18s ease;}
@@ -719,7 +720,7 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .music-btn{width:28px;height:28px;border-radius:50%;background:linear-gradient(155deg,var(--blue),var(--blue-2));border:none;color:#fff;display:flex;align-items:center;justify-content:center;cursor:pointer;flex:none;transition:transform .12s ease;}
 .music-btn:hover{transform:scale(1.08);}
 .music-btn-ghost{background:var(--line-soft);color:var(--ink-soft);}
-.music-volume{flex:1;accent-color:var(--blue);height:4px;}
+.music-volume{flex:1;min-width:0;width:0;accent-color:var(--blue);height:4px;}
 .music-mood-select{width:100%;font-size:11.5px;padding:6px 8px;border-radius:8px;border:1px solid var(--line);background:var(--paper);color:var(--ink);font-family:inherit;}
 
 @media (max-width:640px){
