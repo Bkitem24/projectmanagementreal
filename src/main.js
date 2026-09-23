@@ -466,7 +466,7 @@ async function refreshRolesCache(){
   try{
     var snap = await db.collection('roles').orderBy('sortOrder','asc').get();
     if(snap.docs.length) ROLES = snap.docs.map(function(d){ return d.data(); });
-  }catch(e){}
+  }catch(e){ console.warn('[blue-kite-ops] could not refresh roles cache:', e); }
   INVITABLE_ROLES = ROLES.filter(function(r){ return r.key!=='manager' && r.key!=='admin'; });
   ASSIGNABLE_ROLES = ROLES.filter(function(r){ return r.key!=='admin'; });
 }
@@ -4914,8 +4914,23 @@ function hideIdleWarningOverlay(){
         }
         var adminNav = document.getElementById('navAdmin'); if(adminNav) adminNav.hidden = !isAdmin();
         var workflowsNav = document.getElementById('navWorkflows'); if(workflowsNav) workflowsNav.hidden = !canManage();
+        // Real bug (2026-09-29, "my own role/everyone's role shows as a raw
+        // lowercase key, even after reloading"): this render call used to
+        // be the ONLY place renderIdentityCard() ever runs, and it fired
+        // synchronously here - BEFORE refreshRolesCache() below has even
+        // started, let alone finished. ROLES starts as a genuinely empty
+        // array (see its own var declaration), so roleOf() always returned
+        // null on this first paint, correctly falling back to showing the
+        // raw role key - and since nothing ever called renderIdentityCard()
+        // again afterward, that wrong render just stayed forever, on every
+        // single load, reload included, regardless of the roles table's
+        // own data (which was never actually the problem). Still called
+        // immediately here for a snappy first paint (ROLES may well
+        // already be populated from earlier in the session), but now also
+        // re-run once refreshRolesCache() actually resolves, so it's
+        // guaranteed to reflect real data at least once per load.
         renderIdentityCard();
-        Promise.all([refreshTeamsCache(), refreshServicesCache(), refreshRolesCache()]).then(route);
+        Promise.all([refreshTeamsCache(), refreshServicesCache(), refreshRolesCache()]).then(function(){ renderIdentityCard(); route(); });
         // Real bug (2026-09-29, reported as "the music player never shows
         // up for employees at all" - true even before the YouTube->Drive
         // switch, so it was never about either backend): this used to be
