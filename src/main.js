@@ -5027,7 +5027,15 @@ var ICON_SKIP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentCo
 function loadMusicBoxPos(){
   try{
     var raw = localStorage.getItem('bko_musicBoxPos');
-    if(raw){ var p = JSON.parse(raw); if(typeof p.left==='number' && typeof p.top==='number') return p; }
+    if(raw){
+      var p = JSON.parse(raw);
+      // Sanity-clamp against the CURRENT window size, not just "is it a
+      // number" - a position saved on a bigger window (or from the
+      // off-screen-default bug this is fixing) could otherwise land
+      // permanently out of view with no way to reach the drag handle to
+      // fix it.
+      if(typeof p.left==='number' && typeof p.top==='number' && p.left>=0 && p.top>=0 && p.left<window.innerWidth-40 && p.top<window.innerHeight-20) return p;
+    }
   }catch(e){}
   return null;
 }
@@ -5064,10 +5072,28 @@ function mountMusicPlayer(moods){
     // float over any page, not just sit docked where the sidebar put it.
     // Only the "now playing" row is the actual drag handle - the buttons/
     // slider/dropdown below it need normal clicks to keep working.
+    // Real bug (2026-09-29, "music plays but the box is invisible"): this
+    // used to measure the box's position via getBoundingClientRect() BEFORE
+    // giving it any explicit left/top - but #musicPlayerBox now lives
+    // outside the sidebar's own layout flow (moved to be a direct child of
+    // <body> in index.html so it can float over the whole app), and a
+    // position:fixed element with no left/top set renders at its normal
+    // in-flow "static" position, which - right after #shell, a full-height
+    // flex row - is BELOW THE VISIBLE VIEWPORT. That off-screen coordinate
+    // was exactly what got saved/applied as its position on every mount.
+    // Fixed: give it a real on-screen position FIRST (temporary, so the
+    // size measurement below is meaningful), then compute a proper
+    // bottom-left default from that if nothing's been saved yet.
     var saved = loadMusicBoxPos();
-    var boxRect0 = box.getBoundingClientRect();
-    box.style.left = (saved ? saved.left : Math.max(12, boxRect0.left)) + 'px';
-    box.style.top = (saved ? saved.top : Math.max(12, boxRect0.top)) + 'px';
+    box.style.left = '16px';
+    box.style.top = '16px';
+    if(saved){
+      box.style.left = saved.left+'px';
+      box.style.top = saved.top+'px';
+    } else {
+      var boxRect0 = box.getBoundingClientRect();
+      box.style.top = Math.max(12, window.innerHeight - boxRect0.height - 16) + 'px';
+    }
     var handle = document.getElementById('musicDragHandle');
     var dragging = false, startMouseX=0, startMouseY=0, startLeft=0, startTop=0;
     handle.addEventListener('mousedown', function(ev){
