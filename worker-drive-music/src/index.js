@@ -71,7 +71,20 @@ async function getAccessToken(env) {
   const now = Date.now();
   if (cachedToken && cachedToken.expAtMs > now + 60000) return cachedToken.value;
 
-  const svc = JSON.parse(env.GDRIVE_SERVICE_ACCOUNT_JSON);
+  const raw = env.GDRIVE_SERVICE_ACCOUNT_JSON || '';
+  let svc;
+  try {
+    svc = JSON.parse(raw);
+  } catch (e) {
+    // "Unexpected end of JSON input" here means the secret itself is
+    // empty/truncated/not valid JSON - not a network problem at all.
+    // Logging the length (never the content) is enough to tell "empty"
+    // apart from "present but malformed" without leaking the credential.
+    throw new Error('GDRIVE_SERVICE_ACCOUNT_JSON secret is not valid JSON (length ' + raw.length + ') - re-set it with: Get-Content "path\\to\\key.json" | npx wrangler secret put GDRIVE_SERVICE_ACCOUNT_JSON');
+  }
+  if (!svc.client_email || !svc.private_key) {
+    throw new Error('GDRIVE_SERVICE_ACCOUNT_JSON parsed but is missing client_email/private_key - make sure the whole downloaded key file was pasted, not a partial copy');
+  }
   const iat = Math.floor(now / 1000);
   const exp = iat + 3600;
   const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
@@ -98,7 +111,13 @@ async function getAccessToken(env) {
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'grant_type=' + encodeURIComponent('urn:ietf:params:oauth:grant-type:jwt-bearer') + '&assertion=' + jwt,
   });
-  const tokenData = await tokenRes.json();
+  const tokenText = await tokenRes.text();
+  let tokenData;
+  try {
+    tokenData = JSON.parse(tokenText);
+  } catch (e) {
+    throw new Error('Google token endpoint returned a non-JSON response (status ' + tokenRes.status + '): ' + tokenText.slice(0, 300));
+  }
   if (!tokenData.access_token) throw new Error('Google auth failed: ' + JSON.stringify(tokenData));
   cachedToken = { value: tokenData.access_token, expAtMs: now + tokenData.expires_in * 1000 };
   return cachedToken.value;

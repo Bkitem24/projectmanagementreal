@@ -66,12 +66,21 @@ async function getTracks(moodKey) {
   return tracks;
 }
 
+function warnAndEmpty(moodKey, err) {
+  // Was a silent `.catch(() => [])` - indistinguishable from a genuinely
+  // empty mood folder, which made "no tracks" impossible to diagnose from
+  // the browser console. A real failure (auth, Drive API, network) now at
+  // least surfaces here, even though the UI still just shows "no tracks"
+  // (a mood-select dropdown isn't the place for a raw error message).
+  console.warn('[blue-kite-ops] could not load tracks for mood "'+moodKey+'":', err);
+  return [];
+}
 async function poolFor(moodKey) {
   if (!moodKey) {
-    const lists = await Promise.all(MOOD_KEYS.map((m) => getTracks(m).catch(() => [])));
+    const lists = await Promise.all(MOOD_KEYS.map((m) => getTracks(m).catch((err) => warnAndEmpty(m, err))));
     return lists.reduce((acc, list) => acc.concat(list), []);
   }
-  return getTracks(moodKey).catch(() => []);
+  return getTracks(moodKey).catch((err) => warnAndEmpty(moodKey, err));
 }
 
 function trackUrl(fileId) {

@@ -4934,9 +4934,9 @@ function hideIdleWarningOverlay(){
         // `if(audioEl) return` in initPlayer), so calling this on every
         // snapshot is safe and just means it mounts as soon as real data
         // is actually available, however many snapshots that takes.
-        if(p){
+        if(p && !hasOptedOutOfMusic(p)){
           var moods = profileMoods(p);
-          if(moods.length){ mountMusicPlayer(moods); musicPlayer.initPlayer('ytMusicMount', moods); }
+          mountMusicPlayer(moods); musicPlayer.initPlayer('ytMusicMount', moods);
         }
         if(wasFirstLoad && p){
           startPresence(myUid, { displayName: p.displayName });
@@ -4968,6 +4968,28 @@ function profileMoods(p){
   if(p && p.musicMood && p.musicMood!=='none') return [p.musicMood];
   return [];
 }
+// Real bug (2026-09-29): the music player was gated on profileMoods(p)
+// having at least one entry - which conflated two very different things
+// as if they were the same: someone who explicitly picked "I'd rather
+// not" at signup (musicMoods: ['none'], a real, deliberate value) versus
+// an account with NO mood data recorded at all (musicMoods: [], musicMood:
+// null - confirmed via a live DB check on a real account from 2026-09-21,
+// predating the mood-picker feature entirely). Both produced an empty
+// array from profileMoods() and both silently never mounted the player -
+// but only the first one is an actual opt-out. Someone in the second
+// group had no way to ever fix this themselves either, since the mood
+// dropdown that could change their pick IS the player widget, which never
+// showed up in the first place - a real chicken-and-egg gap, not just a
+// missing default. Now only a genuine explicit "none" skips mounting;
+// anyone else (including empty/never-set data) gets the player defaulting
+// to Mixed, exactly like a brand-new account with no signup preference
+// captured at all should.
+function hasOptedOutOfMusic(p){
+  if(!p) return false;
+  if(p.musicMoods && p.musicMoods.length===1 && p.musicMoods[0]==='none') return true;
+  if((!p.musicMoods || !p.musicMoods.length) && p.musicMood==='none') return true;
+  return false;
+}
 var musicPlayerBuilt = false;
 var ICON_PLAY = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4l14 8-14 8V4z"/></svg>';
 var ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>';
@@ -4981,6 +5003,22 @@ var ICON_SKIP = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentCo
 // whatever this person happened to pick at signup - see music.js's header
 // comment for why that changed (it was the direct cause of "I can only
 // ever choose Electronic or Mixed").
+// Remembers where this person last dragged the floating music widget to,
+// per device (same reasoning as the sound-mute toggle's own localStorage
+// use - a personal placement preference, not something to sync across
+// devices/accounts). Falls back to a sensible bottom-left default (near
+// where it used to sit, docked in the sidebar) the first time, or if
+// localStorage throws (private window, blocked storage, etc.).
+function loadMusicBoxPos(){
+  try{
+    var raw = localStorage.getItem('bko_musicBoxPos');
+    if(raw){ var p = JSON.parse(raw); if(typeof p.left==='number' && typeof p.top==='number') return p; }
+  }catch(e){}
+  return null;
+}
+function saveMusicBoxPos(left, top){
+  try{ localStorage.setItem('bko_musicBoxPos', JSON.stringify({left:left, top:top})); }catch(e){}
+}
 function mountMusicPlayer(moods){
   var box = document.getElementById('musicPlayerBox');
   if(!box) return;
@@ -4991,7 +5029,7 @@ function mountMusicPlayer(moods){
     }).join('');
     box.innerHTML =
       '<div class="music-player">'+
-        '<div class="music-now-playing"><div class="music-note-icon">'+ICON_SOUND_ON+'</div><div class="music-meta" id="musicMeta">-</div></div>'+
+        '<div class="music-now-playing" id="musicDragHandle" title="Drag to move"><div class="music-note-icon">'+ICON_SOUND_ON+'</div><div class="music-meta" id="musicMeta">-</div></div>'+
         '<div class="music-row">'+
           '<button type="button" class="music-btn" id="musicToggleBtn" title="Play/pause">'+ICON_PLAY+'</button>'+
           '<button type="button" class="music-btn" id="musicSkipBtn" title="Change track">'+ICON_SKIP+'</button>'+
@@ -5005,6 +5043,39 @@ function mountMusicPlayer(moods){
     document.getElementById('musicMuteBtn').addEventListener('click', musicPlayer.toggleMute);
     document.getElementById('musicVolume').addEventListener('input', function(e){ musicPlayer.setVolume(+e.target.value); });
     document.getElementById('musicMoodSelect').addEventListener('change', function(e){ musicPlayer.setFilter(e.target.value||null); });
+
+    // Draggable anywhere in the app (2026-09-29 ask) - moved out of the
+    // sidebar's own flow in index.html into a position:fixed box so it can
+    // float over any page, not just sit docked where the sidebar put it.
+    // Only the "now playing" row is the actual drag handle - the buttons/
+    // slider/dropdown below it need normal clicks to keep working.
+    var saved = loadMusicBoxPos();
+    var boxRect0 = box.getBoundingClientRect();
+    box.style.left = (saved ? saved.left : Math.max(12, boxRect0.left)) + 'px';
+    box.style.top = (saved ? saved.top : Math.max(12, boxRect0.top)) + 'px';
+    var handle = document.getElementById('musicDragHandle');
+    var dragging = false, startMouseX=0, startMouseY=0, startLeft=0, startTop=0;
+    handle.addEventListener('mousedown', function(ev){
+      dragging = true;
+      startMouseX = ev.clientX; startMouseY = ev.clientY;
+      var rect = box.getBoundingClientRect();
+      startLeft = rect.left; startTop = rect.top;
+      ev.preventDefault();
+    });
+    document.addEventListener('mousemove', function(ev){
+      if(!dragging) return;
+      var rect = box.getBoundingClientRect();
+      var maxLeft = window.innerWidth - rect.width - 4, maxTop = window.innerHeight - rect.height - 4;
+      var left = Math.max(4, Math.min(maxLeft, startLeft + (ev.clientX-startMouseX)));
+      var top = Math.max(4, Math.min(maxTop, startTop + (ev.clientY-startMouseY)));
+      box.style.left = left+'px'; box.style.top = top+'px';
+    });
+    document.addEventListener('mouseup', function(){
+      if(!dragging) return;
+      dragging = false;
+      var rect = box.getBoundingClientRect();
+      saveMusicBoxPos(rect.left, rect.top);
+    });
   }
   musicPlayer.onPlayerChange(function(s){
     var meta = document.getElementById('musicMeta');
