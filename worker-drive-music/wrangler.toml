@@ -18,7 +18,7 @@ compatibility_date = "2026-01-01"
 # service account setup steps for how this folder is shared). Not
 # sensitive - just an identifier - so it's a plain var, not a secret.
 [vars]
-GDRIVE_ROOT_FOLDER_ID = "PASTE_YOUR_FOLDER_ID_HERE"
+GDRIVE_ROOT_FOLDER_ID = "1pZZvrynTiUEqYpIboAs2lY8IIezZZZGN"
 
 # Set these with:
 #   npx wrangler secret put GDRIVE_SERVICE_ACCOUNT_JSON
