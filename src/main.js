@@ -10,6 +10,8 @@ import * as timelog from './lib/timelog.js';
 import * as musicPlayer from './lib/music.js';
 import { MOODS } from './lib/music.js';
 import { connectConfigured, listenForConnects, newCallId, ring, declineRing, joinCallRoom, startLocalSession, pullRemoteTrack, endSession } from './lib/connect.js';
+import * as meetingsLib from './lib/meetings.js';
+import { MeetingRecorder, getRecordingsFolder, setRecordingsFolder, pickRecordingsFolder, revealInFolder } from './lib/recorder.js';
 
 // ---------- constants ----------
 // Roles used to be this exact array, hardcoded - Phase 3 ("fully dynamic
@@ -491,6 +493,11 @@ function clearSubs(){ activeUnsubs.forEach(function(u){ try{u();}catch(e){} }); 
 var navBackStack = [];
 var navSkipPush = false;
 var navCurrentHash = null;
+// Set by renderMeetingRoom() while a meeting page is open; route() calls
+// this (then clears it) before rendering wherever navigation is headed
+// next - see route()'s own comment for why a plain live-subscription
+// unsubscribe (clearSubs()) isn't enough for a meeting room on its own.
+var activeMeetingRoomCleanup = null;
 function goBack(){
   if(!navBackStack.length) return;
   var prev = navBackStack.pop();
@@ -817,6 +824,12 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
 
 // ---------- ROUTER ----------
 function route(){
+  // A meeting room isn't just a live subscription (clearSubs() below
+  // handles those) - it holds actual WebRTC sessions and possibly an
+  // in-progress recording, which need a real teardown (leave the room,
+  // close sessions, stop recording) whenever navigation moves away from
+  // it, not just an unsubscribe. See renderMeetingRoom().
+  if(activeMeetingRoomCleanup){ activeMeetingRoomCleanup(); activeMeetingRoomCleanup=null; }
   clearSubs();
   var hash = location.hash.replace(/^#/,'') || '/';
   if(navCurrentHash!==null && navCurrentHash!==hash){
@@ -827,6 +840,7 @@ function route(){
   highlightNav(hash);
   var mClient = hash.match(/^\/client\/([^\/]+)$/);
   var mEpisode = hash.match(/^\/episode\/([^\/]+)$/);
+  var mMeeting = hash.match(/^\/meeting\/([^\/]+)$/);
   if(hash==='/') renderHome();
   else if(hash==='/board') renderBoard();
   else if(hash==='/timelog') renderTimeLog();
@@ -835,8 +849,10 @@ function route(){
   else if(hash==='/admin') renderAdmin();
   else if(hash==='/workflows') renderWorkflows();
   else if(hash==='/activity') renderActivity();
+  else if(hash==='/meetings') renderMeetingsList();
   else if(mClient) renderClient(mClient[1]);
   else if(mEpisode) renderEpisode(mEpisode[1]);
+  else if(mMeeting) renderMeetingRoom(mMeeting[1]);
   else renderHome();
   if(window.innerWidth<=900) document.getElementById('sidebar').classList.remove('open');
   document.getElementById('main').scrollTop = 0;
@@ -4375,10 +4391,12 @@ function renderTeamSettings(){
     '<button type="button" class="btn btn-primary btn-sm" id="inviteBtn" style="width:auto;">+ Invite teammate</button></div>'+
     '<div class="section-head"><h2 class="section-title">Roster</h2></div><div id="rosterBox"><div class="skeleton" style="height:50px;"></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Pending invites</h2></div><div id="invitesBox"><div class="skeleton" style="height:40px;"></div></div></div>'+
-    '<div class="section"><div class="section-head"><h2 class="section-title">Team services</h2><button type="button" class="btn btn-sm" id="newServiceBtn2">+ New service type</button></div><div id="teamServicesBox"></div></div>'
+    '<div class="section"><div class="section-head"><h2 class="section-title">Team services</h2><button type="button" class="btn btn-sm" id="newServiceBtn2">+ New service type</button></div><div id="teamServicesBox"></div></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Meetings usage</h2></div><div id="meetingsUsageBox"><div class="skeleton" style="height:20px;"></div></div></div>'
   );
   document.getElementById('inviteBtn').addEventListener('click', openInviteModal);
   document.getElementById('newServiceBtn2').addEventListener('click', function(){ openCreateServiceTypeModal(null); });
+  renderMeetingsUsageMeter(document.getElementById('meetingsUsageBox'));
 
   // round 8.8/schema_v10: a teammate can hold more than one role now, so the
   // roster needs everyone's full role list (listAllRoles(), one query) -
@@ -4584,6 +4602,570 @@ function loadActivityList(teamId, category){
   }).catch(function(err){ box.innerHTML = '<div class="empty-state">Could not load activity - '+errMsg(err)+'</div>'; });
 }
 
+// ---------- MEETINGS (video calls, screen share, host recording) ----------
+// A separate feature from Connect (audio-only huddles, above) - built the
+// same way (Supabase Realtime signaling + Cloudflare Realtime SFU media)
+// but with its own library (src/lib/meetings.js), its own Worker
+// (worker-meetings/), and its own code path through this file, so nothing
+// here can ever regress Connect. See docs/phase-3-punch-list.md's Meetings
+// round for the full design writeup, and schema_v27.sql for the tables.
+var ICON_MIC = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>';
+var ICON_MIC_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M9 9v3a3 3 0 0 0 4.6 2.55M15 9.34V5a3 3 0 0 0-5.94-.6"/><path d="M19 10v1a7 7 0 0 1-.11 1.23M5 10v1a7 7 0 0 0 11.6 5.29"/><line x1="12" y1="18" x2="12" y2="22"/></svg>';
+var ICON_CAM = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>';
+var ICON_CAM_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1"/><path d="M23 7l-7 5 7 5V7z"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+var ICON_SCREEN = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
+var ICON_RECORD = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>';
+var ICON_HANGUP = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.24.08.48.15.73.2A2 2 0 0 1 20 16.72V19a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.68-3.02"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+
+function meetingIsHost(m){ return !!(m && (m.hostUserId===myUid || isAdmin())); }
+
+// Cost-guardrail usage meter (Phase 5's ask) - approximate, not exact
+// billing (Cloudflare bills real egress bytes; this estimates from known
+// quality settings instead) but enough for an early-warning "you're
+// getting close to the free 1,000 GB/month" signal. RLS on
+// meetingParticipantLogs already scopes this correctly with NO extra
+// filtering needed here: Admin sees every row, a Manager only ever sees
+// their own Team's meetings' rows (plus their own personal ones) - same
+// current_team()/is_admin() pattern as Activity Logs.
+function renderMeetingsUsageMeter(box){
+  if(!box) return;
+  var startOfMonth = new Date(); startOfMonth.setDate(1); startOfMonth.setHours(0,0,0,0);
+  db.collection('meetingParticipantLogs').where('joinedAt','>=', startOfMonth.toISOString()).get().then(function(snap){
+    var totalMinutes = 0;
+    snap.docs.forEach(function(d){
+      var r = d.data();
+      var end = r.leftAt ? new Date(r.leftAt).getTime() : Date.now();
+      totalMinutes += Math.max(0, (end - new Date(r.joinedAt).getTime())/60000);
+    });
+    // ~6 MB/participant-minute is a rough blend of this app's default
+    // video+audio quality settings (small camera tiles, occasional screen
+    // share) - a real number would need to come from Cloudflare's own
+    // billing dashboard, this is only meant as an early-warning estimate.
+    var estGB = (totalMinutes * 6) / 1024;
+    box.innerHTML = '<div class="page-sub">This month so far: <strong>'+Math.round(totalMinutes).toLocaleString()+' participant-minutes</strong> of Meetings (~'+estGB.toFixed(1)+' GB estimated, out of the 1,000 GB Cloudflare gives free every month - check Cloudflare\'s own Billing dashboard for the real figure).</div>';
+  }).catch(function(){ box.innerHTML = ''; });
+}
+
+// ---- list page ----
+function renderMeetingsList(){
+  paint(
+    '<div class="page-head"><div><div class="eyebrow">Meetings</div><h1 class="page-title">Video meetings</h1>'+
+    '<div class="page-sub">Camera, screen share, optional recording - separate from Connect\'s quick audio huddles.</div></div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;"><button type="button" class="btn btn-sm" id="recSettingsBtn">Recording folder</button>'+
+    '<button type="button" class="btn btn-sm" id="scheduleMeetingBtn">+ Schedule</button>'+
+    '<button type="button" class="btn btn-primary btn-sm" id="newInstantMeetingBtn" style="width:auto;">+ Start instant meeting</button></div></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Upcoming &amp; live</h2></div><div id="upcomingMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Past</h2></div><div id="pastMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'
+  );
+  if(!meetingsLib.meetingsConfigured){
+    showToast('error','Meetings isn\'t set up yet - deploy worker-meetings and set VITE_MEETINGS_WORKER_URL (see README.md).');
+  }
+  document.getElementById('recSettingsBtn').addEventListener('click', openRecordingSettingsModal);
+  document.getElementById('newInstantMeetingBtn').addEventListener('click', createAndJoinInstantMeeting);
+  document.getElementById('scheduleMeetingBtn').addEventListener('click', function(){ openScheduleMeetingModal(); });
+
+  var unsub = db.collection('meetings').orderBy('createdAt','desc').limit(100).onSnapshot(function(snap){
+    var list = snap.docs.map(function(d){ var m=d.data(); m._id=d.id; return m; });
+    renderMeetingsGroup('upcomingMeetingsBox', list.filter(function(m){ return m.status!=='ended'; }), true);
+    renderMeetingsGroup('pastMeetingsBox', list.filter(function(m){ return m.status==='ended'; }), false);
+    checkUpcomingMeetingReminders(list);
+  }, function(){});
+  activeUnsubs.push(unsub);
+}
+function renderMeetingsGroup(boxId, list, isUpcoming){
+  var box = document.getElementById(boxId);
+  if(!box) return;
+  box.innerHTML = list.length ? list.map(function(m){
+    var when = m.status==='live' ? 'Live now' : (m.scheduledAt ? fmtDateTime(m.scheduledAt) : fmtDateTime(m.createdAt));
+    return '<div class="roster-row"><div style="min-width:0;flex:1;"><div class="roster-name">'+escapeHtml(m.title)+
+      (m.status==='live'?' <span class="badge" style="background:var(--overdue-soft);color:var(--overdue);">Live</span>':'')+'</div>'+
+      '<div class="roster-role">'+escapeHtml(when)+'</div></div>'+
+      (isUpcoming ? '<a href="#/meeting/'+m._id+'" class="btn btn-sm btn-primary" style="width:auto;">'+(m.status==='live'?'Join':'Open')+'</a>' : '')+
+      '</div>';
+  }).join('') : '<div class="empty-state">Nothing here yet.</div>';
+}
+// Best-effort "meeting starting soon" nudge - checked whenever the
+// Meetings list page loads/refreshes. A real "ping me even if I'm not
+// looking at this page right now" reminder would need a server-side
+// scheduled job (e.g. Supabase pg_cron), which doesn't exist in this
+// project yet - see docs/phase-3-punch-list.md's Meetings round for this
+// known limitation.
+var remindedMeetingIds = {};
+function checkUpcomingMeetingReminders(list){
+  var now = Date.now();
+  list.forEach(function(m){
+    if(m.status!=='scheduled' || !m.scheduledAt || remindedMeetingIds[m._id]) return;
+    var startsInMs = new Date(m.scheduledAt).getTime() - now;
+    if(startsInMs <= 2*60*1000 && startsInMs > -5*60*1000){
+      remindedMeetingIds[m._id] = true;
+      showToast('info', '"'+m.title+'" is starting soon', { duration: 6000 });
+    }
+  });
+}
+
+function openRecordingSettingsModal(){
+  getRecordingsFolder().then(function(folder){
+    openModal('Recording folder', '<div class="field"><label>Meeting recordings save to</label><input type="text" id="recFolderDisplay" value="'+escapeHtml(folder)+'" readonly></div>'+
+      '<div class="field-hint">Only affects new recordings started after you change this.</div>',
+      function(){ closeModal(); }, 'Done');
+    var field = document.querySelector('#modalForm .field');
+    if(!field) return;
+    var btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn btn-sm'; btn.style.marginTop = '8px'; btn.textContent = 'Choose a different folder…';
+    btn.addEventListener('click', function(){
+      pickRecordingsFolder().then(function(path){
+        if(!path) return;
+        setRecordingsFolder(path);
+        var input = document.getElementById('recFolderDisplay'); if(input) input.value = path;
+        showToast('success','Recordings will now save here');
+      }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+    field.appendChild(btn);
+  });
+}
+
+function createAndJoinInstantMeeting(){
+  var id = meetingsLib.newMeetingId();
+  var title = ((myProfile&&myProfile.displayName)||'Someone')+"'s meeting";
+  var nowIso = new Date().toISOString();
+  db.doc('meetings/'+id).set({
+    id:id, title:title, hostUserId:myUid, teamId:myTeamId, status:'live', isInstant:true,
+    scheduledAt:null, startedAt:nowIso, endedAt:null, createdAt:nowIso
+  }).then(function(){ location.hash = '#/meeting/'+id; }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+function openScheduleMeetingModal(){
+  db.collection('profiles').get().then(function(snap){
+    var profiles = snap.docs.map(function(d){ var p=d.data(); p.id=d.id; return p; }).filter(function(p){ return p.id!==myUid; });
+    var byTeam = {};
+    profiles.forEach(function(p){ var t=p.teamId||'_none'; (byTeam[t]=byTeam[t]||[]).push(p); });
+    var teamIds = Object.keys(byTeam).sort(function(a,b){ return (a==='_none'?'zzz':teamName(a)).localeCompare(b==='_none'?'zzz':teamName(b)); });
+    var inviteesHtml = teamIds.map(function(tid){
+      var members = byTeam[tid].sort(function(a,b){ return (a.displayName||a.email||'').localeCompare(b.displayName||b.email||''); });
+      return '<div style="margin-bottom:10px;"><label style="font-weight:700;font-size:12px;display:flex;align-items:center;gap:6px;"><input type="checkbox" data-select-team="'+tid+'"> '+escapeHtml(tid==='_none'?'No team':teamName(tid))+'</label>'+
+        '<div style="margin-left:20px;">'+members.map(function(p){
+          return '<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;padding:2px 0;"><input type="checkbox" name="invitees" value="'+p.id+'" data-team="'+tid+'">'+escapeHtml(p.displayName||p.email)+'</label>';
+        }).join('')+'</div></div>';
+    }).join('') || '<div class="empty-state">No one else to invite yet.</div>';
+    openModal('Schedule a meeting',
+      '<div class="field"><label>Title</label><input required name="title" type="text" placeholder="e.g. Weekly sync"></div>'+
+      '<div class="check-row"><input type="checkbox" id="scheduleLaterCheck" name="scheduleLater"><label for="scheduleLaterCheck">Schedule for later (unchecked = start right now)</label></div>'+
+      '<div class="field" id="scheduleWhenField" hidden><label>Date &amp; time</label><input type="datetime-local" name="scheduledAt"></div>'+
+      '<div class="field"><label>Invite</label><div style="max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:8px;">'+inviteesHtml+'</div></div>',
+      function(fd){
+        var title = (fd.get('title')||'').trim();
+        if(!title){ showModalError('Give the meeting a title.'); return; }
+        var invitees = fd.getAll('invitees');
+        var later = fd.get('scheduleLater')==='on';
+        var scheduledAtRaw = fd.get('scheduledAt');
+        if(later && !scheduledAtRaw){ showModalError('Pick a date and time, or uncheck "Schedule for later".'); return; }
+        setModalBusy(true, later?'Scheduling…':'Starting…');
+        var id = meetingsLib.newMeetingId();
+        var nowIso = new Date().toISOString();
+        var scheduledIso = later ? new Date(scheduledAtRaw).toISOString() : null;
+        db.doc('meetings/'+id).set({
+          id:id, title:title, hostUserId:myUid, teamId:myTeamId,
+          status: later?'scheduled':'live', isInstant: !later,
+          scheduledAt: scheduledIso, startedAt: later?null:nowIso, endedAt:null, createdAt:nowIso
+        }).then(function(){
+          return Promise.all(invitees.map(function(uid){
+            return supabase.from('meetingInvitees').insert({ id:'mi_'+uid8(), meetingId:id, userId:uid, createdAt:nowIso });
+          }));
+        }).then(function(){
+          invitees.forEach(function(uid){
+            insertNotification({
+              userId: uid, type:'meeting_invite',
+              message: (later ? 'Invited to a meeting: "'+title+'" at '+fmtDateTime(scheduledIso) : 'Meeting starting now: "'+title+'"'),
+              link: '#/meeting/'+id, fromUserId: myUid, readAt: null, createdAt: nowIso
+            }).catch(function(err){ console.warn('[blue-kite-ops] meeting invite notification failed:', err); });
+          });
+        }).then(function(){
+          closeModal();
+          if(later){ showToast('success','Meeting scheduled'); route(); }
+          else location.hash = '#/meeting/'+id;
+        }).catch(function(err){ showModalError(errMsg(err)); });
+      }, 'Create');
+    var laterCheck = document.getElementById('scheduleLaterCheck');
+    var whenField = document.getElementById('scheduleWhenField');
+    if(laterCheck) laterCheck.addEventListener('change', function(){ whenField.hidden = !laterCheck.checked; });
+    Array.prototype.forEach.call(document.querySelectorAll('[data-select-team]'), function(cb){
+      cb.addEventListener('change', function(){
+        var tid = cb.getAttribute('data-select-team');
+        Array.prototype.forEach.call(document.querySelectorAll('[data-team="'+tid+'"]'), function(m){ m.checked = cb.checked; });
+      });
+    });
+  }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+function showRecordingSavedModal(path){
+  openModal('Recording saved',
+    '<div class="field"><label>Saved to</label><input type="text" readonly value="'+escapeHtml(path)+'"></div>',
+    function(){ closeModal(); }, 'Done');
+  var actions = document.querySelector('.modal-actions');
+  if(actions){
+    var btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn btn-sm'; btn.style.width='auto'; btn.textContent = 'Open folder';
+    btn.addEventListener('click', function(){ revealInFolder(path).catch(function(err){ showToast('error', errMsg(err)); }); });
+    actions.insertBefore(btn, actions.firstChild);
+  }
+}
+
+// ---- the room itself ----
+function renderMeetingRoom(meetingId){
+  paint('<div class="skeleton" style="height:100px;margin-bottom:20px;"></div><div class="skeleton" style="height:400px;"></div>');
+
+  var mainSession = null, screenSession = null;
+  var roomHandle = null;
+  var pendingPulls = []; // {uid, trackName} - FIFO, matches pc.ontrack order (see wireRemoteAudio's own comment on this same pattern for Connect)
+  var remoteMeta = {};   // uid -> latest presence meta
+  var remoteStreamsForRecording = {}; // uid -> MediaStream (mic) - kept so the recorder can mix in whoever's currently in the room
+  var myParticipantLogId = null;
+  var recorder = null;
+  var iAmRecording = false;
+  var leftAlready = false;
+  var meetingUnsub = null;
+
+  function cleanup(){
+    if(leftAlready) return;
+    leftAlready = true;
+    if(iAmRecording && recorder){ recorder.stop().catch(function(){}); }
+    if(roomHandle){ roomHandle.leave(); }
+    meetingsLib.endSession(mainSession);
+    meetingsLib.endSession(screenSession);
+    if(myParticipantLogId){
+      supabase.from('meetingParticipantLogs').update({ leftAt: new Date().toISOString() }).eq('id', myParticipantLogId).then(function(){});
+    }
+  }
+  activeMeetingRoomCleanup = cleanup;
+
+  db.doc('meetings/'+meetingId).get().then(function(snap){
+    if(!snap.exists){ paint('<div class="empty-state"><strong>Meeting not found</strong>It may have been removed, or you weren\'t invited to it.</div>'); activeMeetingRoomCleanup=null; return; }
+    var m = snap.data();
+    var canHost = meetingIsHost(m);
+
+    paint(
+      '<div class="meeting-room">'+
+      '<div class="meeting-header"><div class="meeting-title-row"><h1 class="page-title" style="margin:0;">'+escapeHtml(m.title)+'</h1>'+
+      '<span id="meetingRecBanner"></span></div>'+
+      '<div style="display:flex;gap:8px;">'+
+      (canHost?'<button type="button" class="btn btn-sm btn-danger" id="endMeetingBtn">End for everyone</button>':'')+
+      '</div></div>'+
+      '<div class="meeting-grid" id="meetingGrid"></div>'+
+      '<div class="meeting-controls">'+
+      '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn active" id="micBtn">'+ICON_MIC+'</button><div class="meeting-ctrl-label">Mic</div></div>'+
+      '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn active" id="camBtn">'+ICON_CAM+'</button><div class="meeting-ctrl-label">Camera</div></div>'+
+      '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn" id="screenBtn">'+ICON_SCREEN+'</button><div class="meeting-ctrl-label">Share</div></div>'+
+      (canHost?'<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn" id="recordBtn">'+ICON_RECORD+'</button><div class="meeting-ctrl-label">Record</div></div>':'')+
+      '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn danger" id="leaveBtn">'+ICON_HANGUP+'</button><div class="meeting-ctrl-label">Leave</div></div>'+
+      '</div></div>'
+    );
+
+    function setRecBanner(on){
+      var el = document.getElementById('meetingRecBanner');
+      if(el) el.innerHTML = on ? '<span class="meeting-recording-banner"><span class="pulse-dot"></span> Recording</span>' : '';
+    }
+
+    function tileId(uid){ return 'meetingTile_'+uid; }
+    function currentTileContainer(){
+      // While a screen share is active, new tiles need to land in the
+      // visible camera strip, not the hidden #meetingGrid (its children
+      // got moved into the strip when the share started - see
+      // showScreenShare/hideScreenShare) - otherwise someone joining
+      // mid-share would be invisible until sharing stops.
+      return document.getElementById('meetingCamStrip') || document.getElementById('meetingGrid');
+    }
+    function ensureTile(uid, name){
+      var grid = currentTileContainer();
+      if(!grid || document.getElementById(tileId(uid))) return;
+      var el = document.createElement('div');
+      el.className = 'meeting-tile';
+      el.id = tileId(uid);
+      el.innerHTML = '<div class="meeting-tile-noVideo">'+escapeHtml((name||'?').trim()[0]||'?').toUpperCase()+'</div>'+
+        '<video autoplay playsinline'+(uid==='me'?' muted':'')+'></video>'+
+        '<div class="meeting-tile-label"><span class="mic-off-icon" style="display:none;">'+ICON_MIC_OFF+'</span><span class="tile-name">'+escapeHtml(name||'Someone')+'</span></div>'+
+        (canHost && uid!=='me' ? '<div class="meeting-host-panel"><button type="button" data-host-mute="'+uid+'">Mute</button><button type="button" data-host-remove="'+uid+'">Remove</button></div>' : '');
+      grid.appendChild(el);
+      wireHostPanelButtons(el);
+      syncRecorderTiles();
+    }
+    function wireHostPanelButtons(el){
+      var muteBtn = el.querySelector('[data-host-mute]');
+      if(muteBtn) muteBtn.addEventListener('click', function(){ roomHandle.sendHostControl('mute', muteBtn.getAttribute('data-host-mute')); });
+      var removeBtn = el.querySelector('[data-host-remove]');
+      if(removeBtn) removeBtn.addEventListener('click', function(){ roomHandle.sendHostControl('remove', removeBtn.getAttribute('data-host-remove')); });
+    }
+    function removeTile(uid){
+      var el = document.getElementById(tileId(uid));
+      if(el) el.remove();
+      syncRecorderTiles();
+    }
+    function setTileVideo(uid, stream){
+      var el = document.getElementById(tileId(uid));
+      if(!el) return;
+      var v = el.querySelector('video');
+      v.srcObject = stream;
+      var noVid = el.querySelector('.meeting-tile-noVideo');
+      if(noVid) noVid.style.display = 'none';
+    }
+    function setTileMicIcon(uid, micOn){
+      var el = document.getElementById(tileId(uid));
+      if(!el) return;
+      var icon = el.querySelector('.mic-off-icon');
+      if(icon) icon.style.display = micOn ? 'none' : '';
+    }
+    function updateTileName(uid, name){
+      var el = document.getElementById(tileId(uid));
+      if(!el) return;
+      var n = el.querySelector('.tile-name'); if(n) n.textContent = name||'Someone';
+    }
+
+    // Hidden <audio> element per remote participant's mic - not shown as
+    // its own tile (the tile's <video> carries the camera picture; audio
+    // just needs to actually play).
+    var audioEls = {};
+    function playRemoteAudio(uid, stream){
+      if(!audioEls[uid]){ audioEls[uid] = document.createElement('audio'); audioEls[uid].autoplay = true; document.body.appendChild(audioEls[uid]); }
+      audioEls[uid].srcObject = stream;
+      remoteStreamsForRecording[uid] = stream;
+      syncRecorderAudio();
+    }
+
+    var screenState = { uid: null, videoEl: null }; // who's currently sharing, if anyone
+    function showScreenShare(uid, name, stream){
+      var grid = document.getElementById('meetingGrid');
+      if(!grid) return;
+      hideScreenShare();
+      grid.classList.add('has-screen');
+      var wrap = document.createElement('div');
+      wrap.className = 'meeting-screen-row';
+      wrap.id = 'meetingScreenRow';
+      var screenTile = document.createElement('div');
+      screenTile.className = 'meeting-tile screen-tile';
+      var v = document.createElement('video');
+      v.autoplay = true; v.playsInline = true; v.srcObject = stream;
+      screenTile.appendChild(v);
+      var label = document.createElement('div');
+      label.className = 'meeting-tile-label'; label.textContent = name+' is presenting'; // .textContent, not innerHTML - no escaping needed
+      screenTile.appendChild(label);
+      var strip = document.createElement('div');
+      strip.className = 'meeting-cam-strip';
+      strip.id = 'meetingCamStrip';
+      wrap.appendChild(screenTile); wrap.appendChild(strip);
+      grid.parentNode.insertBefore(wrap, grid);
+      grid.style.display = 'none';
+      // Move every existing tile into the strip so they're still visible
+      // (small) alongside the shared screen.
+      Array.prototype.forEach.call(grid.children, function(t){ strip.appendChild(t); });
+      screenState = { uid: uid, videoEl: v };
+      syncRecorderTiles();
+    }
+    function hideScreenShare(){
+      var row = document.getElementById('meetingScreenRow');
+      var grid = document.getElementById('meetingGrid');
+      if(row){
+        var strip = document.getElementById('meetingCamStrip');
+        if(strip && grid) Array.prototype.forEach.call(Array.prototype.slice.call(strip.children), function(t){ grid.appendChild(t); });
+        row.remove();
+      }
+      if(grid){ grid.style.display=''; grid.classList.remove('has-screen'); }
+      screenState = { uid: null, videoEl: null };
+      syncRecorderTiles();
+    }
+
+    function syncRecorderTiles(){
+      if(!recorder) return;
+      var tiles = [];
+      if(screenState.uid) tiles.push({ videoEl: screenState.videoEl, isScreen: true, label: '' });
+      Array.prototype.forEach.call(document.querySelectorAll('#meetingGrid .meeting-tile, #meetingCamStrip .meeting-tile'), function(el){
+        var v = el.querySelector('video');
+        var name = el.querySelector('.tile-name');
+        tiles.push({ videoEl: v, isScreen: false, label: name?name.textContent:'' });
+      });
+      recorder.setTiles(tiles);
+    }
+    function syncRecorderAudio(){
+      if(!recorder) return;
+      Object.keys(remoteStreamsForRecording).forEach(function(uid){ recorder.addAudioSource(remoteStreamsForRecording[uid]); });
+    }
+
+    // ---- join local media + the room ----
+    meetingsLib.startLocalSession(true).then(function(session){
+      mainSession = session;
+      ensureTile('me', (myProfile&&myProfile.displayName)||'You');
+      setTileVideo('me', session.stream);
+      updateTileName('me', 'You');
+
+      var nowIso = new Date().toISOString();
+      var patch = { status:'live' };
+      if(!m.startedAt) patch.startedAt = nowIso;
+      db.doc('meetings/'+meetingId).update(patch).catch(function(){});
+
+      var logId = 'mpl_'+uid8();
+      myParticipantLogId = logId;
+      supabase.from('meetingParticipantLogs').insert({ id: logId, meetingId: meetingId, userId: myUid, joinedAt: nowIso }).then(function(){});
+
+      mainSession.pc.ontrack = function(ev){
+        var item = pendingPulls.shift();
+        if(!item) return;
+        if(item.trackName==='mic') playRemoteAudio(item.uid, ev.streams[0]);
+        else if(item.trackName==='camera') setTileVideo(item.uid, ev.streams[0]);
+        else if(item.trackName==='screen'){
+          var meta = remoteMeta[item.uid];
+          showScreenShare(item.uid, (meta&&meta.name)||'Someone', ev.streams[0]);
+        } else if(item.trackName==='screenAudio'){
+          if(!audioEls['screen_'+item.uid]){ audioEls['screen_'+item.uid]=document.createElement('audio'); audioEls['screen_'+item.uid].autoplay=true; document.body.appendChild(audioEls['screen_'+item.uid]); }
+          audioEls['screen_'+item.uid].srcObject = ev.streams[0];
+        }
+      };
+
+      roomHandle = meetingsLib.joinMeetingRoom(meetingId, { id: myUid, name: (myProfile&&myProfile.displayName)||'' }, {
+        sessionId: mainSession.sessionId, camOn:true, micOn:true, screenSessionId:null, recording:false
+      }, {
+        onTrack: function(meta, sessionId, trackName){
+          remoteMeta[meta.uid] = meta;
+          ensureTile(meta.uid, meta.name);
+          updateTileName(meta.uid, meta.name);
+          pendingPulls.push({ uid: meta.uid, trackName: trackName });
+          return meetingsLib.pullRemoteTrack(mainSession.sessionId, sessionId, trackName, mainSession.pc);
+        },
+        onMeta: function(uid, meta){
+          remoteMeta[uid] = meta;
+          ensureTile(uid, meta.name);
+          updateTileName(uid, meta.name);
+          setTileMicIcon(uid, meta.micOn!==false);
+          if(!meta.screenSessionId && screenState.uid===uid) hideScreenShare();
+          if(meta.recording) setRecBanner(true); else if(!Object.keys(remoteMeta).some(function(u){ return remoteMeta[u].recording; }) && !iAmRecording) setRecBanner(false);
+        },
+        onLeft: function(uid){
+          delete remoteMeta[uid];
+          delete remoteStreamsForRecording[uid];
+          if(audioEls[uid]){ audioEls[uid].remove(); delete audioEls[uid]; }
+          if(audioEls['screen_'+uid]){ audioEls['screen_'+uid].remove(); delete audioEls['screen_'+uid]; }
+          if(screenState.uid===uid) hideScreenShare();
+          removeTile(uid);
+          syncRecorderAudio();
+        },
+        onHostControl: function(payload){
+          if(payload.targetUid !== myUid) return;
+          if(payload.action==='mute'){
+            mainSession.stream.getAudioTracks().forEach(function(t){ t.enabled=false; });
+            roomHandle.updateMeta({ micOn:false });
+            updateMicBtn(false);
+            showToast('info','The host muted your microphone');
+          } else if(payload.action==='remove'){
+            showToast('info','The host removed you from this meeting');
+            location.hash = '#/meetings';
+          }
+        }
+      });
+    }).catch(function(err){
+      showToast('error', errMsg(err));
+    });
+
+    // ---- controls ----
+    var micOn = true, camOn = true;
+    function updateMicBtn(on){
+      micOn = on;
+      var btn = document.getElementById('micBtn');
+      if(btn){ btn.classList.toggle('off', !on); btn.classList.toggle('active', on); btn.innerHTML = on?ICON_MIC:ICON_MIC_OFF; }
+    }
+    function updateCamBtn(on){
+      camOn = on;
+      var btn = document.getElementById('camBtn');
+      if(btn){ btn.classList.toggle('off', !on); btn.classList.toggle('active', on); btn.innerHTML = on?ICON_CAM:ICON_CAM_OFF; }
+    }
+    document.getElementById('micBtn').addEventListener('click', function(){
+      if(!mainSession) return;
+      var next = !micOn;
+      mainSession.stream.getAudioTracks().forEach(function(t){ t.enabled = next; });
+      updateMicBtn(next);
+      if(roomHandle) roomHandle.updateMeta({ micOn: next });
+    });
+    document.getElementById('camBtn').addEventListener('click', function(){
+      if(!mainSession) return;
+      var next = !camOn;
+      mainSession.stream.getVideoTracks().forEach(function(t){ t.enabled = next; });
+      updateCamBtn(next);
+      if(roomHandle) roomHandle.updateMeta({ camOn: next });
+    });
+    document.getElementById('screenBtn').addEventListener('click', function(){
+      var btn = document.getElementById('screenBtn');
+      if(screenSession){
+        meetingsLib.endSession(screenSession);
+        screenSession = null;
+        hideScreenShare();
+        if(roomHandle) roomHandle.updateMeta({ screenSessionId: null });
+        btn.classList.remove('active');
+        return;
+      }
+      meetingsLib.startScreenShareSession().then(function(session){
+        screenSession = session;
+        showScreenShare('me', 'You', session.stream);
+        if(roomHandle) roomHandle.updateMeta({ screenSessionId: session.sessionId });
+        btn.classList.add('active');
+        var vTrack = session.stream.getVideoTracks()[0];
+        if(vTrack) vTrack.onended = function(){
+          meetingsLib.endSession(screenSession);
+          screenSession = null;
+          hideScreenShare();
+          if(roomHandle) roomHandle.updateMeta({ screenSessionId: null });
+          btn.classList.remove('active');
+        };
+      }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+    var recordBtn = document.getElementById('recordBtn');
+    if(recordBtn) recordBtn.addEventListener('click', function(){
+      if(iAmRecording){
+        recordBtn.disabled = true;
+        recorder.stop().then(function(path){
+          iAmRecording = false;
+          recordBtn.disabled = false;
+          recordBtn.classList.remove('active');
+          setRecBanner(false);
+          if(roomHandle) roomHandle.updateMeta({ recording:false });
+          if(path) showRecordingSavedModal(path);
+        }).catch(function(err){ recordBtn.disabled=false; showToast('error', errMsg(err)); });
+        return;
+      }
+      recorder = new MeetingRecorder();
+      syncRecorderTiles();
+      if(mainSession) recorder.addAudioSource(mainSession.stream);
+      syncRecorderAudio();
+      recorder.start({ title: m.title }).then(function(){
+        iAmRecording = true;
+        recordBtn.classList.add('active');
+        setRecBanner(true);
+        if(roomHandle) roomHandle.updateMeta({ recording:true });
+        showToast('success','Recording started');
+      }).catch(function(err){ showToast('error', errMsg(err)); recorder=null; });
+    });
+    var endMeetingBtn = document.getElementById('endMeetingBtn');
+    if(endMeetingBtn) endMeetingBtn.addEventListener('click', function(){
+      if(!confirm('End this meeting for everyone? Anyone still in it will be disconnected.')) return;
+      db.doc('meetings/'+meetingId).update({ status:'ended', endedAt: new Date().toISOString() }).then(function(){
+        location.hash = '#/meetings';
+      }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+    document.getElementById('leaveBtn').addEventListener('click', function(){
+      if(iAmRecording && !confirm('You\'re recording this meeting - stop recording and leave?')) return;
+      location.hash = '#/meetings';
+    });
+
+    // If the host ends the meeting, every other participant's own page
+    // needs to know - a plain onSnapshot on the meeting doc itself.
+    meetingUnsub = db.doc('meetings/'+meetingId).onSnapshot(function(s){
+      if(s.exists && s.data().status==='ended' && !meetingIsHost(s.data())){
+        showToast('info','The host ended this meeting');
+        location.hash = '#/meetings';
+      }
+    }, function(){});
+    activeUnsubs.push(meetingUnsub);
+  }).catch(function(err){
+    paint('<div class="empty-state"><strong>Could not open this meeting</strong>'+escapeHtml(errMsg(err))+'</div>');
+    activeMeetingRoomCleanup = null;
+  });
+}
+
 // ---------- ADMIN ----------
 function renderAdmin(){
   paint(
@@ -4600,8 +5182,10 @@ function renderAdmin(){
     '<div class="section"><div class="section-head"><h2 class="section-title">Job-title roles</h2><button type="button" class="btn btn-sm" id="newRoleBtn">+ New role</button></div>'+
     '<div class="page-sub" style="margin:-6px 0 12px;">Shared across every Team (separate from Manager and Admin, which are fixed tiers, not editable here) - e.g. "Outreach Expert/VA" is the same job title on every Team, but held by different people per Team, and someone on Team A never gets any access to Team B\'s clients/tasks (or vice versa) regardless of role - that separation is enforced by which Team each person and client belongs to, not by the role name. Renaming keeps everything already assigned to a role intact; deleting doesn\'t touch anyone/anything already holding it, it just stops showing up for new assignments.</div>'+
     '<div id="rolesBox"></div></div>'+
-    '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'
+    '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Meetings usage</h2></div><div id="meetingsUsageBox"><div class="skeleton" style="height:20px;"></div></div></div>'
   );
+  renderMeetingsUsageMeter(document.getElementById('meetingsUsageBox'));
   document.getElementById('newTeamBtn').addEventListener('click', function(){
     openModal('New Team', '<div class="field"><label>Team name</label><input required name="name" type="text" placeholder="e.g. Team B"></div>',
       function(fd){

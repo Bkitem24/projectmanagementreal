@@ -756,3 +756,42 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:6px;
   .spotlight-banner{flex-direction:column;text-align:center;}
   .field-row{flex-direction:column;}
 }
+
+/* ==========================================================================
+   Meetings (video calls, screen share, host recording) - a separate
+   feature from Connect's audio-only huddle bar (.connect-bar above),
+   deliberately styled as its own full page rather than a floating widget.
+   ========================================================================== */
+.meeting-room{display:flex;flex-direction:column;gap:14px;min-height:calc(100vh - 120px);}
+.meeting-header{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;}
+.meeting-title-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;}
+.meeting-recording-banner{display:inline-flex;align-items:center;gap:6px;background:var(--overdue-soft);color:var(--overdue);font-size:12px;font-weight:700;padding:5px 12px;border-radius:999px;}
+.meeting-recording-banner .pulse-dot{width:8px;height:8px;border-radius:50%;background:var(--overdue);animation:pulse-dot 1.4s ease-in-out infinite;}
+.meeting-grid{flex:1;display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;align-content:start;}
+.meeting-grid.has-screen{grid-template-columns:1fr;}
+.meeting-screen-row{display:grid;grid-template-columns:3fr 1fr;gap:12px;height:100%;}
+.meeting-screen-row .meeting-cam-strip{display:flex;flex-direction:column;gap:10px;overflow-y:auto;}
+.meeting-tile{position:relative;background:#101d38;border-radius:14px;overflow:hidden;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-sm);}
+.meeting-tile video{width:100%;height:100%;object-fit:cover;display:block;}
+.meeting-tile.screen-tile{aspect-ratio:auto;height:100%;}
+.meeting-tile.screen-tile video{object-fit:contain;background:#000;}
+.meeting-tile-noVideo{color:#7c8aae;font-family:var(--font-display);font-size:28px;font-weight:700;width:64px;height:64px;border-radius:50%;background:#1c3260;display:flex;align-items:center;justify-content:center;}
+.meeting-tile-label{position:absolute;left:8px;bottom:8px;background:rgba(6,14,32,.6);color:#fff;font-size:11.5px;font-weight:600;padding:3px 9px;border-radius:999px;display:flex;align-items:center;gap:5px;}
+.meeting-tile-label .mic-off-icon{color:var(--overdue);}
+.meeting-controls{position:sticky;bottom:0;display:flex;align-items:center;justify-content:center;gap:10px;padding:14px;background:var(--surface);border:1px solid var(--line);border-radius:16px;box-shadow:var(--shadow);flex-wrap:wrap;}
+.meeting-ctrl-btn{width:46px;height:46px;border-radius:50%;border:none;background:var(--paper);color:var(--ink);display:flex;align-items:center;justify-content:center;cursor:pointer;transition:background-color .15s ease,transform .1s ease;flex:none;}
+.meeting-ctrl-btn:hover{transform:scale(1.06);}
+.meeting-ctrl-btn.off{background:var(--overdue-soft);color:var(--overdue);}
+.meeting-ctrl-btn.active{background:var(--blue);color:#fff;}
+.meeting-ctrl-btn.danger{background:var(--overdue);color:#fff;}
+.meeting-ctrl-label{font-size:10px;color:var(--muted);text-align:center;margin-top:4px;}
+.meeting-ctrl-group{display:flex;flex-direction:column;align-items:center;}
+.meeting-host-panel{position:absolute;top:8px;right:8px;background:rgba(6,14,32,.75);border-radius:10px;padding:4px;display:flex;gap:4px;opacity:0;transition:opacity .15s ease;}
+.meeting-tile:hover .meeting-host-panel{opacity:1;}
+.meeting-host-panel button{border:none;background:rgba(255,255,255,.15);color:#fff;border-radius:6px;padding:4px 7px;font-size:10.5px;cursor:pointer;}
+.meeting-host-panel button:hover{background:rgba(255,255,255,.3);}
+@keyframes pulse-dot{0%,100%{opacity:1;}50%{opacity:.3;}}
+@media (max-width:900px){
+  .meeting-screen-row{grid-template-columns:1fr;grid-template-rows:2fr 1fr;}
+  .meeting-screen-row .meeting-cam-strip{flex-direction:row;}
+}

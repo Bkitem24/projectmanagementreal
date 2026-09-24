@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capabilities for the main window: the app's own native commands (timelog.rs) work without any entry here — Tauri v2 only gates plugin-provided commands — so this file exists specifically for the two plugins added for reliable file downloads (see src/lib/r2.js's downloadProtectedFile), plus two explicit window permissions for the exit-confirmation dialog (see main.js's wireCloseConfirmation) added 2026-09-21. core:default already includes core:window:default, which should cover close/destroy for the app's own main window on its own - these are listed explicitly anyway so the exit flow can never end up unable to actually close the window over an ACL gap that couldn't be fully verified against live Tauri v2 docs from this sandbox. dialog:allow-message was added 2026-09-22 so wireCloseConfirmation can use the dialog plugin's confirm() (a thin wrapper over the plugin's single 'message' command) instead of window.confirm(), which WebView2 silently fails to show when called from an async close-requested event instead of a direct click handler. core:window:allow-set-theme was added 2026-09-30 so the native Windows title bar can be switched to match the in-app light/dark toggle (see main.js's applyTheme) - without it the title bar stays light even when the rest of the app goes dark.",
+  "description": "Capabilities for the main window: the app's own native commands (timelog.rs) work without any entry here — Tauri v2 only gates plugin-provided commands — so this file exists specifically for the two plugins added for reliable file downloads (see src/lib/r2.js's downloadProtectedFile), plus two explicit window permissions for the exit-confirmation dialog (see main.js's wireCloseConfirmation) added 2026-09-21. core:default already includes core:window:default, which should cover close/destroy for the app's own main window on its own - these are listed explicitly anyway so the exit flow can never end up unable to actually close the window over an ACL gap that couldn't be fully verified against live Tauri v2 docs from this sandbox. dialog:allow-message was added 2026-09-22 so wireCloseConfirmation can use the dialog plugin's confirm() (a thin wrapper over the plugin's single 'message' command) instead of window.confirm(), which WebView2 silently fails to show when called from an async close-requested event instead of a direct click handler. core:window:allow-set-theme was added 2026-09-30 so the native Windows title bar can be switched to match the in-app light/dark toggle (see main.js's applyTheme) - without it the title bar stays light even when the rest of the app goes dark. The fs:allow-open/mkdir/exists/write/close + dialog:allow-open permissions (scoped to $VIDEO/**) were added 2026-09-30 for Meetings recording (src/lib/recorder.js) - streaming MediaRecorder chunks straight to a file in the host's own Videos folder instead of holding a 3-hour recording in memory, plus letting them pick a different folder in Settings. This is the first capability here that couldn't be verified against a real build from this sandbox (no local Rust toolchain) - if the first real build errors on a missing fs permission, check developers against Tauri v2's current fs plugin permission list, since the exact identifier names have shifted before.",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -10,6 +10,19 @@
     "core:window:allow-set-theme",
     "dialog:allow-save",
     "dialog:allow-message",
-    "fs:allow-write-file"
+    "dialog:allow-open",
+    "fs:allow-write-file",
+    "fs:allow-open",
+    "fs:allow-write",
+    "fs:allow-close",
+    "fs:allow-mkdir",
+    "fs:allow-exists",
+    { "identifier": "fs:allow-mkdir", "allow": [{ "path": "$VIDEO/**" }] },
+    { "identifier": "fs:allow-exists", "allow": [{ "path": "$VIDEO/**" }] },
+    { "identifier": "fs:allow-open", "allow": [{ "path": "$VIDEO/**" }] },
+    { "identifier": "fs:allow-write", "allow": [{ "path": "$VIDEO/**" }] },
+    { "identifier": "fs:allow-close", "allow": [{ "path": "$VIDEO/**" }] },
+    "opener:allow-reveal-item-in-dir",
+    "opener:allow-open-path"
   ]
 }

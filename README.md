@@ -277,6 +277,53 @@ Repeat plays of any track (by anyone) get served from Cloudflare's own edge
 cache after the first time, so the library gets faster to stream the more
 it's actually used.
 
+## 7. Cloudflare Realtime — "Meetings" video calls, screen share, recording
+
+Needed for: the actual video/audio/screen-share media in Meetings (a
+separate feature from Connect's audio-only huddles above - see
+docs/phase-3-punch-list.md's Meetings round for the full design). Meetings
+reuses the exact same Cloudflare Realtime Application/credentials Connect
+already uses - **you do not need to create a second Cloudflare Application**
+- but has its own Worker (`worker-meetings/`) so nothing about it can ever
+regress Connect (Connect's worker hardcodes a single audio-only track,
+which Meetings can't share - it needs mic + camera + optional screen share
+at once).
+
+1. If you haven't set up Connect yet (section 5 above), do that first - it
+   creates the Cloudflare Realtime Application and App ID/Token Meetings
+   also uses.
+2. Deploy the Meetings Worker with the SAME App ID/Token:
+   ```bash
+   cd worker-meetings
+   npx wrangler deploy
+   npx wrangler secret put CF_REALTIME_APP_ID      # same value as worker-realtime's
+   npx wrangler secret put CF_REALTIME_APP_TOKEN   # same value as worker-realtime's
+   npx wrangler secret put SUPABASE_URL
+   npx wrangler secret put SUPABASE_ANON_KEY
+   ```
+3. Put the deployed worker's URL in `VITE_MEETINGS_WORKER_URL` (`.env` and
+   the GitHub Actions repo secret). Leave it blank and the Meetings page
+   still works for scheduling/listing, but joining an actual meeting shows
+   "not configured yet".
+
+**Run `supabase/schema_v27.sql` before using Meetings at all** - it adds the
+`meetings`/`meetingInvitees`/`meetingParticipantLogs` tables everything
+here depends on.
+
+**Recording** happens entirely on the host's own computer - camera/screen
+video gets composited onto a canvas, everyone's audio gets mixed via the
+Web Audio API, and the result is recorded straight to a file on the host's
+disk (`Videos/Blue Kite Recordings/` by default, changeable from the
+Meetings page). Nothing is ever uploaded anywhere for this - there is no
+cloud storage involved in recording at all, by design.
+
+**This one still needs a live multi-person test before you rely on it** -
+same as Connect was when its own section above was first written. If a
+video/audio track never connects, check `worker-meetings`'s own responses
+(it returns the raw Cloudflare error) the same way `worker-realtime` does,
+and `npx wrangler tail` (from `worker-meetings/`) for live server-side logs
+while reproducing the issue.
+
 ## Notes / what's intentionally simple or deferred right now
 
 - **TimeLog has no consent/disclosure screen before monitoring starts**, and

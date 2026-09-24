@@ -33,7 +33,19 @@ detail.
 - **File storage:** Cloudflare R2 via a Worker (`worker-r2/`).
 - **Realtime calling ("Connect"):** Cloudflare Realtime SFU via another
   Worker (`worker-realtime/`), signaling over Supabase Realtime presence/
-  broadcast channels (`src/lib/connect.js`).
+  broadcast channels (`src/lib/connect.js`). Audio-only, 1:1 and group -
+  Humayun's "quick Slack-huddle" feature. Keep this working exactly as-is;
+  see Meetings below for why it's a fully separate codepath.
+- **Video calls ("Meetings", 2026-09-30):** a SEPARATE feature from Connect
+  - camera, screen share, and host-side LOCAL recording (never uploaded
+    anywhere) for real meetings (20+ people, 3+ hours), not quick huddles.
+  Reuses Connect's same Cloudflare Realtime Application/credentials but has
+  its own Worker (`worker-meetings/`), its own signaling/media library
+  (`src/lib/meetings.js`), its own recorder (`src/lib/recorder.js`, Web
+  Audio mixing + canvas compositing + `MediaRecorder` streamed to disk via
+  `@tauri-apps/plugin-fs`), and its own tables (`schema_v27.sql`). Built
+  this way specifically so nothing about Meetings can ever regress Connect
+  - see the "Meetings vs. Connect" convention below before touching either.
 - **Music player:** streams from a Google Drive folder Humayun owns (one
   subfolder per mood, e.g. `electronic`, `lofi` - exact lowercase keys, see
   `worker-drive-music/wrangler.toml`) via `worker-drive-music/`, a Worker
@@ -90,14 +102,19 @@ detail.
   real downstream consequences - e.g. registry-based autostart cannot work
   with an elevated app (fixed via a Scheduled Task instead, see punch list).
   Keep this constraint in mind for any future native/OS-level feature.
-- **No automated tests exist yet.** Verification has been: `node --check`
-  after stripping ES module imports (Node can't run ESM `import` outside a
-  real bundler context, but can still syntax-check everything else), JSON/
-  YAML validation for config files, and manual brace/paren balance checks
-  for Rust (no local Rust toolchain was available where this was built
-  originally). If you have `cargo`/`npm` available locally, actually running
-  `npm run build` and `cargo check`/`cargo build` (from `src-tauri/`) is a
-  real step up from that - do it.
+- **No automated tests exist yet, but a real frontend build usually is
+  available - check before falling back to anything weaker.** `npm run
+  build` (a real Vite build, not just a syntax check) works fine in a
+  typical Claude Code session for this project as of 2026-09-30 - always
+  try it first and use it to verify every round. There is still no local
+  Rust/cargo toolchain in that same environment, so `cargo check`/`cargo
+  build` (from `src-tauri/`) and the actual Tauri `.exe` build are still
+  only ever verified by the GitHub Actions Windows runner - trigger one
+  (`gh workflow run "Build Windows exe" --ref main`) after any Rust-side
+  change (new Cargo dependency, capabilities/permissions change, etc.) and
+  actually check it succeeds, don't assume. Only fall back to `node --check`
+  on an ES-import-stripped copy if `npm run build` genuinely isn't available
+  in a given environment.
 - **Every round of work updates `docs/phase-3-punch-list.md`** with a dated,
   detailed entry (root cause, fix, confirmation status) - keep doing this,
   it's the project's institutional memory and Humayun relies on it.
@@ -153,6 +170,33 @@ detail.
   folder) streams real server-side errors while the person reproduces the
   issue - far faster than guessing from the frontend's (often generic)
   symptom.
+- **Meetings vs. Connect: keep these two fully separate, on purpose.**
+  Connect (`src/lib/connect.js`, `worker-realtime/`) is audio-only and
+  hardcodes a single track per session (`mid: '0'`) - a real assumption
+  that would break if reused for video. Meetings (`src/lib/meetings.js`,
+  `worker-meetings/`) needs multiple simultaneous tracks (mic + camera,
+  and an independent screen-share session), so it generalizes that: the
+  client reads each track's real `mid` off its own `RTCPeerConnection`
+  (`getTransceivers()` after `setLocalDescription()`) and tells the worker
+  explicitly, rather than the worker assuming a fixed layout. Never merge
+  these two Workers/libraries back together, and never add a feature to
+  one that could change the other's behavior - that's the whole reason
+  they're split, and Connect must keep working exactly as it always has.
+- **A role's own KEY is what enforces anything real (task matching,
+  notifications) - a role's metadata (like a "which Team" tag) should
+  never be used to HIDE the role itself from a UI.** Round 26 scoped
+  `roles.teamId` to gate which Team's dropdowns could even SEE a role,
+  which broke every Team except whichever one a migration happened to
+  backfill onto ("the already created roles just got erased" - a real,
+  reported regression, round 28). The actual isolation Humayun wanted
+  (Team A has no access to Team B's stuff) was already fully handled,
+  independently of roles, by this app's existing Team-scoped RLS on
+  tasks/episodes/clients (`current_team()`, schema_v2.sql) - a role LABEL
+  can safely be shared/reused across every Team with zero real crossover,
+  since RLS blocks cross-team data access regardless of what role someone
+  holds. Before scoping anything else "per Team," check whether RLS is
+  already doing that job first - it usually already is for anything that
+  touches tasks/episodes/clients.
 - **On Windows, piping a file into `wrangler secret put` needs
   `Get-Content <path> -Raw`, not plain `Get-Content`** - without `-Raw`
   the file content doesn't actually survive the pipe into the external
@@ -172,33 +216,38 @@ being misapplied this way). With Claude Code + git access, use real commits
 and pushes instead - this is a strict improvement, no reason to keep
 simulating the zip-file workflow.
 
-## Where things stand (as of 2026-09-29/30, end of the Phase 5 session)
+## Where things stand (as of 2026-09-30, end of this Claude Code session)
 
 Phase 5 (the "complete UI/UX overhaul," Take Flight design system) is
-substantially delivered, not just started: global design tokens, logo, app
-icon, hero banner (now admin-editable with drag/zoom), Home page, the
-sound-mute toggle, the music player's full rebuild off YouTube onto Google
-Drive, and a long tail of real bugs found and fixed along the way (mention
-notifications, the roles/invites check-constraint leftover, the sidebar
-identity card's render-timing bug, the music player going invisible after
-being made draggable). **Most recent round's schema files: `schema_v20.sql`
-through `schema_v22.sql`** (hero editor's `appSettings` table + zoom column,
-role check-constraint cleanup) - confirm with Humayun whether these are
-already run before assuming so. `worker-drive-music/` is deployed and its
-secrets are set correctly as of this session's end, but its Google Drive
-folder is Humayun's own ongoing upload job (not everything may be uploaded
-yet) - "no tracks in X" for a specific mood may just mean that folder is
-still empty, not a bug. Still open: a broader animations/micro-interactions
-pass, and confirming the sidebar role-display fix actually resolved things
-for Humayun (last reported fix, not yet re-confirmed by him).
+substantially delivered: global design tokens, logo, app icon, hero banner
+(admin-editable with drag/zoom), Home page, sound-mute toggle, the music
+player's rebuild off YouTube onto Google Drive. Since then, a large second
+batch shipped: per-task AND per-episode description boxes, Activity Logs
+(task events + comments/files/calls, Manager/Admin-only), roles usable
+across every Team (with the round-26/28 correction documented above), and
+brand-new **Meetings** (video calls, screen share, host-side local
+recording) built on the same Cloudflare Realtime SFU as Connect but fully
+separate from it. **Schema files run so far, per Humayun: v20 through
+v26** - **v27 (Meetings' tables) is new this round and still needs
+running**, along with deploying `worker-meetings/` and setting
+`VITE_MEETINGS_WORKER_URL` (see README.md section 7) before Meetings can
+actually be joined (scheduling/listing works either way). `worker-drive-
+music/` is deployed and working; its Google Drive folder is Humayun's own
+ongoing upload job, so "no tracks in X" for one mood may just mean that
+folder is still empty. Still open: a broader animations/micro-interactions
+pass, a real multi-person test of Meetings (brand new, never tested live),
+and the collapsible-discussion-boxes-with-unread-tracking feature
+(discussed, not yet started as of this session's end).
 
 ## Where to look for more
 
 - `docs/phase-3-punch-list.md` - full dated history of every round: what was
   asked, what was built, root causes for every bug found, what's confirmed
   working vs. still open. Read this before starting new work in an
-  unfamiliar area. Rounds 17-24 cover this session's entire Phase 5 work in
-  detail - start there for anything not already covered above.
+  unfamiliar area. Rounds 17-29 cover this session's work in detail -
+  start there for anything not already covered above, especially round 29
+  (Meetings) and round 28 (the roles-per-team correction) for recent
+  architecture decisions.
 - `docs/phase-2-requirements.md` - original Phase 2 feature spec/decisions
   log (roles, teams, music player, TimeLog, Connect) - mostly superseded by
   later punch-list entries but has useful original context/reasoning.

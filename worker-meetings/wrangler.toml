@@ -1,0 +1,30 @@
+# Cloudflare Worker that proxies "Meetings" (video calls - camera, screen
+# share, host-side recording) to Cloudflare Realtime, the same WebRTC SFU
+# "Connect" (worker-realtime/) already uses. Deliberately a SEPARATE Worker
+# from worker-realtime, even though it reuses the exact same Cloudflare
+# Realtime Application/credentials - Connect's worker hardcodes a single
+# audio-only track (mid: '0'), an assumption Meetings can't share (mic +
+# camera + optional screen share = multiple simultaneous tracks). Keeping
+# them as two Workers means nothing about Meetings can ever regress
+# Connect, and vice versa - see docs/phase-3-punch-list.md's Meetings round
+# for the full reasoning.
+#
+# Setup - reuses the SAME Cloudflare Realtime Application Connect already
+# uses (Cloudflare dashboard -> Realtime -> your existing Serverless SFU
+# app -> the same App ID/App Token from worker-realtime's own setup, see
+# README.md section 5). No new Cloudflare Application needed:
+#   cd worker-meetings && npx wrangler deploy
+#   npx wrangler secret put CF_REALTIME_APP_ID      (same value as worker-realtime's)
+#   npx wrangler secret put CF_REALTIME_APP_TOKEN   (same value as worker-realtime's)
+#   npx wrangler secret put SUPABASE_URL
+#   npx wrangler secret put SUPABASE_ANON_KEY
+#
+# Then set VITE_MEETINGS_WORKER_URL in .env (and as a repo secret for the
+# GitHub Actions Windows build) to this Worker's deployed URL.
+
+name = "blue-kite-ops-meetings"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Set with `npx wrangler secret put <NAME>` (see setup notes above):
+#   CF_REALTIME_APP_ID, CF_REALTIME_APP_TOKEN, SUPABASE_URL, SUPABASE_ANON_KEY

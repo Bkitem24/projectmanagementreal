@@ -45,6 +45,10 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        // Added 2026-09-30 for Meetings recording's "Open folder" button
+        // (src/lib/recorder.js's revealInFolder) - the official Tauri v2
+        // way to open/reveal a file in the OS's own file explorer.
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             timelog::timelog_start,
             timelog::timelog_stop,

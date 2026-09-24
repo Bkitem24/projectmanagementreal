@@ -56,6 +56,7 @@ jobs:
           echo "VITE_SUPABASE_ANON_KEY=${{ secrets.VITE_SUPABASE_ANON_KEY }}" >> .env
           echo "VITE_R2_UPLOAD_WORKER_URL=${{ secrets.VITE_R2_UPLOAD_WORKER_URL }}" >> .env
           echo "VITE_REALTIME_WORKER_URL=${{ secrets.VITE_REALTIME_WORKER_URL }}" >> .env
+          echo "VITE_MEETINGS_WORKER_URL=${{ secrets.VITE_MEETINGS_WORKER_URL }}" >> .env
           echo "VITE_DRIVE_MUSIC_WORKER_URL=${{ secrets.VITE_DRIVE_MUSIC_WORKER_URL }}" >> .env
 
       - name: Build the Windows installer
