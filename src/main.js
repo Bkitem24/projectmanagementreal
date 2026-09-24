@@ -157,11 +157,36 @@ function uid8(){ return Math.random().toString(36).slice(2,10); }
 function currentMonthKey(){ var d=new Date(); return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); }
 
 // ---------- theme ----------
+// Native title bar sync (2026-09-30): decorations aren't disabled (no
+// custom title bar exists), so the title bar is drawn by Windows itself -
+// by default it stays whatever the OS's own theme is, light or dark,
+// regardless of the in-app toggle. setTheme() asks Tauri to tell Windows
+// to draw ITS chrome (title bar background/text/min-max-close glyphs) to
+// match, so it actually looks seamless against a dark app body instead of
+// a light bar sitting on top of a dark page. Lazily imported/cached like
+// wireCloseConfirmation's own appWindow - a no-op outside the Tauri shell
+// (e.g. `npm run dev` in a plain browser tab).
+var nativeWindowRef = null;
+function getNativeWindow(){
+  if(nativeWindowRef) return Promise.resolve(nativeWindowRef);
+  return import('@tauri-apps/api/window').then(function(mod){
+    nativeWindowRef = mod.getCurrentWindow();
+    return nativeWindowRef;
+  }).catch(function(){ return null; });
+}
+function syncNativeTitleBarTheme(mode){
+  getNativeWindow().then(function(win){
+    if(!win) return;
+    var theme = (mode==='light' || mode==='dark') ? mode : null; // null = follow the OS, same as the app body's own CSS media query
+    win.setTheme(theme).catch(function(){});
+  });
+}
 function applyTheme(mode){
   var root = document.documentElement;
   if(mode==='light' || mode==='dark') root.setAttribute('data-theme', mode);
   else root.removeAttribute('data-theme');
   try{ localStorage.setItem('bko_theme', mode||''); }catch(e){}
+  syncNativeTitleBarTheme(mode);
 }
 function initTheme(){
   var saved = ''; try{ saved = localStorage.getItem('bko_theme')||''; }catch(e){}
@@ -1262,26 +1287,58 @@ function renderClient(clientId){
 
     var genBtn = document.getElementById('genEpisodesBtn');
     if(genBtn) genBtn.addEventListener('click', function(){
-      genBtn.disabled = true; genBtn.textContent = 'Generating…';
-      Promise.all([db.collection('scheduleRules').where('clientId','==',clientId).get(), db.collection('templates').where('clientId','==',clientId).get()]).then(function(res){
-        var rulesSnap = res[0], tplSnap = res[1];
-        var tplMap = {};
-        tplSnap.docs.forEach(function(d){ tplMap[d.id] = d.data().steps||[]; });
-        var writes = [];
-        var any = false;
-        rulesSnap.docs.forEach(function(d){
-          var r = d.data(); r.id = d.id;
-          if(r.active===false) return;
-          any = true;
-          writes = writes.concat(generateEpisodesForRule(r, {name:c.name}, tplMap[r.templateId]||[], [0,1,2]));
-        });
-        if(!any){ showToast('error','No active schedule rules to generate from yet.'); }
-        return Promise.all(writes);
-      }).then(function(created){
-        genBtn.disabled=false; genBtn.textContent='Generate upcoming episodes';
-        var made = created.filter(Boolean).length;
-        showToast('success', made ? ('Generated '+made+' new episode'+(made===1?'':'s')) : 'Already up to date - nothing new to generate.');
-      }).catch(function(err){ genBtn.disabled=false; genBtn.textContent='Generate upcoming episodes'; showToast('error', errMsg(err)); });
+      // Used to always generate 3 months (current + next 2) of episodes -
+      // and every task on every one of them - in a single click, with no
+      // way to ask for less. Each schedule rule only ever produces one
+      // episode per calendar month (it fires on a specific "2nd Tuesday",
+      // "last Friday", etc. of the month), so the real unit of "how much"
+      // here is months, not weeks - offering a week-granularity choice
+      // would be misleading since a 1-2 week span usually contains zero or
+      // one occurrence of the rule's weekday anyway. Asking up front how
+      // many months out to generate (2026-09-30) is what actually avoids
+      // blasting everyone with 3 months of notifications when someone only
+      // meant to queue up the next one.
+      openModal('Generate upcoming episodes', '<div class="field">'+
+        '<label>How far ahead should this generate episodes (and notify everyone assigned)?</label>'+
+        '<select name="monthSpan">'+
+        '<option value="1">This month only</option>'+
+        '<option value="2">This month + next month</option>'+
+        '<option value="3" selected>This month + next 2 months</option>'+
+        '<option value="custom">Custom number of months…</option>'+
+        '</select></div>'+
+        '<div class="field" id="genCustomMonthsField" hidden><label>Number of months ahead (starting this month)</label>'+
+        '<input name="customMonths" type="number" min="1" max="12" value="3"></div>',
+        function(fd){
+          var span = fd.get('monthSpan');
+          var n = span==='custom' ? parseInt(fd.get('customMonths'),10) : parseInt(span,10);
+          if(!n || n<1){ showModalError('Enter at least 1 month.'); return; }
+          n = Math.min(n, 12);
+          var monthOffsets = []; for(var i=0;i<n;i++) monthOffsets.push(i);
+          setModalBusy(true, 'Generating…');
+          Promise.all([db.collection('scheduleRules').where('clientId','==',clientId).get(), db.collection('templates').where('clientId','==',clientId).get()]).then(function(res){
+            var rulesSnap = res[0], tplSnap = res[1];
+            var tplMap = {};
+            tplSnap.docs.forEach(function(d){ tplMap[d.id] = d.data().steps||[]; });
+            var writes = [];
+            var any = false;
+            rulesSnap.docs.forEach(function(d){
+              var r = d.data(); r.id = d.id;
+              if(r.active===false) return;
+              any = true;
+              writes = writes.concat(generateEpisodesForRule(r, {name:c.name}, tplMap[r.templateId]||[], monthOffsets));
+            });
+            if(!any){ showToast('error','No active schedule rules to generate from yet.'); }
+            return Promise.all(writes);
+          }).then(function(created){
+            closeModal();
+            var made = created.filter(Boolean).length;
+            showToast('success', made ? ('Generated '+made+' new episode'+(made===1?'':'s')) : 'Already up to date - nothing new to generate.');
+          }).catch(function(err){ setModalBusy(false); showModalError(errMsg(err)); });
+        }, 'Generate'
+      );
+      var spanSelect = document.querySelector('#modalForm [name="monthSpan"]');
+      var customField = document.getElementById('genCustomMonthsField');
+      if(spanSelect) spanSelect.addEventListener('change', function(){ customField.hidden = spanSelect.value!=='custom'; });
     });
 
     var archiveClientBtn = document.getElementById('archiveClientBtn');
@@ -2004,6 +2061,31 @@ function openStepEditScopeModal(tplId, stepId, changes){
 
 // ---------- EPISODE DETAIL ----------
 var expandedTasks = {};
+var taskDescSaveTimers = {}; // taskId -> pending debounce timer for the task-desc textarea (see wireTaskDescBoxes)
+// Per-task description box (2026-09-30) - a manager-editable notes/links
+// field distinct from "Comments, links & files" (that's a chat-style
+// feed of separate messages; this is one persistent field, more like a
+// task's own short brief). Auto-grows with content (no internal scrollbar)
+// and autosaves shortly after typing stops, plus immediately on blur so a
+// quick click-away never drops the last few keystrokes.
+function wireTaskDescBoxes(scopeEl){
+  Array.prototype.forEach.call(scopeEl.querySelectorAll('.task-desc'), function(ta){
+    function resize(){ ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; }
+    resize();
+    var taskId = ta.getAttribute('data-desc');
+    function save(){
+      clearTimeout(taskDescSaveTimers[taskId]);
+      delete taskDescSaveTimers[taskId];
+      db.doc('tasks/'+taskId).update({description: ta.value}).catch(function(err){ showToast('error', errMsg(err)); });
+    }
+    ta.addEventListener('input', function(){
+      resize();
+      clearTimeout(taskDescSaveTimers[taskId]);
+      taskDescSaveTimers[taskId] = setTimeout(save, 800);
+    });
+    ta.addEventListener('blur', function(){ if(taskDescSaveTimers[taskId]) save(); });
+  });
+}
 function renderEpisode(episodeId){
   paint('<div class="skeleton" style="height:100px;margin-bottom:20px;"></div><div class="skeleton" style="height:300px;"></div>');
   var unsub = db.doc('episodes/'+episodeId).onSnapshot(function(snap){
@@ -2248,6 +2330,9 @@ function renderEpisode(episodeId){
           (isBlocked?'<span class="task-waiting">⛔ Waiting on: '+escapeHtml(waitingLabel)+'</span>':'')+
           (t.done && t.doneByUserId?profileChip(t.doneByUserId):'')+
           '</div>'+
+          (canManage()
+            ? '<textarea class="task-desc" data-desc="'+t._id+'" placeholder="Add a description, links, or notes for this task…" rows="1">'+escapeHtml(t.description||'')+'</textarea>'
+            : (t.description ? '<div class="task-desc-view">'+linkifyHtml(escapeHtml(t.description))+'</div>' : ''))+
           '<button type="button" class="task-expand-btn" data-collab="'+t._id+'">'+(expandedTasks[t._id]?'Hide discussion':'Comments, links & files'+(cCount?' ('+cCount+')':''))+'</button>'+
           '<div class="task-collab" id="collab_'+t._id+'" '+(expandedTasks[t._id]?'':'hidden')+'></div>'+
           '</div>'+
@@ -2262,6 +2347,7 @@ function renderEpisode(episodeId){
           '</div>';
       }).join('');
       hydrateProfiles(box);
+      wireTaskDescBoxes(box);
       Array.prototype.forEach.call(box.querySelectorAll('.task-check:not([disabled])'), function(cb){
         cb.addEventListener('change', function(){
           var taskId = cb.getAttribute('data-task');
@@ -4681,7 +4767,7 @@ function hideAuthScreen(){
 // now - stay in sync.
 function toggleClock(){
   if(timelog.isClockedIn()) timelog.clockOut().then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
-  else timelog.clockIn(myUid).then(updateClockUI).catch(function(err){ showToast('error', errMsg(err)); });
+  else timelog.clockIn(myUid).then(function(){ updateClockUI(); musicPlayer.notifyClockedIn(); }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 // Standby (Phase 2.5 batch D, item #8) - only meaningful while clocked in;
 // the button itself is hidden/disabled otherwise (see updateClockUI), but
@@ -4753,6 +4839,7 @@ function showClockInOverlay(){
   document.getElementById('clockinStartBtn').addEventListener('click', function(){
     timelog.clockIn(myUid).then(function(){
       updateClockUI();
+      musicPlayer.notifyClockedIn();
       document.getElementById('clockinStatus').innerHTML = '<div class="clockin-status"><span class="pulse-dot"></span> Clocked in - you can close this.</div>';
       setTimeout(function(){ el.remove(); }, 1400);
     }).catch(function(err){ showToast('error', errMsg(err)); });
@@ -4966,6 +5053,7 @@ function hideIdleWarningOverlay(){
           timelog.resumeIfClockedIn(myUid).then(function(){
             ensureGlobalClockBadge();
             if(!timelog.isClockedIn()) setTimeout(showClockInOverlay, 600);
+            else musicPlayer.notifyClockedIn(); // already clocked in from before relaunch - no fresh click here, so this may just arm the next one (see notifyClockedIn's own comment)
           });
         }
         }); // end listRolesFor(...).then - myRoles block

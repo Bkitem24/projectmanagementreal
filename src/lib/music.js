@@ -136,9 +136,18 @@ async function loadRandom(autoplay) {
   }
 }
 
-// Browsers still require a real user gesture before allowing audio to
-// start - the very first click or keypress anywhere in the app after the
-// player mounts plays it, so nobody has to hunt for a play button first.
+// Autoplay is gated behind clocking in (2026-09-30 change) - it used to
+// arm on the very first click/keypress anywhere in the app right after the
+// player mounted, which meant music started for someone just poking around
+// before ever clocking in. Humayun's ask: music should never start on its
+// own unless/until the person clocks in for the day; once they do, it
+// should just start. notifyClockedIn() (below) is what main.js calls at
+// every point clocked-in status becomes true. Browsers still require a
+// real user gesture before allowing audio to start, so if the clock-in
+// itself wasn't a fresh gesture (e.g. reconnecting to an already-open
+// clock-in on relaunch, where nothing has been clicked yet this session),
+// play() is deferred to the next click/keypress instead of being dropped
+// silently forever.
 let autoplayArmed = false;
 function armAutoplayOnFirstGesture() {
   if (autoplayArmed) return;
@@ -173,8 +182,20 @@ export function initPlayer(_mountElId, signupMoods) {
   // comment above for why that changed.
   const preferred = (signupMoods || []).filter((m) => MOOD_LABELS[m])[0];
   currentMoodFilter = preferred || null;
-  armAutoplayOnFirstGesture();
+  // No armAutoplayOnFirstGesture() here anymore - mounting/loading a track
+  // no longer implies it's allowed to start playing on its own. See
+  // notifyClockedIn() below for what actually starts playback now.
   loadRandom(false);
+}
+
+// main.js calls this at every point clocked-in status becomes (or is
+// found to already be) true: the clock-in button, the "ready to start your
+// day?" overlay's own button, and the relaunch-time resumeIfClockedIn()
+// check. Safe to call repeatedly/redundantly - play() on an already-
+// playing element is a harmless no-op.
+export function notifyClockedIn() {
+  if (!audioEl) return; // not configured, or player hasn't mounted yet
+  audioEl.play().catch(() => { armAutoplayOnFirstGesture(); });
 }
 
 export function onPlayerChange(cb) { listeners.add(cb); cb(state()); return () => listeners.delete(cb); }

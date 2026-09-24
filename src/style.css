@@ -95,6 +95,12 @@ body{
 h1,h2,h3,h4{font-family:var(--font-display);font-weight:600;letter-spacing:.2px;text-wrap:balance;margin:0;}
 a{color:inherit;}
 button,input,select,textarea{font-family:inherit;color:inherit;}
+/* Base look for any <select> that isn't inside .field/.login-field (which
+   set their own background) - without this a bare <select> falls back to
+   the browser's native white dropdown background with `color:inherit`
+   layered on top, which is unreadable in dark mode (light text on a white
+   box). Found on the All Employees team-reassign dropdown, 2026-09-30. */
+select{background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:4px 6px;}
 .mono{font-family:var(--font-mono);}
 ::selection{background:var(--accent-soft);}
 #main::-webkit-scrollbar,#sidebar::-webkit-scrollbar{width:8px;}
@@ -333,6 +339,18 @@ button,input,select,textarea{font-family:inherit;color:inherit;}
 .task-custom-badge{font-size:10.5px;color:var(--blue-2);background:var(--blue-soft);padding:2.5px 8px;border-radius:6px;font-weight:600;}
 .task-expand-btn{font-size:11.5px;color:var(--blue-2);background:none;border:none;cursor:pointer;padding:0;font-weight:600;margin-top:6px;}
 .task-expand-btn:hover{text-decoration:underline;}
+/* Per-task description box (2026-09-30) - separate from "Comments, links &
+   files" (that's a chat-style feed; this is a persistent notes/links field
+   a manager sets once and everyone assigned just reads). Auto-grows with
+   its content instead of scrolling internally (main.js resizes it on
+   `input`) and stays visually quiet until focused, so a task with no
+   description doesn't look like it's missing something. */
+.task-desc{width:100%;resize:none;overflow:hidden;min-height:34px;margin-top:8px;border:1px solid transparent;background:transparent;border-radius:8px;padding:7px 9px;font-size:12.5px;line-height:1.5;color:var(--ink-soft);transition:background-color .15s ease,border-color .15s ease;}
+.task-desc:hover{background:var(--paper);}
+.task-desc:focus{outline:none;background:var(--surface);border-color:var(--blue);color:var(--ink);box-shadow:0 0 0 3px var(--blue-soft);}
+.task-desc::placeholder{color:var(--muted);}
+.task-desc-view{margin-top:8px;padding:7px 9px;font-size:12.5px;line-height:1.5;color:var(--ink-soft);white-space:pre-wrap;word-break:break-word;}
+.task-desc-view a{color:var(--blue-2);}
 /* Round 12: a dashed top border on an otherwise bare box read as an
    afterthought and felt cramped ("too small") - now a proper card with its
    own background/border/padding and a real minimum height so it presents

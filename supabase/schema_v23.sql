@@ -1,0 +1,12 @@
+-- Blue Kite Ops - schema v23 (2026-09-30)
+--
+-- Run this in the Supabase SQL editor. Safe to re-run. Independent of
+-- every other schema file.
+--
+-- Per-task description box: a persistent notes/links field a manager sets
+-- once (separate from "Comments, links & files", which is a chat-style
+-- feed of individual messages, not a single editable field). No RLS change
+-- needed - tasks already has row-level policies covering read/update for
+-- everyone who can already see/edit a task; this is just a new column on
+-- an already-covered table.
+alter table public.tasks add column if not exists description text;
