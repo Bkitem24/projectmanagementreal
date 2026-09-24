@@ -4693,9 +4693,59 @@ var ICON_CAM = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stro
 var ICON_CAM_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1"/><path d="M23 7l-7 5 7 5V7z"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 var ICON_SCREEN = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
 var ICON_RECORD = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>';
-var ICON_HANGUP = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.24.08.48.15.73.2A2 2 0 0 1 20 16.72V19a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.68-3.02"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+var ICON_SETTINGS = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="19" cy="12" r="2.2"/></svg>';
+// Was an incomplete phone-icon path (a curve cut off partway through, not
+// a rendering bug) - reported 2026-09-30 as "looks half cut out", which is
+// literally what it was. Replaced with a plain, guaranteed-to-render-right
+// X rather than risk another hand-drawn curve.
+var ICON_HANGUP = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
 
 function meetingIsHost(m){ return !!(m && (m.hostUserId===myUid || isAdmin())); }
+// Returns a human countdown string, or null once it's actually time (the
+// caller then proceeds straight into the real room instead of a waiting
+// screen). 2026-09-30 fix: opening a scheduled meeting used to jump
+// straight into turning your camera on regardless of whether it had
+// actually started yet.
+function formatMeetingCountdown(scheduledIso){
+  if(!scheduledIso) return null;
+  var target = new Date(scheduledIso);
+  var now = new Date();
+  var sameDay = target.toDateString() === now.toDateString();
+  if(!sameDay){
+    return 'Meeting starts on '+target.toLocaleDateString(undefined,{weekday:'long',month:'long',day:'numeric'})+' at '+target.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+  }
+  var msLeft = target.getTime() - now.getTime();
+  if(msLeft<=0) return null;
+  var totalMinutes = Math.max(1, Math.ceil(msLeft/60000));
+  var hours = Math.floor(totalMinutes/60), minutes = totalMinutes%60;
+  if(hours>0) return 'Meeting starts in '+hours+' hour'+(hours!==1?'s':'')+(minutes>0?' and '+minutes+' minute'+(minutes!==1?'s':''):'');
+  return 'Meeting starts in '+minutes+' minute'+(minutes!==1?'s':'');
+}
+function renderMeetingWaitingScreen(meetingId, m, canHost){
+  paint(
+    '<div class="page-head"><div><div class="eyebrow">Meeting</div><h1 class="page-title">'+escapeHtml(m.title)+'</h1></div></div>'+
+    '<div class="empty-state" style="padding:60px 20px;"><strong id="meetingCountdownText" style="font-size:16px;">'+escapeHtml(formatMeetingCountdown(m.scheduledAt)||'Meeting starts soon')+'</strong>'+
+    (canHost?'<div style="margin-top:16px;"><button type="button" class="btn btn-primary" id="startNowBtn" style="width:auto;">Start now</button></div>'
+      :'<div style="margin-top:10px;color:var(--muted);">You\'ll join automatically once it\'s time, or as soon as the host starts it.</div>')+
+    '</div>'
+  );
+  var startBtn = document.getElementById('startNowBtn');
+  if(startBtn) startBtn.addEventListener('click', function(){
+    db.doc('meetings/'+meetingId).update({status:'live', startedAt:new Date().toISOString()}).then(route).catch(function(err){ showToast('error', errMsg(err)); });
+  });
+  var interval = setInterval(function(){
+    var el = document.getElementById('meetingCountdownText');
+    if(!el){ clearInterval(interval); return; }
+    var text = formatMeetingCountdown(m.scheduledAt);
+    if(!text){ clearInterval(interval); route(); return; }
+    el.textContent = text;
+  }, 15000);
+  var unsub = db.doc('meetings/'+meetingId).onSnapshot(function(s){
+    if(s.exists && s.data().status==='live'){ clearInterval(interval); route(); }
+  }, function(){});
+  activeUnsubs.push(unsub);
+  activeMeetingRoomCleanup = function(){ clearInterval(interval); };
+}
 
 // Cost-guardrail usage meter (Phase 5's ask) - approximate, not exact
 // billing (Cloudflare bills real egress bytes; this estimates from known
@@ -4809,6 +4859,16 @@ function openRecordingSettingsModal(){
   });
 }
 
+// Real bug (2026-09-30, "when I start an instant meeting, it's just me
+// in it... no one can join me"): this never invited anyone at all, and
+// `meetings`' own SELECT policy only lets the host, an admin, a Manager
+// of the same Team, or an actual invitee see a meeting - a plain
+// teammate had literally no way to even discover it existed. An instant
+// meeting now auto-invites the whole Team (everyone with the same
+// teamId, minus the host) - same mechanism a scheduled meeting already
+// uses (meetingInvitees + a notification each), just applied to
+// everyone by default instead of hand-picked, since "instant meeting"
+// implies "my team can drop in."
 function createAndJoinInstantMeeting(){
   var id = meetingsLib.newMeetingId();
   var title = ((myProfile&&myProfile.displayName)||'Someone')+"'s meeting";
@@ -4816,7 +4876,62 @@ function createAndJoinInstantMeeting(){
   db.doc('meetings/'+id).set({
     id:id, title:title, hostUserId:myUid, teamId:myTeamId, status:'live', isInstant:true,
     scheduledAt:null, startedAt:nowIso, endedAt:null, createdAt:nowIso
-  }).then(function(){ location.hash = '#/meeting/'+id; }).catch(function(err){ showToast('error', errMsg(err)); });
+  }).then(function(){
+    return db.collection('profiles').where('teamId','==',myTeamId).get();
+  }).then(function(snap){
+    var teammateIds = snap.docs.map(function(d){ return d.id; }).filter(function(uid){ return uid!==myUid; });
+    return Promise.all(teammateIds.map(function(uid){
+      return supabase.from('meetingInvitees').insert({ id:'mi_'+uid8(), meetingId:id, userId:uid, createdAt:nowIso }).then(function(){
+        insertNotification({
+          userId: uid, type:'meeting_invite', message: 'Meeting starting now: "'+title+'"',
+          link: '#/meeting/'+id, fromUserId: myUid, readAt: null, createdAt: nowIso
+        }).catch(function(err){ console.warn('[blue-kite-ops] meeting invite notification failed:', err); });
+      });
+    }));
+  }).then(function(){
+    location.hash = '#/meeting/'+id;
+  }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+// Calendar reminders (2026-09-30, Humayun's ask): a real Google Calendar
+// API integration needs its own Google Cloud OAuth app/consent screen -
+// meaningful setup, similar to the Drive music service-account work - and
+// only helps people who use Google Calendar specifically. A .ics file is
+// the plain-text calendar-invite FORMAT every major calendar (Google,
+// Outlook, Apple) already knows how to import with one click, needs no
+// API/OAuth/Google Cloud project at all, and works for anyone regardless
+// of which calendar they use - the pragmatic choice here over a deeper
+// integration that would only serve part of the team anyway.
+function buildIcsForMeeting(title, scheduledIso, meetingId){
+  function fmt(d){ return d.toISOString().replace(/[-:]/g,'').split('.')[0]+'Z'; }
+  var start = new Date(scheduledIso);
+  var end = new Date(start.getTime() + 60*60*1000); // 1hr default block - editable by the person after importing, same as any calendar invite
+  return [
+    'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Blue Kite Ops//Meetings//EN','BEGIN:VEVENT',
+    'UID:'+meetingId+'@blue-kite-ops','DTSTAMP:'+fmt(new Date()),'DTSTART:'+fmt(start),'DTEND:'+fmt(end),
+    'SUMMARY:'+title.replace(/[\r\n]+/g,' '),
+    'DESCRIPTION:Join from the Blue Kite Ops Meetings page.',
+    'END:VEVENT','END:VCALENDAR'
+  ].join('\r\n');
+}
+function downloadIcsForMeeting(title, scheduledIso, meetingId){
+  var blob = new Blob([buildIcsForMeeting(title, scheduledIso, meetingId)], { type:'text/calendar' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url; a.download = title.replace(/[^a-z0-9]+/gi,'-').slice(0,60)+'.ics';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+}
+function showMeetingScheduledModal(title, scheduledIso, meetingId){
+  openModal('Meeting scheduled', '<div class="field-hint">"'+escapeHtml(title)+'" - '+escapeHtml(fmtDateTime(scheduledIso))+'. Everyone invited already got a notification - add it to your own calendar too if you\'d like a reminder there.</div>',
+    function(){ closeModal(); }, 'Done');
+  var actions = document.querySelector('.modal-actions');
+  if(actions){
+    var btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'btn btn-sm'; btn.style.width = 'auto'; btn.textContent = 'Add to calendar (.ics)';
+    btn.addEventListener('click', function(){ downloadIcsForMeeting(title, scheduledIso, meetingId); });
+    actions.insertBefore(btn, actions.firstChild);
+  }
 }
 
 function openScheduleMeetingModal(){
@@ -4866,7 +4981,7 @@ function openScheduleMeetingModal(){
           });
         }).then(function(){
           closeModal();
-          if(later){ showToast('success','Meeting scheduled'); route(); }
+          if(later){ showMeetingScheduledModal(title, scheduledIso, id); route(); }
           else location.hash = '#/meeting/'+id;
         }).catch(function(err){ showModalError(errMsg(err)); });
       }, 'Create');
@@ -4880,6 +4995,25 @@ function openScheduleMeetingModal(){
       });
     });
   }).catch(function(err){ showToast('error', errMsg(err)); });
+}
+
+// Shown right before actually calling getDisplayMedia - covers two of
+// Humayun's 2026-09-30 reports in one small step: the "voice keeps
+// echoing" issue (a headphones nudge - see startScreenShareSession's own
+// comment for why muting the mic doesn't help) and the "appears extremely
+// bright" HDR issue (an opt-in workaround, remembered per device so it's
+// not re-asked every single share once set).
+function openScreenShareOptionsModal(onProceed){
+  var savedHdr = false; try{ savedHdr = localStorage.getItem('bko_hdrCompensate')==='1'; }catch(e){}
+  openModal('Share your screen',
+    '<div class="field-hint">If you plan to share audio (a video, music, etc.), use headphones if you can - sharing your speaker output back out is what causes the other person to hear an echo of their own voice, not your microphone.</div>'+
+    '<div class="check-row" style="margin-top:10px;"><input type="checkbox" id="hdrCompCheck" name="hdr" '+(savedHdr?'checked':'')+'><label for="hdrCompCheck">My screen looks washed out/overly bright to others (HDR display) - try to compensate</label></div>',
+    function(fd){
+      var hdr = fd.get('hdr')==='on';
+      try{ localStorage.setItem('bko_hdrCompensate', hdr?'1':'0'); }catch(e){}
+      closeModal();
+      onProceed({ hdrCompensate: hdr });
+    }, 'Continue');
 }
 
 function showRecordingSavedModal(path){
@@ -4928,6 +5062,14 @@ function renderMeetingRoom(meetingId){
     var m = snap.data();
     var canHost = meetingIsHost(m);
 
+    // Not time yet - show a countdown instead of turning the camera on.
+    // 5-minute grace window so people can join a little early without
+    // staring at a countdown for the last few minutes.
+    if(m.status==='scheduled' && m.scheduledAt && (new Date(m.scheduledAt).getTime() - Date.now()) > 5*60*1000){
+      renderMeetingWaitingScreen(meetingId, m, canHost);
+      return;
+    }
+
     paint(
       '<div class="meeting-room">'+
       '<div class="meeting-header"><div class="meeting-title-row"><h1 class="page-title" style="margin:0;">'+escapeHtml(m.title)+'</h1>'+
@@ -4940,6 +5082,7 @@ function renderMeetingRoom(meetingId){
       '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn active" id="micBtn">'+ICON_MIC+'</button><div class="meeting-ctrl-label">Mic</div></div>'+
       '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn active" id="camBtn">'+ICON_CAM+'</button><div class="meeting-ctrl-label">Camera</div></div>'+
       '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn" id="screenBtn">'+ICON_SCREEN+'</button><div class="meeting-ctrl-label">Share</div></div>'+
+      '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn" id="devicesBtn">'+ICON_SETTINGS+'</button><div class="meeting-ctrl-label">Devices</div></div>'+
       (canHost?'<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn" id="recordBtn">'+ICON_RECORD+'</button><div class="meeting-ctrl-label">Record</div></div>':'')+
       '<div class="meeting-ctrl-group"><button type="button" class="meeting-ctrl-btn danger" id="leaveBtn">'+ICON_HANGUP+'</button><div class="meeting-ctrl-label">Leave</div></div>'+
       '</div></div>'
@@ -5163,6 +5306,12 @@ function renderMeetingRoom(meetingId){
       if(!mainSession) return;
       var next = !micOn;
       mainSession.stream.getAudioTracks().forEach(function(t){ t.enabled = next; });
+      // Muting used to only touch the mic session's own audio track - if
+      // screen sharing with system audio is active, that's a completely
+      // separate outgoing audio track (screenAudio) that "mute" silently
+      // did nothing about. Mute now covers both, matching what someone
+      // actually expects "mute" to mean.
+      if(screenSession) screenSession.stream.getAudioTracks().forEach(function(t){ t.enabled = next; });
       updateMicBtn(next);
       if(roomHandle) roomHandle.updateMeta({ micOn: next });
     });
@@ -5183,19 +5332,43 @@ function renderMeetingRoom(meetingId){
         btn.classList.remove('active');
         return;
       }
-      meetingsLib.startScreenShareSession().then(function(session){
-        screenSession = session;
-        showScreenShare('me', 'You', session.stream);
-        if(roomHandle) roomHandle.updateMeta({ screenSessionId: session.sessionId });
-        btn.classList.add('active');
-        var vTrack = session.stream.getVideoTracks()[0];
-        if(vTrack) vTrack.onended = function(){
-          meetingsLib.endSession(screenSession);
-          screenSession = null;
-          hideScreenShare();
-          if(roomHandle) roomHandle.updateMeta({ screenSessionId: null });
-          btn.classList.remove('active');
-        };
+      openScreenShareOptionsModal(function(opts){
+        meetingsLib.startScreenShareSession(opts).then(function(session){
+          screenSession = session;
+          if(!micOn) session.stream.getAudioTracks().forEach(function(t){ t.enabled = false; }); // stay muted through a screen share started while already muted
+          showScreenShare('me', 'You', session.stream);
+          if(roomHandle) roomHandle.updateMeta({ screenSessionId: session.sessionId });
+          btn.classList.add('active');
+          var vTrack = session.stream.getVideoTracks()[0];
+          if(vTrack) vTrack.onended = function(){
+            meetingsLib.endSession(screenSession);
+            screenSession = null;
+            hideScreenShare();
+            if(roomHandle) roomHandle.updateMeta({ screenSessionId: null });
+            btn.classList.remove('active');
+          };
+        }).catch(function(err){ showToast('error', errMsg(err)); });
+      });
+    });
+    document.getElementById('devicesBtn').addEventListener('click', function(){
+      if(!mainSession) return;
+      var curMic = mainSession.stream.getAudioTracks()[0], curCam = mainSession.stream.getVideoTracks()[0];
+      meetingsLib.listMediaDevices().then(function(res){
+        var micOptions = res.mics.map(function(d,i){ return '<option value="'+escapeHtml(d.deviceId)+'"'+((curMic&&curMic.getSettings().deviceId===d.deviceId)?' selected':'')+'>'+escapeHtml(d.label||'Microphone '+(i+1))+'</option>'; }).join('');
+        var camOptions = res.cameras.map(function(d,i){ return '<option value="'+escapeHtml(d.deviceId)+'"'+((curCam&&curCam.getSettings().deviceId===d.deviceId)?' selected':'')+'>'+escapeHtml(d.label||'Camera '+(i+1))+'</option>'; }).join('');
+        openModal('Camera & microphone',
+          '<div class="field"><label>Microphone</label><select name="micId">'+(micOptions||'<option value="">No microphones found</option>')+'</select></div>'+
+          '<div class="field"><label>Camera</label><select name="camId">'+(camOptions||'<option value="">No cameras found</option>')+'</select></div>',
+          function(fd){
+            setModalBusy(true);
+            var micId = fd.get('micId'), camId = fd.get('camId');
+            Promise.all([
+              (micId && (!curMic || curMic.getSettings().deviceId!==micId)) ? meetingsLib.switchDevice(mainSession, 'mic', micId) : Promise.resolve(),
+              (camId && (!curCam || curCam.getSettings().deviceId!==camId)) ? meetingsLib.switchDevice(mainSession, 'camera', camId) : Promise.resolve(),
+            ]).then(function(){
+              closeModal(); showToast('success','Devices updated');
+            }).catch(function(err){ showModalError(errMsg(err)); });
+          }, 'Save');
       }).catch(function(err){ showToast('error', errMsg(err)); });
     });
     var recordBtn = document.getElementById('recordBtn');

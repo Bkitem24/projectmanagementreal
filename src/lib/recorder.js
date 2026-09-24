@@ -136,14 +136,26 @@ export class MeetingRecorder {
     this.mimeType = mimeType;
     const ext = extensionFor(mimeType);
 
+    // Wrapped so a raw Tauri IPC rejection (which can come back as a plain
+    // string rather than a real Error, especially for a permission/scope
+    // denial) never surfaces as the generic "Something went wrong" -
+    // exactly what happened 2026-09-30 with no way to tell what actually
+    // failed. Every failure here now says WHERE it was trying to write and
+    // WHAT it was doing when it failed.
     const fsMod = await import('@tauri-apps/plugin-fs');
     const { join } = await import('@tauri-apps/api/path');
-    const folder = await getRecordingsFolder();
-    const already = await fsMod.exists(folder).catch(() => false);
-    if (!already) await fsMod.mkdir(folder, { recursive: true });
-    const filename = sanitizeFilename(opts.title) + ' - ' + new Date().toISOString().replace(/[:.]/g, '-') + '.' + ext;
-    this.filePath = await join(folder, filename);
-    this.fileHandle = await fsMod.open(this.filePath, { write: true, create: true, append: true });
+    let folder, filename;
+    try {
+      folder = await getRecordingsFolder();
+      const already = await fsMod.exists(folder).catch(() => false);
+      if (!already) await fsMod.mkdir(folder, { recursive: true });
+      filename = sanitizeFilename(opts.title) + ' - ' + new Date().toISOString().replace(/[:.]/g, '-') + '.' + ext;
+      this.filePath = await join(folder, filename);
+      this.fileHandle = await fsMod.open(this.filePath, { write: true, create: true, append: true });
+    } catch (err) {
+      const detail = (err && err.message) ? err.message : String(err);
+      throw new Error('Could not create the recording file in "' + (folder || '(unresolved folder)') + '" - ' + detail + '. Try picking a different recordings folder from the Meetings page, or check the app has permission to write there.');
+    }
 
     this.writeChain = Promise.resolve();
     this.recorder = mimeType ? new MediaRecorder(mixed, { mimeType }) : new MediaRecorder(mixed);

@@ -212,31 +212,155 @@ async function publishSession(stream, trackNameFor) {
   return { sessionId: body.sessionId, pc, stream };
 }
 
-// Camera + mic. Explained failures (see main.js's meeting-room UI for how
-// these get shown) rather than a raw DOMException - NotAllowedError means
-// the OS/browser permission was denied, NotFoundError means no such device
-// exists on this machine.
-export async function startLocalSession(withCamera) {
-  let stream;
+// Lists real device labels/ids for a camera/mic picker in Settings -
+// labels only come through once permission's already been granted once
+// (browsers hide them otherwise), which is always true by the time this
+// gets called from the meeting room (camera/mic already granted to join).
+export async function listMediaDevices() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  return {
+    cameras: devices.filter((d) => d.kind === 'videoinput'),
+    mics: devices.filter((d) => d.kind === 'audioinput'),
+  };
+}
+
+// Camera + mic acquired as TWO SEPARATE getUserMedia() calls, not one
+// combined {audio, video} call - found this the hard way (2026-09-30,
+// Humayun: "mic muting reloads the screen, making the video go away").
+// On some Windows webcam/driver combinations, a single combined stream
+// shares one underlying capture pipeline for both devices - toggling
+// `track.enabled` on the audio track can visibly glitch the video track
+// riding the same pipeline. Two independent getUserMedia() calls give
+// each device its own pipeline, and combining their tracks into one
+// MediaStream afterward for WebRTC purposes works exactly the same as if
+// they'd come from one call - RTCPeerConnection doesn't care. This also
+// means camera/mic can now be swapped independently later (see
+// switchDevice) without tearing down the other one.
+// Resolution/framerate are deliberately capped (not left at the camera's
+// native max) - uncapped 1080p+ webcam streams are a big part of why an
+// early build felt laggy; 720p/24fps is still sharp for a meeting tile
+// and meaningfully lighter on bandwidth/CPU for both ends.
+export async function startLocalSession(withCamera, deviceIds) {
+  let audioStream = null, videoStream = null;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: withCamera !== false });
+    audioStream = await navigator.mediaDevices.getUserMedia({
+      audio: (deviceIds && deviceIds.micId) ? { deviceId: { exact: deviceIds.micId } } : true,
+    });
   } catch (err) {
-    throw new Error(describeMediaError(err, withCamera !== false ? 'camera and microphone' : 'microphone'));
+    throw new Error(describeMediaError(err, 'microphone'));
   }
+  if (withCamera !== false) {
+    try {
+      videoStream = await navigator.mediaDevices.getUserMedia({
+        video: Object.assign(
+          { width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 24, max: 30 } },
+          (deviceIds && deviceIds.camId) ? { deviceId: { exact: deviceIds.camId } } : {}
+        ),
+      });
+    } catch (err) {
+      audioStream.getTracks().forEach((t) => t.stop());
+      throw new Error(describeMediaError(err, 'camera'));
+    }
+  }
+  const stream = new MediaStream([...audioStream.getTracks(), ...(videoStream ? videoStream.getTracks() : [])]);
   return publishSession(stream, (t) => (t.kind === 'video' ? 'camera' : 'mic'));
 }
 
+// Swaps just the camera or just the mic on an already-connected session,
+// via replaceTrack() - this is the whole point of doing it this way
+// instead of ending the session and rejoining: replaceTrack swaps the
+// outgoing media on an existing, already-negotiated RTCPeerConnection
+// with NO renegotiation at all, so switching devices mid-meeting doesn't
+// even briefly interrupt the connection to everyone else.
+export async function switchDevice(session, kind, deviceId) {
+  const constraints = kind === 'camera'
+    ? { video: { deviceId: { exact: deviceId }, width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 24, max: 30 } } }
+    : { audio: { deviceId: { exact: deviceId } } };
+  let newStream;
+  try {
+    newStream = await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (err) {
+    throw new Error(describeMediaError(err, kind === 'camera' ? 'camera' : 'microphone'));
+  }
+  const newTrack = kind === 'camera' ? newStream.getVideoTracks()[0] : newStream.getAudioTracks()[0];
+  const oldTrack = kind === 'camera' ? session.stream.getVideoTracks()[0] : session.stream.getAudioTracks()[0];
+  const sender = session.pc.getSenders().find((s) => s.track && s.track.kind === newTrack.kind);
+  if (sender) await sender.replaceTrack(newTrack);
+  if (oldTrack) { session.stream.removeTrack(oldTrack); oldTrack.stop(); }
+  session.stream.addTrack(newTrack);
+  return newTrack;
+}
+
 // Screen/window/tab share, with system audio if the OS/browser offers it
-// (not every source supports it - a bare window share commonly has no
+// AND the person ticks that checkbox in the OS's own share picker (not
+// every source supports it either - a bare window share commonly has no
 // audio track at all, which is normal, not an error).
-export async function startScreenShareSession() {
+//
+// echoCancellation/noiseSuppression on the AUDIO constraint (2026-09-30,
+// Humayun: "voice keeps echoing... despite my microphone being muted"):
+// system-audio capture is a completely separate signal path from the
+// microphone, and does NOT get the same acoustic echo cancellation the
+// mic does by default - so muting the mic does nothing about it. This is
+// what's actually happening: sharing "system audio" sends whatever's
+// playing through the sharer's OWN speakers (the other person's voice,
+// a YouTube video, anything) straight back out - if the sharer is on
+// speakers rather than headphones, the other person ends up hearing
+// their own voice echoed back a moment later. Chromium does support
+// requesting echo cancellation on a captured display audio track;
+// asking for it here can only help, though headphones on the sharer's
+// end is the real fix - see the confirm() prompt in main.js's screen-
+// share handler, which asks about exactly this before turning it on.
+export async function startScreenShareSession(opts) {
   let stream;
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    stream = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: 15, max: 24 } },
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
   } catch (err) {
     throw new Error(describeMediaError(err, 'screen share'));
   }
+  if (opts && opts.hdrCompensate) stream = compensateHdrVideo(stream);
   return publishSession(stream, (t) => (t.kind === 'video' ? 'screen' : 'screenAudio'));
+}
+
+// HDR-display workaround (2026-09-30, Humayun: shared screen "appears
+// extremely bright on the other end" when his display is HDR). Being
+// upfront about what this actually is: there is no standard web API that
+// tells JavaScript whether a display is in HDR mode, or that does real
+// HDR-to-SDR tone mapping (which needs to compress bright highlights
+// while preserving shadow detail, not just dim everything uniformly) - so
+// true automatic detection-and-correction isn't something a web app can
+// reliably do today. This is a manual, approximate workaround someone
+// turns on themselves when they know their own screen is HDR: it redraws
+// the captured video through a canvas with a flat brightness/contrast
+// reduction before sending it, which is a blunter tool than real tone
+// mapping but does noticeably tame the "blown out" look. It costs a small
+// amount of extra CPU (a second render loop) and one extra encode step,
+// so it's opt-in rather than always-on.
+function compensateHdrVideo(stream) {
+  const videoTrack = stream.getVideoTracks()[0];
+  if (!videoTrack) return stream;
+  const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
+  const width = settings.width || 1920, height = settings.height || 1080;
+  const videoEl = document.createElement('video');
+  videoEl.srcObject = new MediaStream([videoTrack]);
+  videoEl.muted = true;
+  videoEl.playsInline = true;
+  videoEl.play().catch(() => {});
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  let running = true;
+  (function draw() {
+    if (!running) return;
+    ctx.filter = 'brightness(0.62) contrast(0.88) saturate(0.92)';
+    try { ctx.drawImage(videoEl, 0, 0, width, height); } catch (e) {}
+    requestAnimationFrame(draw);
+  })();
+  videoTrack.addEventListener('ended', () => { running = false; });
+  const processed = canvas.captureStream(15);
+  return new MediaStream([...processed.getVideoTracks(), ...stream.getAudioTracks()]);
 }
 
 function describeMediaError(err, what) {
