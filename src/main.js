@@ -34,21 +34,37 @@ var CLIENT_COLORS = ['#2f8fd1','#3f6b8a','#7a5ea8','#4f8f6b','#b8567a','#a15c2f'
 var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
 function roleOf(key){ for(var i=0;i<ROLES.length;i++){ if(ROLES[i].key===key) return ROLES[i]; } return null; }
-// ---------- ROLES SCOPED PER TEAM (2026-09-30, schema_v24.sql) ----------
-// A role's own "key" is still the one real identifier used everywhere else
-// (profileRoles.role, tasks.role, template step role, invites.roles[]) and
-// stays globally unique - "teamId" is just metadata for which team's
-// dropdowns/checklists should OFFER a given role, so task assignment,
-// notifications, and permission checks (which all key off `role`, never
-// off team) need no changes at all. Manager/Admin have no teamId (same
-// carve-out as schema_v15.sql - they're fixed cross-team tiers, not a
-// team-owned job title), so they always pass the `!r.teamId` half of the
-// filter below regardless of which team is being asked about. A role with
-// no teamId for any OTHER reason (shouldn't happen post-backfill, but
-// fails open rather than silently hiding a role that exists) is treated
-// the same way - visible to every team - rather than orphaned.
+// ---------- ROLES ACROSS TEAMS (round 26, corrected round 28) ----------
+// Round 26 made roles.teamId HIDE a role from every other Team's dropdowns
+// - wrong call, and a real regression Humayun reported ("the already
+// created roles just got erased"). The actual design he wants: role LABELS
+// (Outreach Expert/VA, SEO Specialist, etc.) are shared across every Team -
+// the same name, held by different people on different Teams - but holding
+// a role on Team A must never grant any access to Team B's stuff, and vice
+// versa. That isolation was ALREADY fully handled independently of roles:
+// every task/episode/client is Team-scoped at the RLS level itself (see
+// public.task_team()/current_team() in schema_v2.sql) - a Team B person
+// literally cannot query a Team A task regardless of what role they hold.
+// The one real gap was notifyRoleAssignment() pinging a role's holders
+// company-wide - fixed there (it now only notifies holders on the SAME
+// Team as the task). So: every job-title role is visible/assignable for
+// EVERY Team again, same as before round 26 - roles.teamId (schema_v24.sql)
+// is kept as an optional label for Admin's own reference (e.g. "this one's
+// really just for Team B"), but nothing hides on it anymore.
 function jobTitleRoles(){ return ROLES.filter(function(r){ return r.key!=='manager' && r.key!=='admin'; }); }
-function rolesForTeam(teamId){ return jobTitleRoles().filter(function(r){ return !r.teamId || r.teamId===teamId; }); }
+function rolesForTeam(){ return jobTitleRoles(); }
+// A checklist item (this app's own "task") can be assigned to Manager too,
+// not just a job-title role (2026-09-30, Humayun's ask) - a Manager can be
+// the actual doer of a step, not only an overseer. Admin stays excluded
+// (never asked for, and Admin isn't scoped to a Team anyway). Used
+// wherever a template step or a custom task picks WHO does the work;
+// rolesForTeam() alone is still what employee-role-assignment/invites use,
+// since holding "Manager" as an assignable-work role isn't the same thing
+// as actually being promoted to the Manager tier.
+function assignableTaskRoles(teamId){
+  var mgr = ROLES.filter(function(r){ return r.key==='manager'; });
+  return mgr.concat(rolesForTeam(teamId));
+}
 // ---------- MULTIPLE DEPENDENCIES (2026-09-22) ----------
 // A step (and the tasks generated from it) can now wait on more than one
 // other step, not just one. Both helpers below fall back to the old
@@ -790,7 +806,7 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
           Object.keys(byRole).forEach(function(role){
             var labels = byRole[role];
             var taskLabel = labels.length>1 ? labels.length+' new tasks' : labels[0];
-            notifyRoleAssignment(role, taskLabel, rule.label, clientMeta.name, link);
+            notifyRoleAssignment(role, taskLabel, rule.label, clientMeta.name, link, rule.clientId);
           });
         });
       })
@@ -1970,7 +1986,7 @@ function openAddStepModal(templateId){
       return '<div class="check-row"><input type="checkbox" name="dependsOnStepIds" value="'+escapeHtml(s.stepId)+'" id="newdep_'+escapeHtml(s.stepId)+'"><label for="newdep_'+escapeHtml(s.stepId)+'">'+escapeHtml(s.label)+'</label></div>';
     }).join('') : '<div class="field-hint">No other steps yet.</div>';
     openModal('Add workflow step', '<div class="field"><label>Step description</label><input required name="label" type="text" placeholder="e.g. Edit trailer"></div>'+
-      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+rolesForTeam(ctx.teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+assignableTaskRoles(ctx.teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
       '<div class="field"><label>Group</label><select name="groupChoice">'+groupOptionsHtml(existingSteps, null)+'</select>'+
       '<input name="groupNew" type="text" placeholder="e.g. Editing" data-group-new-field style="margin-top:6px;"></div></div>'+
       '<div class="field"><label>Depends on (optional, pick any number)</label>'+checksHtml+'</div>'+
@@ -2017,7 +2033,7 @@ function openAddStepModal(templateId){
             }).then(function(){
               return db.doc('episodes/'+epDoc.id).update({ taskCount: (e.taskCount||0) + 1 });
             }).then(function(){
-              notifyRoleAssignment(newStep.role, newStep.label, e.title, e.clientName, '#/episode/'+epDoc.id);
+              notifyRoleAssignment(newStep.role, newStep.label, e.title, e.clientName, '#/episode/'+epDoc.id, e.clientId);
             });
           }));
         }).then(function(){
@@ -2054,7 +2070,7 @@ function openEditStepModal(tplId, stepId){
     // (e.g. the role since got reassigned) - otherwise the <select> would
     // silently fall back to its first option and Save would quietly change
     // the step's role to something nobody picked.
-    var roleOptions = rolesForTeam(ctx.teamId);
+    var roleOptions = assignableTaskRoles(ctx.teamId);
     if(!roleOptions.some(function(r){ return r.key===self.role; })){
       var currentRole = roleOf(self.role);
       if(currentRole) roleOptions = roleOptions.concat([currentRole]);
@@ -2153,6 +2169,22 @@ function wireTaskDescBoxes(scopeEl){
     ta.addEventListener('blur', function(){ if(taskDescSaveTimers[taskId]) save(); });
   });
 }
+// One instance per episode page (not a loop over many rows, unlike
+// wireTaskDescBoxes) - same auto-grow/autosave-on-idle-and-blur behavior,
+// just pointed at the episode doc instead of a task doc.
+function wireEpisodeDescBox(episodeId){
+  var ta = document.getElementById('episodeDescInput');
+  if(!ta) return;
+  function resize(){ ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; }
+  resize();
+  var timer = null;
+  function save(){
+    clearTimeout(timer); timer = null;
+    db.doc('episodes/'+episodeId).update({description: ta.value}).catch(function(err){ showToast('error', errMsg(err)); });
+  }
+  ta.addEventListener('input', function(){ resize(); clearTimeout(timer); timer = setTimeout(save, 800); });
+  ta.addEventListener('blur', function(){ if(timer) save(); });
+}
 function renderEpisode(episodeId){
   paint('<div class="skeleton" style="height:100px;margin-bottom:20px;"></div><div class="skeleton" style="height:300px;"></div>');
   var unsub = db.doc('episodes/'+episodeId).onSnapshot(function(snap){
@@ -2178,6 +2210,14 @@ function renderEpisode(episodeId){
       // on anything narrower.
       '<div class="episode-layout">'+
       '<div class="episode-main-col">'+
+      // Episode-level description (2026-09-30, schema_v26.sql) - separate
+      // from the per-task description boxes (each checklist item's own
+      // notes/links field, delivered earlier this round and deliberately
+      // left untouched) - this one is for the episode as a whole, e.g. a
+      // brief or reference links that apply to every task on it.
+      (canManage()
+        ? '<textarea class="task-desc" id="episodeDescInput" style="margin:0 0 14px;" placeholder="Add a description for this episode as a whole - links, brief, notes…" rows="1">'+escapeHtml(e.description||'')+'</textarea>'
+        : (e.description ? '<div class="task-desc-view" style="margin:0 0 14px;">'+linkifyHtml(escapeHtml(e.description))+'</div>' : ''))+
       '<div class="progress-bar"><div class="progress-fill" id="epProgressFill" style="width:0%"></div></div>'+
       (canManage()?'<div style="margin-top:14px;"><button type="button" class="btn btn-sm" id="addCustomTaskBtn">+ Add custom task</button></div>':'')+
       '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>'+
@@ -2190,6 +2230,7 @@ function renderEpisode(episodeId){
       '</div>'
     );
 
+    wireEpisodeDescBox(episodeId);
     var addCustomBtn = document.getElementById('addCustomTaskBtn');
     if(addCustomBtn) addCustomBtn.addEventListener('click', function(){ openAddCustomTaskModal(episodeId, e); });
     var archiveEpBtn = document.getElementById('archiveEpisodeBtn');
@@ -2509,7 +2550,7 @@ function openAddCustomTaskModal(episodeId, episode){
   db.doc('clients/'+episode.clientId).get().then(function(cSnap){
     var teamId = (cSnap.data()||{}).teamId;
     openModal('Add a custom task', '<div class="field"><label>What needs doing</label><input required name="label" type="text" placeholder="e.g. Cut a bonus 60-second teaser"></div>'+
-    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+rolesForTeam(teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+assignableTaskRoles(teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
     '<div class="field"><label>Group</label><input name="group" type="text" placeholder="e.g. Editing"></div></div>',
     function(fd){
       var label = (fd.get('label')||'').trim();
@@ -2523,7 +2564,7 @@ function openAddCustomTaskModal(episodeId, episode){
         dueDate: episode.dueDate, done:false, doneByUserId:null, doneAt:null, custom:true, createdAt: new Date().toISOString()
       }).then(function(){
         closeModal(); showToast('success','Custom task added');
-        notifyRoleAssignment(role, label, episode.title, episode.clientName, '#/episode/'+episodeId);
+        notifyRoleAssignment(role, label, episode.title, episode.clientName, '#/episode/'+episodeId, episode.clientId);
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Add task');
   }).catch(function(err){ showToast('error', errMsg(err)); });
@@ -3912,19 +3953,44 @@ function insertNotification(row){
   });
 }
 
-function notifyRoleAssignment(role, taskLabel, episodeTitle, clientName, link){
-  if(!role || role==='manager' || role==='admin') return; // those two aren't "assigned" job-title work the same way
-  db.collection('profileRoles').where('role','==',role).get().then(function(snap){
+// 2026-09-30 (round 28): role labels (Outreach Expert/VA etc.) are shared
+// across every Team - the SAME role name is held by different people on
+// different Teams, on purpose (Humayun: "if an employee on Team A is
+// assigned Outreach Expert/VA they are only that for Team A... Team B
+// doesn't get any access for Team A"). Task/episode/client visibility is
+// already fully Team-scoped at the RLS level regardless of role (see
+// public.task_team()/current_team() in schema_v2.sql) - a Team B person
+// can't even query a Team A task. The ONE place that role sharing could
+// leak across Teams was notifications: this used to ping EVERY holder of
+// a role company-wide, so a Team A task could ping Team B's own Outreach
+// VA just for sharing the same job title. Now takes `clientId` to resolve
+// the task's own Team and only notifies role-holders on THAT Team - a
+// person with no Team on file (shouldn't happen for a real employee) or a
+// task with no resolvable Team fails OPEN (still notified) rather than
+// silently dropping a real notification over an edge case.
+// Manager CAN now be assigned a task's role too (Humayun's ask) - only
+// Admin stays excluded, since Admin was never "assigned" job-title work.
+function notifyRoleAssignment(role, taskLabel, episodeTitle, clientName, link, clientId){
+  if(!role || role==='admin') return;
+  Promise.all([
+    db.collection('profileRoles').where('role','==',role).get(),
+    clientTeamIdCached(clientId)
+  ]).then(function(res){
+    var snap = res[0], teamId = res[1];
     var uids = snap.docs.map(function(d){ return d.data().userId; });
     if(!uids.length) return;
-    var r = roleOf(role);
-    var roleLabel = r ? r.label : role;
-    uids.forEach(function(uid){
-      insertNotification({
-        userId: uid, type:'task_assigned',
-        message: 'New '+roleLabel+' task: "'+taskLabel+'" on "'+episodeTitle+'" ('+clientName+')',
-        link: link, fromUserId: null, readAt: null, createdAt: new Date().toISOString()
-      }).catch(function(err){ console.warn('[blue-kite-ops] task-assignment notification failed:', err); });
+    return db.collection('profiles').where('id','in',uids).get().then(function(profSnap){
+      var r = roleOf(role);
+      var roleLabel = r ? r.label : role;
+      profSnap.docs.forEach(function(d){
+        var p = d.data();
+        if(teamId && p.teamId && p.teamId!==teamId) return; // same role, different Team - not who this is for
+        insertNotification({
+          userId: d.id, type:'task_assigned',
+          message: 'New '+roleLabel+' task: "'+taskLabel+'" on "'+episodeTitle+'" ('+clientName+')',
+          link: link, fromUserId: null, readAt: null, createdAt: new Date().toISOString()
+        }).catch(function(err){ console.warn('[blue-kite-ops] task-assignment notification failed:', err); });
+      });
     });
   }).catch(function(err){ console.warn('[blue-kite-ops] could not look up role holders to notify:', err); });
 }
@@ -4422,21 +4488,12 @@ function openInviteModal(){
 // group (round 8.8/schema_v10) so Admin can grant, say, Manager + a
 // job-title role to the same invite at once.
 function openAdminInviteModal(){
-  // Job-title roles are Team-scoped now, but which Team this invite is
-  // even going to is picked in this same modal - so the role checkboxes
-  // re-render live as the Team select changes, always with 'manager'
-  // (global, no Team of its own) pinned at the top regardless of Team.
-  var managerRole = ASSIGNABLE_ROLES.filter(function(r){ return r.key==='manager'; })[0];
-  var defaultTeamId = sortedTeamList().length ? sortedTeamList()[0].id : '';
-  function rolesForInvite(teamId){ return (managerRole?[managerRole]:[]).concat(rolesForTeam(teamId)); }
-  function roleChecksHtmlFor(teamId){
-    return rolesForInvite(teamId).map(function(r){
-      return '<div class="check-row"><input type="checkbox" name="roles" value="'+r.key+'" id="adminvrole_'+r.key+'"><label for="adminvrole_'+r.key+'">'+escapeHtml(r.label)+'</label></div>';
-    }).join('');
-  }
+  var roleChecksHtml = ASSIGNABLE_ROLES.map(function(r){
+    return '<div class="check-row"><input type="checkbox" name="roles" value="'+r.key+'" id="adminvrole_'+r.key+'"><label for="adminvrole_'+r.key+'">'+escapeHtml(r.label)+'</label></div>';
+  }).join('');
   openModal('Invite someone', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
-    '<div class="field-row"><div class="field" id="adminInviteRolesField"><label>Role(s)</label><div id="adminInviteRolesBox">'+roleChecksHtmlFor(defaultTeamId)+'</div></div>'+
-    '<div class="field"><label>Team</label><select name="teamId" id="adminInviteTeamSelect" required>'+teamOptionsHtml(defaultTeamId)+'</select></div></div>',
+    '<div class="field-row"><div class="field"><label>Role(s)</label>'+roleChecksHtml+'</div>'+
+    '<div class="field"><label>Team</label><select name="teamId" required>'+teamOptionsHtml()+'</select></div></div>',
     function(fd){
       var email = (fd.get('email')||'').trim();
       if(!email){ showModalError('Enter their email.'); return; }
@@ -4449,18 +4506,15 @@ function openAdminInviteModal(){
         route();
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Create invite');
-  var teamSelect = document.getElementById('adminInviteTeamSelect');
-  var rolesBox = document.getElementById('adminInviteRolesBox');
-  if(teamSelect && rolesBox) teamSelect.addEventListener('change', function(){ rolesBox.innerHTML = roleChecksHtmlFor(teamSelect.value); });
 }
 
 // ---------- ACTIVITY (round 27, schema_v25.sql) ----------
 // Manager/Admin-only. A Manager only ever sees their own Team (myTeamId,
-// no picker needed); Admin isn't on any one Team, so gets the same kind of
-// "which Team am I currently looking at" switcher the roles page uses
-// (adminRolesTeamId) - a separate persisted choice though, since someone
-// might genuinely want to browse one Team's roles while looking at a
-// different Team's activity.
+// no picker needed); Admin isn't on any one Team, so gets a "which Team am
+// I currently looking at" switcher, persisted separately from anything
+// else (round 26 gave the roles page its own similar switcher, but round
+// 28 removed that one - roles turned out not to need Team-scoping at all,
+// see the "ROLES ACROSS TEAMS" note near jobTitleRoles()).
 var ACTIVITY_EVENT_LABELS = {
   task_item_done: 'marked a task done',
   episode_completed: 'completed the whole episode',
@@ -4531,26 +4585,7 @@ function loadActivityList(teamId, category){
 }
 
 // ---------- ADMIN ----------
-// Which Team's roles the "Job-title roles" section is currently showing -
-// Admin isn't on any one Team (unlike a Manager, who only ever has one to
-// worry about), so unlike everywhere else in the app that just reads
-// myTeamId, Admin needs an explicit switcher here. Persisted per device
-// (same reasoning as the music-box position/sound-mute toggle - which
-// Team you were just looking at is a personal browsing-state thing, not
-// something to sync across devices or people).
-var adminRolesTeamId = null;
-function loadAdminRolesTeamId(){
-  var saved = null; try{ saved = localStorage.getItem('bko_adminRolesTeam'); }catch(e){}
-  var list = sortedTeamList();
-  if(saved && list.some(function(t){ return t.id===saved; })) return saved;
-  return list.length ? list[0].id : null;
-}
-function saveAdminRolesTeamId(teamId){
-  adminRolesTeamId = teamId;
-  try{ localStorage.setItem('bko_adminRolesTeam', teamId||''); }catch(e){}
-}
 function renderAdmin(){
-  adminRolesTeamId = loadAdminRolesTeamId();
   paint(
     '<div class="page-head"><div><div class="eyebrow">Admin</div><h1 class="page-title">Teams & company settings</h1>'+
     '<div class="page-sub">Only visible to you.</div></div>'+
@@ -4562,11 +4597,8 @@ function renderAdmin(){
     '<div class="section"><div class="section-head"><h2 class="section-title">Pending invites</h2></div>'+
     '<div class="page-sub" style="margin:-6px 0 12px;">Across every team - this used to only be visible from a Manager\'s own Team page.</div>'+
     '<div id="allInvitesBox"><div class="skeleton" style="height:40px;"></div></div></div>'+
-    '<div class="section"><div class="section-head"><h2 class="section-title">Job-title roles</h2>'+
-    '<div style="display:flex;align-items:center;gap:8px;">'+
-    (sortedTeamList().length>1 ? '<label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;">Team<select id="rolesTeamFilter" style="width:auto;">'+teamOptionsHtml(adminRolesTeamId)+'</select></label>' : '')+
-    '<button type="button" class="btn btn-sm" id="newRoleBtn">+ New role</button></div></div>'+
-    '<div class="page-sub" style="margin:-6px 0 12px;">Each Team has its own set of job-title roles (separate from Manager and Admin, which are fixed tiers, not editable here, and apply everywhere) - used for task assignment, role-based visibility, and workflow step ownership. Renaming keeps everything already assigned to a role intact; deleting doesn\'t touch anyone/anything already holding it, it just stops showing up for new assignments.</div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Job-title roles</h2><button type="button" class="btn btn-sm" id="newRoleBtn">+ New role</button></div>'+
+    '<div class="page-sub" style="margin:-6px 0 12px;">Shared across every Team (separate from Manager and Admin, which are fixed tiers, not editable here) - e.g. "Outreach Expert/VA" is the same job title on every Team, but held by different people per Team, and someone on Team A never gets any access to Team B\'s clients/tasks (or vice versa) regardless of role - that separation is enforced by which Team each person and client belongs to, not by the role name. Renaming keeps everything already assigned to a role intact; deleting doesn\'t touch anyone/anything already holding it, it just stops showing up for new assignments.</div>'+
     '<div id="rolesBox"></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'
   );
@@ -4582,8 +4614,6 @@ function renderAdmin(){
   document.getElementById('newGlobalServiceBtn').addEventListener('click', function(){ openCreateServiceTypeModal(null); });
   document.getElementById('adminInviteBtn').addEventListener('click', openAdminInviteModal);
   document.getElementById('newRoleBtn').addEventListener('click', function(){ openRoleModal(null); });
-  var rolesTeamFilter = document.getElementById('rolesTeamFilter');
-  if(rolesTeamFilter) rolesTeamFilter.addEventListener('change', function(){ saveAdminRolesTeamId(rolesTeamFilter.value); renderRolesBox(); });
   renderRolesBox();
 
   // Ported over from the Manager's Team Settings page (renderTeamSettings) -
@@ -4705,18 +4735,8 @@ function renderAdmin(){
     // Promise.all above), not the single p.role field.
     var empBox = document.getElementById('employeesBox');
     var employees = profiles.filter(function(p){ return !empHasRole(p.id,'admin'); }).sort(function(a,b){ return (a.displayName||a.email||'').localeCompare(b.displayName||b.email||''); });
-    var managerRoleRow = ASSIGNABLE_ROLES.filter(function(r){ return r.key==='manager'; })[0];
     empBox.innerHTML = employees.length ? '<div class="roster-table">'+employees.map(function(p){
-      // Only offer this employee's own Team's job-title roles (plus the
-      // global Manager tier) - but a role they already hold stays visible/
-      // checkable even if it's from a different Team (e.g. left over from
-      // before they were moved), so Admin can still see and uncheck it
-      // instead of it just silently disappearing from this list.
-      var teamRoles = (managerRoleRow?[managerRoleRow]:[]).concat(rolesForTeam(p.teamId));
-      ASSIGNABLE_ROLES.forEach(function(r){
-        if(empHasRole(p.id, r.key) && teamRoles.indexOf(r)===-1) teamRoles.push(r);
-      });
-      var roleChecksHtml = teamRoles.map(function(r){
+      var roleChecksHtml = ASSIGNABLE_ROLES.map(function(r){
         var checked = empHasRole(p.id, r.key);
         return '<label style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;"><input type="checkbox" value="'+r.key+'" '+(checked?'checked':'')+' style="width:14px;height:14px;">'+escapeHtml(r.label)+'</label>';
       }).join('');
@@ -4798,11 +4818,7 @@ function renderAdmin(){
 function renderRolesBox(){
   var box = document.getElementById('rolesBox');
   if(!box) return;
-  // Scoped to whichever Team the switcher above is currently set to (see
-  // adminRolesTeamId) - a role with no teamId at all (shouldn't happen
-  // after schema_v24.sql's backfill, but fails open rather than hiding a
-  // real role) shows up under every Team rather than none.
-  var editable = jobTitleRoles().filter(function(r){ return !adminRolesTeamId || !r.teamId || r.teamId===adminRolesTeamId; });
+  var editable = jobTitleRoles();
   box.innerHTML = editable.length ? editable.map(function(r){
     return '<div class="roster-row"><span class="role-chip" style="background:'+escapeHtml(r.color)+'">'+escapeHtml(r.label)+'</span>'+
       '<div style="margin-left:auto;display:flex;gap:8px;">'+
@@ -4838,22 +4854,17 @@ function slugifyRoleKey(label){
 
 function openRoleModal(existingKey){
   var existing = existingKey ? ROLES.filter(function(r){ return r.key===existingKey; })[0] : null;
-  var teamFieldHtml = sortedTeamList().length>1
-    ? '<div class="field"><label>Team</label><select name="teamId" required>'+teamOptionsHtml(existing?existing.teamId:adminRolesTeamId)+'</select></div>'
-    : ''; // only one Team exists at all - nothing to actually choose between yet
   openModal(existing ? 'Edit role' : 'New role',
     '<div class="field"><label>Label</label><input required name="label" type="text" value="'+(existing?escapeHtml(existing.label):'')+'" placeholder="e.g. Audio Engineer"></div>'+
-    teamFieldHtml+
     '<div class="field"><label>Color</label><input name="color" type="color" value="'+(existing?escapeHtml(existing.color):'#5b6472')+'" style="height:38px;width:70px;padding:2px;"></div>'+
-    '<div class="field-hint">Role labels are always shown in white text on this color - pick something mid-to-dark so it stays readable.</div>',
+    '<div class="field-hint">Role labels are always shown in white text on this color - pick something mid-to-dark so it stays readable. Shared across every Team - see the note above.</div>',
     function(fd){
       var label = (fd.get('label')||'').trim();
       if(!label){ showModalError('Name the role.'); return; }
       var color = fd.get('color') || '#5b6472';
-      var teamId = fd.get('teamId') || (sortedTeamList()[0] && sortedTeamList()[0].id) || null;
       setModalBusy(true);
       if(existing){
-        db.doc('roles/'+existing.key).update({label:label, color:color, teamId:teamId}).then(function(){
+        db.doc('roles/'+existing.key).update({label:label, color:color}).then(function(){
           return refreshRolesCache();
         }).then(function(){
           closeModal(); showToast('success','Role updated'); route();
@@ -4863,7 +4874,7 @@ function openRoleModal(existingKey){
         var key = base, n = 2;
         while(ROLES.some(function(r){ return r.key===key; })){ key = base+'_'+n; n++; }
         var maxOrder = ROLES.reduce(function(m,r){ return Math.max(m, r.sortOrder||0); }, 0);
-        db.doc('roles/'+key).set({key:key, label:label, color:color, teamId:teamId, sortOrder:maxOrder+1, createdAt:new Date().toISOString()}).then(function(){
+        db.doc('roles/'+key).set({key:key, label:label, color:color, sortOrder:maxOrder+1, createdAt:new Date().toISOString()}).then(function(){
           return refreshRolesCache();
         }).then(function(){
           closeModal(); showToast('success','Role created'); route();
