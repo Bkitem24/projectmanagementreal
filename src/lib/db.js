@@ -25,6 +25,10 @@ function applyFilters(q, filters) {
     else if (f.op === '>') q = q.gt(f.field, f.value);
     else if (f.op === '>=') q = q.gte(f.field, f.value);
     else if (f.op === 'in') q = q.in(f.field, f.value);
+    // Array-column "does this row's array share any value with mine" -
+    // added for multi-role tasks (tasks.roles, schema_v29.sql), e.g. My
+    // Board finding tasks reachable via a secondary role.
+    else if (f.op === 'overlaps') q = q.overlaps(f.field, f.value);
     else throw new Error('Unsupported filter operator: ' + f.op);
   });
   return q;

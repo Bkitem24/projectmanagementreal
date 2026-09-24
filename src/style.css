@@ -345,9 +345,9 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:6px;
    its content instead of scrolling internally (main.js resizes it on
    `input`) and stays visually quiet until focused, so a task with no
    description doesn't look like it's missing something. */
-.task-desc{width:100%;resize:none;overflow:hidden;min-height:34px;margin-top:8px;border:1px solid transparent;background:transparent;border-radius:8px;padding:7px 9px;font-size:12.5px;line-height:1.5;color:var(--ink-soft);transition:background-color .15s ease,border-color .15s ease;}
-.task-desc:hover{background:var(--paper);}
-.task-desc:focus{outline:none;background:var(--surface);border-color:var(--blue);color:var(--ink);box-shadow:0 0 0 3px var(--blue-soft);}
+.task-desc{width:100%;resize:none;overflow:hidden;min-height:34px;margin-top:8px;border:1px solid var(--line);background:var(--paper);border-radius:8px;padding:7px 9px;font-size:12.5px;line-height:1.5;color:var(--ink);transition:border-color .15s ease,box-shadow .15s ease;}
+.task-desc:hover{border-color:var(--ink-soft);}
+.task-desc:focus{outline:none;background:var(--surface);border-color:var(--blue);box-shadow:0 0 0 3px var(--blue-soft);}
 .task-desc::placeholder{color:var(--muted);}
 .task-desc-view{margin-top:8px;padding:7px 9px;font-size:12.5px;line-height:1.5;color:var(--ink-soft);white-space:pre-wrap;word-break:break-word;}
 .task-desc-view a{color:var(--blue-2);}

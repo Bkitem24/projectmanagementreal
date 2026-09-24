@@ -67,6 +67,26 @@ function assignableTaskRoles(teamId){
   var mgr = ROLES.filter(function(r){ return r.key==='manager'; });
   return mgr.concat(rolesForTeam(teamId));
 }
+// A workflow step (and the task generated from it) can be done by more
+// than one role now (2026-09-30, Humayun's ask) - e.g. either a Sr. or Jr.
+// Video Editor can pick up the same step. Same backward-compatible-array
+// pattern already used for step dependencies just below (stepDepIds()/
+// taskDepStepIds()): a new plural array field, falling back to the old
+// singular field for anything created before this - nothing already
+// stored needs to change. `role`/`t.role` are still kept in sync (set to
+// the FIRST picked role) purely so anything not yet updated to read the
+// plural field - a CSS var lookup, a notification, an old query - still
+// gets a sane single answer instead of breaking.
+function stepRoleKeys(step){
+  if(step && step.roles && step.roles.length) return step.roles;
+  if(step && step.role) return [step.role];
+  return [];
+}
+function taskRoleKeys(t){
+  if(t && t.roles && t.roles.length) return t.roles;
+  if(t && t.role) return [t.role];
+  return [];
+}
 // ---------- MULTIPLE DEPENDENCIES (2026-09-22) ----------
 // A step (and the tasks generated from it) can now wait on more than one
 // other step, not just one. Both helpers below fall back to the old
@@ -794,9 +814,10 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
         return db.doc('episodes/'+epId).set(epDoc).then(function(){
           return Promise.all(steps.map(function(s){
             var taskId = epId+'_'+s.stepId;
+            var roles = stepRoleKeys(s);
             return db.doc('tasks/'+taskId).set({
               episodeId: epId, episodeTitle: rule.label, clientId: rule.clientId, clientName: clientMeta.name,
-              role: s.role, label: s.label, group: s.group||'', orderNum: s.order||0,
+              role: roles[0]||null, roles: roles, label: s.label, group: s.group||'', orderNum: s.order||0,
               dependsOnStepIds: stepDepIds(s), dueDate: dueIso, done:false, doneByUserId:null, doneAt:null,
               createdAt: new Date().toISOString()
             });
@@ -806,10 +827,11 @@ function generateEpisodesForRule(rule, clientMeta, steps, monthOffsets){
           // a template with several steps for the same role would
           // otherwise spam that role's holders with a separate ping for
           // every single task on the same "Generate upcoming episodes"
-          // click.
+          // click. A step with multiple roles contributes to EACH of
+          // their groups, so every eligible role gets notified.
           var link = '#/episode/'+epId;
           var byRole = {};
-          steps.forEach(function(s){ (byRole[s.role]=byRole[s.role]||[]).push(s.label); });
+          steps.forEach(function(s){ stepRoleKeys(s).forEach(function(rk){ (byRole[rk]=byRole[rk]||[]).push(s.label); }); });
           Object.keys(byRole).forEach(function(role){
             var labels = byRole[role];
             var taskLabel = labels.length>1 ? labels.length+' new tasks' : labels[0];
@@ -2001,8 +2023,11 @@ function openAddStepModal(templateId){
     var checksHtml = existingSteps.length ? existingSteps.map(function(s){
       return '<div class="check-row"><input type="checkbox" name="dependsOnStepIds" value="'+escapeHtml(s.stepId)+'" id="newdep_'+escapeHtml(s.stepId)+'"><label for="newdep_'+escapeHtml(s.stepId)+'">'+escapeHtml(s.label)+'</label></div>';
     }).join('') : '<div class="field-hint">No other steps yet.</div>';
+    var roleChecksHtml = assignableTaskRoles(ctx.teamId).map(function(r){
+      return '<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;padding:2px 0;"><input type="checkbox" name="roles" value="'+r.key+'">'+escapeHtml(r.label)+'</label>';
+    }).join('');
     openModal('Add workflow step', '<div class="field"><label>Step description</label><input required name="label" type="text" placeholder="e.g. Edit trailer"></div>'+
-      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+assignableTaskRoles(ctx.teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="field-row"><div class="field"><label>Role(s) - pick any number</label><div style="max-height:140px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 8px;">'+roleChecksHtml+'</div></div>'+
       '<div class="field"><label>Group</label><select name="groupChoice">'+groupOptionsHtml(existingSteps, null)+'</select>'+
       '<input name="groupNew" type="text" placeholder="e.g. Editing" data-group-new-field style="margin-top:6px;"></div></div>'+
       '<div class="field"><label>Depends on (optional, pick any number)</label>'+checksHtml+'</div>'+
@@ -2010,9 +2035,11 @@ function openAddStepModal(templateId){
       function(fd){
         var label = (fd.get('label')||'').trim();
         if(!label){ showModalError('Describe the step.'); return; }
+        var roles = fd.getAll('roles');
+        if(!roles.length){ showModalError('Pick at least one role.'); return; }
         setModalBusy(true);
         var dependsOnStepIds = fd.getAll('dependsOnStepIds');
-        var newStep = {stepId:'s'+uid8(), order:0, role:fd.get('role'), group:resolveGroupChoice(fd), label:label, dependsOnStepIds: dependsOnStepIds};
+        var newStep = {stepId:'s'+uid8(), order:0, role:roles[0], roles:roles, group:resolveGroupChoice(fd), label:label, dependsOnStepIds: dependsOnStepIds};
         db.doc('templates/'+templateId).get().then(function(freshSnap){
           var ft = freshSnap.data();
           var freshSteps = (ft.steps||[]).slice();
@@ -2043,13 +2070,13 @@ function openAddStepModal(templateId){
             var taskId = epDoc.id+'_'+newStep.stepId;
             return db.doc('tasks/'+taskId).set({
               episodeId: epDoc.id, episodeTitle: e.title, clientId: e.clientId, clientName: e.clientName,
-              role: newStep.role, label: newStep.label, group: newStep.group||'', orderNum: newStep.order||0,
+              role: newStep.role, roles: stepRoleKeys(newStep), label: newStep.label, group: newStep.group||'', orderNum: newStep.order||0,
               dependsOnStepIds: newStep.dependsOnStepIds||[], dueDate: e.dueDate, done:false, doneByUserId:null, doneAt:null,
               createdAt: new Date().toISOString()
             }).then(function(){
               return db.doc('episodes/'+epDoc.id).update({ taskCount: (e.taskCount||0) + 1 });
             }).then(function(){
-              notifyRoleAssignment(newStep.role, newStep.label, e.title, e.clientName, '#/episode/'+epDoc.id, e.clientId);
+              stepRoleKeys(newStep).forEach(function(rk){ notifyRoleAssignment(rk, newStep.label, e.title, e.clientName, '#/episode/'+epDoc.id, e.clientId); });
             });
           }));
         }).then(function(){
@@ -2081,25 +2108,33 @@ function openEditStepModal(tplId, stepId){
     var self = steps.filter(function(s){ return s.stepId===stepId; })[0];
     if(!self){ showToast('error','That step no longer exists - try refreshing.'); return; }
     var selfGroup = (self.group||'').trim() || 'Tasks';
-    // Whatever role this step already holds always stays a valid option,
-    // even if it belongs to a different team than the client's current one
-    // (e.g. the role since got reassigned) - otherwise the <select> would
-    // silently fall back to its first option and Save would quietly change
-    // the step's role to something nobody picked.
+    // Whatever role(s) this step already holds always stay valid options,
+    // even if one belongs to a different team than the client's current
+    // one (e.g. the role since got reassigned) - otherwise the checkbox
+    // would silently disappear and Save would quietly drop it even though
+    // nobody unchecked it.
+    var selfRoles = stepRoleKeys(self);
     var roleOptions = assignableTaskRoles(ctx.teamId);
-    if(!roleOptions.some(function(r){ return r.key===self.role; })){
-      var currentRole = roleOf(self.role);
-      if(currentRole) roleOptions = roleOptions.concat([currentRole]);
-    }
+    selfRoles.forEach(function(rk){
+      if(!roleOptions.some(function(r){ return r.key===rk; })){
+        var currentRole = roleOf(rk);
+        if(currentRole) roleOptions.push(currentRole);
+      }
+    });
+    var roleChecksHtml = roleOptions.map(function(r){
+      return '<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;padding:2px 0;"><input type="checkbox" name="roles" value="'+r.key+'"'+(selfRoles.indexOf(r.key)>-1?' checked':'')+'>'+escapeHtml(r.label)+'</label>';
+    }).join('');
     openModal('Edit "'+escapeHtml(self.label)+'"',
       '<div class="field"><label>Step description</label><input required name="label" type="text" value="'+escapeHtml(self.label)+'"></div>'+
-      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+roleOptions.map(function(r){return '<option value="'+r.key+'"'+(r.key===self.role?' selected':'')+'>'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="field-row"><div class="field"><label>Role(s) - pick any number</label><div style="max-height:140px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 8px;">'+roleChecksHtml+'</div></div>'+
       '<div class="field"><label>Group</label><select name="groupChoice">'+groupOptionsHtml(steps, selfGroup)+'</select>'+
       '<input name="groupNew" type="text" placeholder="e.g. Editing" data-group-new-field style="margin-top:6px;"></div></div>',
       function(fd){
         var label = (fd.get('label')||'').trim();
         if(!label){ showModalError('Describe the step.'); return; }
-        var changes = { label: label, role: fd.get('role'), group: resolveGroupChoice(fd) };
+        var roles = fd.getAll('roles');
+        if(!roles.length){ showModalError('Pick at least one role.'); return; }
+        var changes = { label: label, role: roles[0], roles: roles, group: resolveGroupChoice(fd) };
         openStepEditScopeModal(tplId, stepId, changes);
       }, 'Next', {afterRender: wireGroupPicker});
   }).catch(function(err){ showToast('error', errMsg(err)); });
@@ -2144,7 +2179,7 @@ function openStepEditScopeModal(tplId, stepId, changes){
           });
           return Promise.all(eligible.map(function(epDoc){
             var taskId = epDoc.id+'_'+stepId;
-            return db.doc('tasks/'+taskId).update({ role: changes.role, label: changes.label, group: changes.group }).catch(function(){});
+            return db.doc('tasks/'+taskId).update({ role: changes.role, roles: changes.roles, label: changes.label, group: changes.group }).catch(function(){});
           }));
         });
       }).then(function(){
@@ -2441,16 +2476,21 @@ function renderEpisode(episodeId){
       fetchCommentCounts().then(renderChecklist);
 
       function taskRowHtml(t, commentCounts){
-        var r = roleOf(t.role);
+        var roleKeys = taskRoleKeys(t);
+        var r = roleOf(roleKeys[0]); // first role's color drives the row's left-border accent
         var unmet = depTasksFor(t).filter(function(dt){ return !dt.done; });
         var isBlocked = unmet.length>0;
-        var canCheck = (myRoles.indexOf(t.role)>-1 || canManage()) && !isBlocked;
+        var canCheck = (roleKeys.some(function(rk){ return myRoles.indexOf(rk)>-1; }) || canManage()) && !isBlocked;
         var waitingLabel = unmet.map(function(dt){ return dt.label; }).join(', ');
         var cCount = commentCounts[t._id]||0;
+        var roleChipsHtml = roleKeys.length ? roleKeys.map(function(rk){
+          var rr = roleOf(rk);
+          return '<span class="role-chip" style="background:'+(rr?rr.color:'#888')+'">'+(rr?escapeHtml(rr.label):escapeHtml(rk))+'</span>';
+        }).join('') : '';
         return '<div class="task-row '+(t.done?'done':'')+(isBlocked?' task-blocked':'')+'" style="--role-color:'+(r?r.color:'var(--line)')+'">'+
           '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(t.done?'checked':'')+' '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(waitingLabel)+'\' '+(unmet.length>1?'are':'is')+' done"':'')+'>'+
           '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+(t.custom?' <span class="task-custom-badge">custom</span>':'')+'</div>'+
-          '<div class="task-meta"><span class="role-chip" style="background:'+(r?r.color:'#888')+'">'+(r?escapeHtml(r.label):t.role)+'</span>'+
+          '<div class="task-meta">'+roleChipsHtml+
           (isBlocked?'<span class="task-waiting">⛔ Waiting on: '+escapeHtml(waitingLabel)+'</span>':'')+
           (t.done && t.doneByUserId?profileChip(t.doneByUserId):'')+
           '</div>'+
@@ -2565,22 +2605,26 @@ function renderEpisode(episodeId){
 function openAddCustomTaskModal(episodeId, episode){
   db.doc('clients/'+episode.clientId).get().then(function(cSnap){
     var teamId = (cSnap.data()||{}).teamId;
+    var roleChecksHtml = assignableTaskRoles(teamId).map(function(r){
+      return '<label style="display:flex;align-items:center;gap:5px;font-size:12.5px;padding:2px 0;"><input type="checkbox" name="roles" value="'+r.key+'">'+escapeHtml(r.label)+'</label>';
+    }).join('');
     openModal('Add a custom task', '<div class="field"><label>What needs doing</label><input required name="label" type="text" placeholder="e.g. Cut a bonus 60-second teaser"></div>'+
-    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+assignableTaskRoles(teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+    '<div class="field-row"><div class="field"><label>Role(s) - pick any number</label><div style="max-height:140px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:6px 8px;">'+roleChecksHtml+'</div></div>'+
     '<div class="field"><label>Group</label><input name="group" type="text" placeholder="e.g. Editing"></div></div>',
     function(fd){
       var label = (fd.get('label')||'').trim();
       if(!label){ showModalError('Describe the task.'); return; }
+      var roles = fd.getAll('roles');
+      if(!roles.length){ showModalError('Pick at least one role.'); return; }
       setModalBusy(true);
       var taskId = episodeId+'_custom_'+uid8();
-      var role = fd.get('role');
       db.doc('tasks/'+taskId).set({
         episodeId: episodeId, episodeTitle: episode.title, clientId: episode.clientId, clientName: episode.clientName,
-        role: role, label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnStepIds: [],
+        role: roles[0], roles: roles, label: label, group: (fd.get('group')||'').trim(), orderNum: 999, dependsOnStepIds: [],
         dueDate: episode.dueDate, done:false, doneByUserId:null, doneAt:null, custom:true, createdAt: new Date().toISOString()
       }).then(function(){
         closeModal(); showToast('success','Custom task added');
-        notifyRoleAssignment(role, label, episode.title, episode.clientName, '#/episode/'+episodeId, episode.clientId);
+        roles.forEach(function(rk){ notifyRoleAssignment(rk, label, episode.title, episode.clientName, '#/episode/'+episodeId, episode.clientId); });
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Add task');
   }).catch(function(err){ showToast('error', errMsg(err)); });
@@ -3409,11 +3453,40 @@ function renderBoard(){
     '<div id="boardBody"><div class="skeleton" style="height:60px;margin-bottom:10px;"></div><div class="skeleton" style="height:60px;"></div></div>'
   );
 
-  var q = db.collection('tasks').where('done','==',false);
-  if(!showingAll) q = q.where('role','in', myRoles);
-  q = q.orderBy('dueDate','asc').limit(200);
+  // Multi-role tasks (schema_v29.sql, tasks.roles) mean "does this task
+  // match one of my roles" can no longer be a plain `role in myRoles`
+  // filter - that would miss a task where I only hold its SECOND or
+  // third role, not its primary one. A raw supabase .or() (role in
+  // myRoles OR roles overlaps myRoles) covers both old single-role tasks
+  // (roles is null, only `role` matches) and new multi-role ones in one
+  // query - the db.js shim's own where()/in() can't express an OR across
+  // two different fields, so this bypasses it for just this one query,
+  // hand-rolling the same live-subscription shape (see db.js's own
+  // onSnapshot) so the rest of this function's existing code (which
+  // expects snap.docs/snap.empty) needs no changes at all.
+  function fetchBoardTasksQuery(){
+    var query = supabase.from('tasks').select('*').eq('done', false);
+    if(!showingAll) query = query.or('role.in.('+myRoles.join(',')+'),roles.ov.{'+myRoles.join(',')+'}');
+    return query.order('dueDate', { ascending: true }).limit(200);
+  }
+  function subscribeBoardTasks(onData, onError){
+    var live = true;
+    function emit(){
+      fetchBoardTasksQuery().then(function(res){
+        if(!live) return;
+        if(res.error) throw res.error;
+        var rows = res.data || [];
+        onData({ docs: rows.map(function(r){ return { id: r.id, exists: true, data: function(){ return r; } }; }), empty: rows.length===0 });
+      }).catch(function(e){ if(live && onError) onError(e); });
+    }
+    emit();
+    var channel = supabase.channel('board_tasks_'+Math.random().toString(36).slice(2))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, emit)
+      .subscribe();
+    return function(){ live = false; supabase.removeChannel(channel); };
+  }
 
-  var unsub = q.onSnapshot(function(snap){
+  var unsub = subscribeBoardTasks(function(snap){
     var box = document.getElementById('boardBody');
     if(!box) return;
     if(snap.empty){ box.innerHTML = '<div class="empty-state"><strong>Nothing open</strong>Every task for this view is checked off.</div>'; return; }
@@ -3486,16 +3559,21 @@ function renderBoardBody(box, tasks, depById, showingAll, liveStepByEpisodeId){
   box.innerHTML = order.filter(function(o){ return groups[o[0]].length; }).map(function(o){
     return '<div class="board-group"><div class="board-group-title">'+o[1]+'</div>'+
       groups[o[0]].map(function(t){
-        var rr = roleOf(t.role);
+        var roleKeys = taskRoleKeys(t);
+        var rr = roleOf(roleKeys[0]);
         var depTasks = liveDepStepIds(t, liveStepByEpisodeId[t.episodeId]).map(function(sid){ return depById[t.episodeId+'_'+sid]; }).filter(Boolean);
         var unmet = depTasks.filter(function(dt){ return !dt.done; });
         var isBlocked = unmet.length>0;
-        var canCheck = (myRoles.indexOf(t.role)>-1 || canManage()) && !isBlocked;
+        var canCheck = (roleKeys.some(function(rk){ return myRoles.indexOf(rk)>-1; }) || canManage()) && !isBlocked;
         var waitingLabel = unmet.map(function(dt){ return dt.label; }).join(', ');
+        var roleChipsHtml = showingAll ? roleKeys.map(function(rk){
+          var r2 = roleOf(rk);
+          return ' <span class="role-chip" style="background:'+(r2?r2.color:'#888')+'">'+(r2?escapeHtml(r2.label):escapeHtml(rk))+'</span>';
+        }).join('') : '';
         return '<div class="board-task'+(isBlocked?' task-blocked':'')+'" style="border-left:3px solid '+(rr?rr.color:'var(--line)')+'">'+
           '<input type="checkbox" class="task-check" data-task="'+t._id+'" '+(canCheck?'':'disabled')+' '+(isBlocked?'title="Locked until \''+escapeHtml(waitingLabel)+'\' '+(unmet.length>1?'are':'is')+' done"':'')+'>'+
           '<div class="task-body"><div class="task-label">'+escapeHtml(t.label)+'</div>'+
-          '<div class="board-task-client">'+escapeHtml(t.clientName)+(showingAll?' <span class="role-chip" style="background:'+(rr?rr.color:'#888')+'">'+(rr?escapeHtml(rr.label):t.role)+'</span>':'')+'</div>'+
+          '<div class="board-task-client">'+escapeHtml(t.clientName)+roleChipsHtml+'</div>'+
           '<div class="board-task-episode">'+escapeHtml(t.episodeTitle)+' · due '+fmtDate(t.dueDate)+'</div>'+
           (isBlocked?'<div class="task-meta"><span class="task-waiting">⛔ Waiting on: '+escapeHtml(waitingLabel)+'</span></div>':'')+
           '</div></div>';
@@ -4669,7 +4747,14 @@ function renderMeetingsList(){
     renderMeetingsGroup('upcomingMeetingsBox', list.filter(function(m){ return m.status!=='ended'; }), true);
     renderMeetingsGroup('pastMeetingsBox', list.filter(function(m){ return m.status==='ended'; }), false);
     checkUpcomingMeetingReminders(list);
-  }, function(){});
+  }, function(err){
+    // Was a silent no-op before - a real query failure (e.g. the RLS
+    // recursion bug schema_v28.sql fixes) left both boxes stuck on their
+    // initial skeleton loader forever, with no visible error at all.
+    var msg = '<div class="empty-state">Could not load meetings - '+errMsg(err)+'</div>';
+    var up = document.getElementById('upcomingMeetingsBox'); if(up) up.innerHTML = msg;
+    var past = document.getElementById('pastMeetingsBox'); if(past) past.innerHTML = msg;
+  });
   activeUnsubs.push(unsub);
 }
 function renderMeetingsGroup(boxId, list, isUpcoming){
@@ -5180,7 +5265,7 @@ function renderAdmin(){
     '<div class="page-sub" style="margin:-6px 0 12px;">Across every team - this used to only be visible from a Manager\'s own Team page.</div>'+
     '<div id="allInvitesBox"><div class="skeleton" style="height:40px;"></div></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Job-title roles</h2><button type="button" class="btn btn-sm" id="newRoleBtn">+ New role</button></div>'+
-    '<div class="page-sub" style="margin:-6px 0 12px;">Shared across every Team (separate from Manager and Admin, which are fixed tiers, not editable here) - e.g. "Outreach Expert/VA" is the same job title on every Team, but held by different people per Team, and someone on Team A never gets any access to Team B\'s clients/tasks (or vice versa) regardless of role - that separation is enforced by which Team each person and client belongs to, not by the role name. Renaming keeps everything already assigned to a role intact; deleting doesn\'t touch anyone/anything already holding it, it just stops showing up for new assignments.</div>'+
+    '<div class="page-sub" style="margin:-6px 0 12px;">Shared across every Team, separate from Manager/Admin.</div>'+
     '<div id="rolesBox"></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Meetings usage</h2></div><div id="meetingsUsageBox"><div class="skeleton" style="height:20px;"></div></div></div>'
@@ -5441,7 +5526,7 @@ function openRoleModal(existingKey){
   openModal(existing ? 'Edit role' : 'New role',
     '<div class="field"><label>Label</label><input required name="label" type="text" value="'+(existing?escapeHtml(existing.label):'')+'" placeholder="e.g. Audio Engineer"></div>'+
     '<div class="field"><label>Color</label><input name="color" type="color" value="'+(existing?escapeHtml(existing.color):'#5b6472')+'" style="height:38px;width:70px;padding:2px;"></div>'+
-    '<div class="field-hint">Role labels are always shown in white text on this color - pick something mid-to-dark so it stays readable. Shared across every Team - see the note above.</div>',
+    '<div class="field-hint">Role labels are always shown in white text on this color - pick something mid-to-dark so it stays readable.</div>',
     function(fd){
       var label = (fd.get('label')||'').trim();
       if(!label){ showModalError('Name the role.'); return; }
