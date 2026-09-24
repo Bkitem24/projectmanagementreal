@@ -204,6 +204,29 @@ detail.
   secret-set time - it only surfaces later as a confusing runtime
   failure). Also: don't assume Downloads goes to the default Windows
   Downloads folder - Humayun's goes to a custom `H:\` drive.
+- **Tauri v2's fs plugin enforces filesystem scope PER PERMISSION, ignoring
+  the bare/unscoped copy of that same permission if it's also listed** -
+  `capabilities/default.json` had both `"fs:allow-mkdir"` (bare) and
+  `{ "identifier": "fs:allow-mkdir", "allow": [{ "path": "$VIDEO/**" }] }`
+  (scoped), and only the scoped one actually did anything - a folder picked
+  outside `$VIDEO` (e.g. a different drive, for Meetings recording) failed
+  with "forbidden path" even though the bare permission was right there in
+  the same file. If a feature needs to write somewhere the person picks via
+  a real OS folder/file dialog (not a fixed app-owned location), scope that
+  permission to `"**"` rather than assuming the bare permission covers it.
+- **`supabase.channel(topic)` reuses an existing channel object if one with
+  that exact topic hasn't fully torn down yet** (confirmed by reading
+  `@supabase/realtime-js`'s own source - `removeChannel()`'s unsubscribe is
+  a real network round trip, not instant) - calling `.on('presence', ...)`
+  on that reused, already-subscribed object throws ("cannot add ...
+  callbacks ... after `subscribe()`"). Hit this for real in Meetings when a
+  meeting ended and its room got rejoined in quick succession. Any code that
+  creates a Realtime channel for a room/topic that could plausibly be
+  rejoined soon after leaving (not just Meetings/Connect - anything using
+  `supabase.channel()` directly) should explicitly find and
+  `removeChannel()` any stale channel for that same topic and wait for it
+  before wiring up the new one, rather than trusting `channel()`'s own
+  dedup to have already cleaned it up.
 
 ## Delivery workflow (now obsolete with Claude Code - context for why the
 punch list mentions zip files everywhere)
@@ -216,38 +239,46 @@ being misapplied this way). With Claude Code + git access, use real commits
 and pushes instead - this is a strict improvement, no reason to keep
 simulating the zip-file workflow.
 
-## Where things stand (as of 2026-09-30, end of this Claude Code session)
+## Where things stand (as of 2026-09-24, end of this Claude Code session)
 
 Phase 5 (the "complete UI/UX overhaul," Take Flight design system) is
 substantially delivered: global design tokens, logo, app icon, hero banner
 (admin-editable with drag/zoom), Home page, sound-mute toggle, the music
 player's rebuild off YouTube onto Google Drive. Since then, a large second
 batch shipped: per-task AND per-episode description boxes, Activity Logs
-(task events + comments/files/calls, Manager/Admin-only), roles usable
-across every Team (with the round-26/28 correction documented above), and
+(task events + comments/files/calls, Manager/Admin-only, now with date-range
+and click-an-employee filters), roles usable across every Team (with the
+round-26/28 correction documented above), a collapsible episode-level
+Discussion panel with real unread/unread-@mention tracking and jump-to-
+unread (explicitly NOT the per-task comment boxes, which are unchanged), and
 brand-new **Meetings** (video calls, screen share, host-side local
 recording) built on the same Cloudflare Realtime SFU as Connect but fully
 separate from it. **Schema files run so far, per Humayun: v20 through
-v26** - **v27 (Meetings' tables) is new this round and still needs
-running**, along with deploying `worker-meetings/` and setting
-`VITE_MEETINGS_WORKER_URL` (see README.md section 7) before Meetings can
-actually be joined (scheduling/listing works either way). `worker-drive-
-music/` is deployed and working; its Google Drive folder is Humayun's own
-ongoing upload job, so "no tracks in X" for one mood may just mean that
-folder is still empty. Still open: a broader animations/micro-interactions
-pass, a real multi-person test of Meetings (brand new, never tested live),
-and the collapsible-discussion-boxes-with-unread-tracking feature
-(discussed, not yet started as of this session's end).
+v29** - **v30 (the discussion-unread-tracking table) is new this round and
+still needs running**. Meetings has had one real round of live multi-person
+testing (round 30) and a second bug-fix round (round 31, this session) for
+two more issues that testing turned up - a meeting reappearing under "live"
+after being ended, and recording failing on any drive other than the
+default Videos one (fixed by widening the app's fs capability scope, which
+needs a fresh Windows build to actually take effect - **not yet re-tested
+live**). `worker-drive-music/` is deployed and working; its Google Drive
+folder is Humayun's own ongoing upload job, so "no tracks in X" for one mood
+may just mean that folder is still empty. Still open: a broader animations/
+micro-interactions pass, re-testing round 31's Meetings fixes live, the
+admin-completion-not-logged Activity Log report (deferred again this
+round), and a new Instagram-DM-style inbox/messaging system (discussed,
+not yet scoped or started).
 
 ## Where to look for more
 
 - `docs/phase-3-punch-list.md` - full dated history of every round: what was
   asked, what was built, root causes for every bug found, what's confirmed
   working vs. still open. Read this before starting new work in an
-  unfamiliar area. Rounds 17-29 cover this session's work in detail -
+  unfamiliar area. Rounds 17-31 cover this session's work in detail -
   start there for anything not already covered above, especially round 29
-  (Meetings) and round 28 (the roles-per-team correction) for recent
-  architecture decisions.
+  (Meetings), round 28 (the roles-per-team correction), and round 31 (the
+  Meetings reappear-after-ending bug, recording-folder scope fix, Activity
+  Log filters, and discussion unread tracking) for recent decisions.
 - `docs/phase-2-requirements.md` - original Phase 2 feature spec/decisions
   log (roles, teams, music player, TimeLog, Connect) - mostly superseded by
   later punch-list entries but has useful original context/reasoning.

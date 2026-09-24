@@ -53,10 +53,10 @@ export function newMeetingId() {
 export function joinMeetingRoom(meetingId, myProfile, initialMeta, handlers) {
   var pulled = {};   // uid+':'+trackName -> true, so a re-fired sync doesn't double-pull
   var pullChain = Promise.resolve();
-  var room = supabase.channel('meeting_room:' + meetingId, {
-    config: { presence: { key: myProfile.id } },
-  });
+  var topic = 'meeting_room:' + meetingId;
   var myMeta = Object.assign({ uid: myProfile.id, name: myProfile.name || '' }, initialMeta || {});
+  var room = null;
+  var leftBeforeReady = false;
 
   function pullableTracksFor(meta) {
     var list = [];
@@ -88,38 +88,60 @@ export function joinMeetingRoom(meetingId, myProfile, initialMeta, handlers) {
     return metas && metas[metas.length - 1];
   }
 
-  room
-    .on('presence', { event: 'sync' }, function () {
-      var state = room.presenceState();
-      Object.keys(state).forEach(function (uid) {
-        if (uid === myProfile.id) return;
-        considerMeta(uid, latestMetaFor(uid, state));
-      });
-    })
-    .on('presence', { event: 'leave' }, function (payload) {
-      (payload.leftPresences || []).forEach(function (meta) {
-        if (!meta || meta.uid === myProfile.id) return;
-        // Forget every track key for this session AND their screen
-        // session, so if they rejoin (or restart screen share with a new
-        // session id) it gets pulled fresh instead of being treated as
-        // already-pulled.
-        Object.keys(pulled).forEach(function (k) { if (k.indexOf(meta.uid + ':') === 0) delete pulled[k]; });
-        if (handlers.onLeft) handlers.onLeft(meta.uid, meta);
-      });
-    })
-    // Host controls (mute-a-participant / remove-a-participant) can't be
-    // done TO someone else's device directly - each person's mic/camera is
-    // only ever controlled by their own client. This is a plain broadcast
-    // "please do X" request; the target's own client (checking
-    // payload.targetUid === myProfile.id) is what actually acts on it -
-    // see main.js's renderMeetingRoom for the host-side send and the
-    // target-side handling.
-    .on('broadcast', { event: 'host-control' }, function (msg) {
-      if (handlers.onHostControl) handlers.onHostControl(msg.payload || {});
-    })
-    .subscribe(function (status) {
-      if (status === 'SUBSCRIBED') room.track(myMeta);
+  function wireAndSubscribe() {
+    if (leftBeforeReady) return;
+    room = supabase.channel(topic, {
+      config: { presence: { key: myProfile.id } },
     });
+    room
+      .on('presence', { event: 'sync' }, function () {
+        var state = room.presenceState();
+        Object.keys(state).forEach(function (uid) {
+          if (uid === myProfile.id) return;
+          considerMeta(uid, latestMetaFor(uid, state));
+        });
+      })
+      .on('presence', { event: 'leave' }, function (payload) {
+        (payload.leftPresences || []).forEach(function (meta) {
+          if (!meta || meta.uid === myProfile.id) return;
+          // Forget every track key for this session AND their screen
+          // session, so if they rejoin (or restart screen share with a new
+          // session id) it gets pulled fresh instead of being treated as
+          // already-pulled.
+          Object.keys(pulled).forEach(function (k) { if (k.indexOf(meta.uid + ':') === 0) delete pulled[k]; });
+          if (handlers.onLeft) handlers.onLeft(meta.uid, meta);
+        });
+      })
+      // Host controls (mute-a-participant / remove-a-participant) can't be
+      // done TO someone else's device directly - each person's mic/camera is
+      // only ever controlled by their own client. This is a plain broadcast
+      // "please do X" request; the target's own client (checking
+      // payload.targetUid === myProfile.id) is what actually acts on it -
+      // see main.js's renderMeetingRoom for the host-side send and the
+      // target-side handling.
+      .on('broadcast', { event: 'host-control' }, function (msg) {
+        if (handlers.onHostControl) handlers.onHostControl(msg.payload || {});
+      })
+      .subscribe(function (status) {
+        if (status === 'SUBSCRIBED') room.track(myMeta);
+      });
+  }
+
+  // A channel for this exact room can still be mid-teardown (removeChannel's
+  // unsubscribe is a network round trip) from a just-ended previous join of
+  // the SAME meeting - supabase-js's channel(topic) dedupes by topic and
+  // hands back that still-subscribed instance instead of a fresh one, and
+  // calling .on() on an already-subscribed channel throws ("cannot add
+  // `presence` callbacks ... after `subscribe()`", seen live 2026-09-24 when
+  // a meeting ended and reopened in quick succession). Explicitly removing
+  // any stale instance and waiting for that to finish before wiring the new
+  // one guarantees a genuinely fresh channel every time.
+  var stale = supabase.getChannels().filter(function (c) { return c.topic === 'realtime:' + topic; });
+  if (stale.length) {
+    Promise.all(stale.map(function (c) { return supabase.removeChannel(c).catch(function () {}); })).then(wireAndSubscribe);
+  } else {
+    wireAndSubscribe();
+  }
 
   return {
     // Merge new fields into this person's own tracked metadata (e.g.
@@ -127,15 +149,15 @@ export function joinMeetingRoom(meetingId, myProfile, initialMeta, handlers) {
     // what actually broadcasts the change to everyone else's `sync`.
     updateMeta: function (patch) {
       myMeta = Object.assign({}, myMeta, patch);
-      try { room.track(myMeta); } catch (e) {}
+      if (room) { try { room.track(myMeta); } catch (e) {} }
     },
     myMeta: function () { return myMeta; },
     sendHostControl: function (action, targetUid) {
-      try { room.send({ type: 'broadcast', event: 'host-control', payload: { action: action, targetUid: targetUid, from: myProfile.id } }); } catch (e) {}
+      if (room) { try { room.send({ type: 'broadcast', event: 'host-control', payload: { action: action, targetUid: targetUid, from: myProfile.id } }); } catch (e) {} }
     },
     leave: function () {
-      try { room.untrack(); } catch (e) {}
-      try { supabase.removeChannel(room); } catch (e) {}
+      leftBeforeReady = true;
+      if (room) { try { room.untrack(); } catch (e) {} try { supabase.removeChannel(room); } catch (e) {} }
     },
   };
 }

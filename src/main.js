@@ -2241,6 +2241,8 @@ function renderEpisode(episodeId){
   var unsub = db.doc('episodes/'+episodeId).onSnapshot(function(snap){
     if(!snap.exists){ paint('<div class="empty-state"><strong>Episode not found</strong></div>'); return; }
     var e = snap.data();
+    delete discussionReadThresholdCache[episodeId]; // fresh page visit - see this cache's own comment for why
+    var discussionCollapsed = isDiscussionCollapsed(episodeId);
     paint(
       '<div class="page-head"><div><div class="eyebrow"><a href="#/client/'+e.clientId+'" style="color:var(--muted);text-decoration:none;">'+escapeHtml(e.clientName)+'</a></div>'+
       '<h1 class="page-title">'+escapeHtml(e.title)+(e.archived?' <span class="badge" style="background:var(--line-soft);vertical-align:middle;">Archived</span>':'')+'</h1>'+
@@ -2274,12 +2276,37 @@ function renderEpisode(episodeId){
       '<div id="taskGroups" style="margin-top:22px;"><div class="skeleton" style="height:200px;"></div></div>'+
       '</div>'+
       '<div class="episode-side-col"><div class="episode-side-panel">'+
-      '<div class="section-head"><h2 class="section-title">Discussion</h2></div>'+
-      '<div class="page-sub" style="margin:-6px 0 12px;">General chat about this episode as a whole - for a specific subtask, use "Comments, links & files" on that task instead.</div>'+
+      // Collapsible (2026-09-24 request) - the header row itself toggles
+      // it, with an unread badge that only shows while collapsed (once
+      // you've actually opened it, seeing it counts as read - see
+      // updateDiscussionHeaderAndReadState() in loadCollab).
+      '<div class="section-head discussion-head" id="discussionHeadRow"><h2 class="section-title">Discussion</h2>'+
+      '<div id="discussionUnreadBadge" style="display:flex;gap:6px;"></div>'+
+      '<button type="button" class="task-expand-btn" id="discussionToggleBtn" style="margin-left:auto;">'+(discussionCollapsed?'Show':'Hide')+'</button>'+
+      '</div>'+
+      '<div id="discussionBody"'+(discussionCollapsed?' hidden':'')+'>'+
+      '<div class="page-sub" style="margin:-6px 0 12px;">General chat about this episode as a whole - for a specific subtask, use "Comments, links &amp; files" on that task instead.</div>'+
       '<div id="epCollab" class="episode-side-scroll"><div class="skeleton" style="height:120px;"></div></div>'+
+      '</div>'+
       '</div></div>'+
       '</div>'
     );
+    (function(){
+      var toggleBtn = document.getElementById('discussionToggleBtn');
+      var body = document.getElementById('discussionBody');
+      if(toggleBtn && body) toggleBtn.addEventListener('click', function(){
+        var collapsed = body.hasAttribute('hidden');
+        if(collapsed){
+          body.removeAttribute('hidden');
+          var badge = document.getElementById('discussionUnreadBadge'); if(badge) badge.innerHTML='';
+          markDiscussionRead('episode', episodeId);
+        } else {
+          body.setAttribute('hidden','');
+        }
+        setDiscussionCollapsed(episodeId, !collapsed);
+        toggleBtn.textContent = collapsed ? 'Hide' : 'Show';
+      });
+    })();
 
     wireEpisodeDescBox(episodeId);
     var addCustomBtn = document.getElementById('addCustomTaskBtn');
@@ -2790,6 +2817,39 @@ var COLLAB_TABLES = {
   episode: { idField:'episodeId', comments:'episodeComments', links:'episodeLinks', attachments:'episodeAttachments', keyPrefix:'attachments/episode/' }
 };
 function loadTaskCollab(taskId, panel){ return loadCollab('task', taskId, panel); }
+
+// ---- Discussion unread tracking (2026-09-24, schema_v30.sql) ----
+// Episode-level "Discussion" only (explicitly NOT the per-task "Comments,
+// links & files" boxes - those keep their existing behavior untouched).
+// One row per (person, thread) recording "I've seen this up to here" -
+// read/written for the CURRENT user only, so the plain upsert via
+// db.doc(...).set() is safe (see schema_v30.sql's own comment on why this
+// isn't the notifications upsert pitfall from CLAUDE.md).
+function discussionReadId(threadType, threadId){ return myUid+':'+threadType+':'+threadId; }
+function getDiscussionLastRead(threadType, threadId){
+  return db.doc('discussionReads/'+discussionReadId(threadType, threadId)).get()
+    .then(function(s){ return (s.exists && s.data().lastReadAt) ? new Date(s.data().lastReadAt) : null; })
+    .catch(function(){ return null; });
+}
+function markDiscussionRead(threadType, threadId){
+  return db.doc('discussionReads/'+discussionReadId(threadType, threadId)).set({
+    userId: myUid, threadType: threadType, threadId: threadId, lastReadAt: new Date().toISOString()
+  }).catch(function(){});
+}
+// Cached per episodeId for the length of ONE page visit (cleared at the top
+// of renderEpisode's onSnapshot) - loadCollab() reloads itself after every
+// send/edit/delete/react on THIS SAME visit, and re-fetching (and thereby
+// advancing) the read marker on each of those reloads would make the "New"
+// highlighting vanish the instant you, say, sent a reply - not because you
+// actually went and re-read the older messages, just because the panel
+// happened to redraw. Freezing the threshold for the whole visit and only
+// ever WRITING a fresh one (never reading it back into this cache) is what
+// keeps "what's new since I last opened this" stable for as long as you're
+// looking at it.
+var discussionReadThresholdCache = {};
+function collapsedDiscussionKey(episodeId){ return 'bko_discussionCollapsed_'+episodeId; }
+function isDiscussionCollapsed(episodeId){ try{ return localStorage.getItem(collapsedDiscussionKey(episodeId))==='1'; }catch(e){ return false; } }
+function setDiscussionCollapsed(episodeId, collapsed){ try{ localStorage.setItem(collapsedDiscussionKey(episodeId), collapsed?'1':'0'); }catch(e){} }
 var ICON_PENCIL = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
 var ICON_BACK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5"/><path d="M12 19l-7-7 7-7"/></svg>';
 var ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>';
@@ -2841,12 +2901,20 @@ function loadCollab(kind, id, panel){
   // visible while refetching, then fades the refreshed content in.
   var isReload = panel.getAttribute('data-collab-ready')==='1';
   if(!isReload) panel.innerHTML = '<div class="skeleton" style="height:40px;"></div>';
+  // Episode discussion only - see discussionReadThresholdCache's own
+  // comment for why this is cached per page-visit instead of re-fetched
+  // (and thereby re-advanced) on every one of this function's own reloads.
+  var discussionReadPromise = kind==='episode'
+    ? (id in discussionReadThresholdCache ? Promise.resolve(discussionReadThresholdCache[id]) : getDiscussionLastRead('episode', id).then(function(t){ discussionReadThresholdCache[id]=t; return t; }))
+    : Promise.resolve(null);
   Promise.all([
     supabase.from(cfg.comments).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
     supabase.from(cfg.links).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
     supabase.from(cfg.attachments).select('*').eq(cfg.idField, id).order('createdAt', { ascending: true }),
+    discussionReadPromise,
   ]).then(function(res){
     var comments = res[0].data||[], links = res[1].data||[], attachments = res[2].data||[];
+    var discussionReadThreshold = res[3]; // Date|null, episode kind only
     var commentIds = comments.map(function(c){ return c.id; });
     var reactionsPromise = commentIds.length
       ? supabase.from('commentReactions').select('*').eq('kind', kind).in('commentId', commentIds)
@@ -2878,6 +2946,16 @@ function loadCollab(kind, id, panel){
       // Cleared on send; NOT reset by a plain render() (someone attaching
       // a file after already picking a mention shouldn't lose it).
       var pendingMentions = {};
+      // Unread tracking (episode discussion only) - "unread" means posted
+      // by someone else, after the threshold fetched at the top of this
+      // page visit. firstUnread anchors the single "New" divider; the rest
+      // just get the highlighted-row treatment.
+      var unreadComments = (kind==='episode' && discussionReadThreshold)
+        ? comments.filter(function(c){ return c.authorId!==myUid && new Date(c.createdAt) > discussionReadThreshold; })
+        : [];
+      var firstUnread = unreadComments.length ? unreadComments.reduce(function(a,b){ return new Date(a.createdAt)<new Date(b.createdAt)?a:b; }) : null;
+      var hasUnreadMention = unreadComments.some(function(c){ return (c.mentions||[]).indexOf(myUid)>-1; });
+      function isUnreadComment(c){ return unreadComments.indexOf(c)>-1; }
       function who(uid){ return (ps[uid]&&ps[uid].name)||'Someone'; }
       function avatarFor(uid){
         var p = ps[uid]||{};
@@ -2972,11 +3050,15 @@ function loadCollab(kind, id, panel){
         // A grouped message has no header to hang "(edited)" off of - put
         // it inline after the body instead, so that info still shows up.
         var editedInline = (grouped && c.editedAt) ? ' <span class="comment-edited-tag">(edited)</span>' : '';
-        return '<div class="comment-row'+(grouped?' comment-row-grouped':'')+'" data-id="'+c.id+'">'+gutter+
+        var html = '<div class="comment-row'+(grouped?' comment-row-grouped':'')+(isUnreadComment(c)?' comment-unread':'')+'" data-id="'+c.id+'">'+gutter+
           '<div class="comment-main">'+actions+head+
           (c.body?'<div class="comment-body">'+mentionifyHtml(linkifyHtml(escapeHtml(c.body)), c.mentions, who)+editedInline+'</div>':'')+
           attHtml+renderReactions(c.id)+
           '</div></div>';
+        // The single "New" divider - anchors the "Jump to unread" button
+        // below, and marks where THIS person's own unseen messages start.
+        if(firstUnread && firstUnread.id===c.id) html = '<div class="discussion-unread-divider" id="unreadDivider_'+id+'"><span>New</span></div>'+html;
+        return html;
       }
       function renderLink(l){
         if(editingLink===l.id){
@@ -3044,6 +3126,7 @@ function loadCollab(kind, id, panel){
         var prevTop = null;
         panel.setAttribute('data-collab-ready','1');
         panel.innerHTML =
+          (firstUnread ? '<button type="button" class="discussion-jump-unread-btn" id="jumpUnreadBtn_'+id+'">'+(hasUnreadMention?'🔔 Jump to where you were mentioned':'↓ Jump to new messages')+'</button>' : '')+
           (comments.length && canManage() ? '<button type="button" class="collab-clear-all-btn" id="clearAllBtn_'+id+'">Clear all messages</button>' : '')+
           '<div class="collab-list collab-fade-in">'+
             (topLevelComments.length ? topLevelComments.map(function(c){
@@ -3073,6 +3156,36 @@ function loadCollab(kind, id, panel){
           '</div>'+
           '</div>';
         wire();
+        if(kind==='episode') updateDiscussionHeaderAndReadState();
+      }
+
+      // Header badge lives outside this panel (renderEpisode's own
+      // #discussionUnreadBadge, next to the collapse toggle) so it stays
+      // visible even while the panel body is collapsed - see
+      // #discussionBody in renderEpisode. Only shows while collapsed:
+      // once the body is actually visible, that already counts as "seen",
+      // same as Slack/Gmail clearing an unread badge the moment you open
+      // the thread (the highlighted rows + "New" divider inside stick
+      // around for the rest of THIS viewing, though - see
+      // discussionReadThresholdCache's comment for why).
+      function updateDiscussionHeaderAndReadState(){
+        var body = document.getElementById('discussionBody');
+        var expanded = !body || !body.hasAttribute('hidden');
+        var badge = document.getElementById('discussionUnreadBadge');
+        if(badge){
+          badge.innerHTML = (!expanded && unreadComments.length)
+            ? (hasUnreadMention
+                ? '<span class="badge" style="background:var(--overdue-soft);color:var(--overdue);">@ you</span>'
+                : '<span class="badge" style="background:var(--blue-soft);color:var(--blue-2);">'+unreadComments.length+' new</span>')
+            : '';
+        }
+        // Always bump the read marker while expanded, even with nothing
+        // currently unread - a brand-new discussion has no marker at all
+        // yet (discussionReadThreshold starts out null, so nothing is
+        // flagged unread on that very first visit), and without writing
+        // ONE here there'd never be a baseline for a LATER visit to
+        // compare against - the whole feature would silently never turn on.
+        if(expanded) markDiscussionRead('episode', id);
       }
 
       function autoGrow(ta){
@@ -3202,6 +3315,11 @@ function loadCollab(kind, id, panel){
       function wire(){
         var clearAllBtn = document.getElementById('clearAllBtn_'+id);
         if(clearAllBtn) clearAllBtn.addEventListener('click', clearAllComments);
+        var jumpUnreadBtn = document.getElementById('jumpUnreadBtn_'+id);
+        if(jumpUnreadBtn) jumpUnreadBtn.addEventListener('click', function(){
+          var target = document.getElementById('unreadDivider_'+id);
+          if(target) target.scrollIntoView({behavior:'smooth', block:'center'});
+        });
         var textarea = document.getElementById('commentInput_'+id);
         document.getElementById('commentSend_'+id).addEventListener('click', sendComposerMessage);
         textarea.addEventListener('keydown', function(ev){
@@ -4620,6 +4738,22 @@ var ACTIVITY_EVENT_LABELS = {
   call: 'was on a call'
 };
 var activityCategory = 'task';
+// Date-range + "filter to one person" (2026-09-24 request) - both reset
+// back to defaults on a fresh renderActivity() call (e.g. switching Team)
+// rather than persisting, since they're meant as a quick narrow-down for
+// the page you're already looking at, not a sticky preference like the
+// Team switcher above.
+var activityDateRange = 'all'; // 'all' | 'today' | '7d' | '30d'
+var activityActorUid = null;
+var activityActorName = '';
+var ACTIVITY_RANGE_LABELS = { all:'All time', today:'Today', '7d':'Last 7 days', '30d':'Last 30 days' };
+function activityRangeSinceIso(range){
+  var d = new Date();
+  if(range==='today'){ d.setHours(0,0,0,0); return d.toISOString(); }
+  if(range==='7d'){ d.setDate(d.getDate()-7); return d.toISOString(); }
+  if(range==='30d'){ d.setDate(d.getDate()-30); return d.toISOString(); }
+  return null;
+}
 function loadActivityTeamId(){
   var saved = null; try{ saved = localStorage.getItem('bko_adminActivityTeam'); }catch(e){}
   var list = sortedTeamList();
@@ -4645,13 +4779,24 @@ function renderActivity(){
     '<button type="button" class="segmented-btn'+(activityCategory==='task'?' active':'')+'" data-cat="task">Task activity</button>'+
     '<button type="button" class="segmented-btn'+(activityCategory==='social'?' active':'')+'" data-cat="social">Comments, files &amp; calls</button>'+
     '</div>'+
+    '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:14px;">'+
+    '<div class="segmented" id="activityRangeTabs">'+
+    Object.keys(ACTIVITY_RANGE_LABELS).map(function(k){ return '<button type="button" class="segmented-btn'+(activityDateRange===k?' active':'')+'" data-range="'+k+'">'+ACTIVITY_RANGE_LABELS[k]+'</button>'; }).join('')+
+    '</div>'+
+    (activityActorUid ? '<button type="button" class="badge" id="activityActorClearBtn" style="border:none;cursor:pointer;background:var(--blue-soft);color:var(--blue-2);">Filtering by '+escapeHtml(activityActorName||'this person')+' &times;</button>' : '')+
+    '</div>'+
     '<div id="activityListBox"><div class="skeleton" style="height:60px;"></div></div>'
   );
   var teamFilter = document.getElementById('activityTeamFilter');
-  if(teamFilter) teamFilter.addEventListener('change', function(){ saveActivityTeamId(teamFilter.value); renderActivity(); });
+  if(teamFilter) teamFilter.addEventListener('change', function(){ saveActivityTeamId(teamFilter.value); activityActorUid=null; activityActorName=''; renderActivity(); });
   Array.prototype.forEach.call(document.querySelectorAll('#activityTabs [data-cat]'), function(btn){
     btn.addEventListener('click', function(){ activityCategory = btn.getAttribute('data-cat'); renderActivity(); });
   });
+  Array.prototype.forEach.call(document.querySelectorAll('#activityRangeTabs [data-range]'), function(btn){
+    btn.addEventListener('click', function(){ activityDateRange = btn.getAttribute('data-range'); renderActivity(); });
+  });
+  var clearBtn = document.getElementById('activityActorClearBtn');
+  if(clearBtn) clearBtn.addEventListener('click', function(){ activityActorUid=null; activityActorName=''; renderActivity(); });
   loadActivityList(teamId, activityCategory);
 }
 // A plain .get() (not a live subscription) - this is a historical log
@@ -4662,21 +4807,36 @@ function loadActivityList(teamId, category){
   var box = document.getElementById('activityListBox');
   if(!box) return;
   if(!teamId){ box.innerHTML = '<div class="empty-state">No team to show yet.</div>'; return; }
-  db.collection('activityLog').where('teamId','==',teamId).where('category','==',category).orderBy('createdAt','desc').limit(150).get().then(function(snap){
+  var q = db.collection('activityLog').where('teamId','==',teamId).where('category','==',category);
+  if(activityActorUid) q = q.where('actorUserId','==',activityActorUid);
+  var sinceIso = activityRangeSinceIso(activityDateRange);
+  if(sinceIso) q = q.where('createdAt','>=',sinceIso);
+  q.orderBy('createdAt','desc').limit(150).get().then(function(snap){
     box = document.getElementById('activityListBox'); // route() may have moved on by the time this resolves
     if(!box) return;
-    if(snap.empty){ box.innerHTML = '<div class="empty-state">Nothing recorded here yet.</div>'; return; }
+    if(snap.empty){ box.innerHTML = '<div class="empty-state">Nothing recorded here'+(activityActorUid||sinceIso?' for this filter':' yet')+'.</div>'; return; }
     box.innerHTML = snap.docs.map(function(d){
       var r = d.data();
       var verb = ACTIVITY_EVENT_LABELS[r.eventType] || r.eventType;
       var extra = (r.eventType==='call' && r.durationSec) ? ' ('+formatDurationShort(r.durationSec)+')' : '';
       var roleLabel = r.actorRole ? (roleOf(r.actorRole)||{}).label || r.actorRole : '';
-      return '<div class="roster-row">'+profileChip(r.actorUserId)+
+      // The actor chip doubles as a "filter to just this person" button -
+      // clicking a name is the request's exact wording ("filter... by
+      // clicking on name of the employee").
+      return '<div class="roster-row"><button type="button" class="activity-actor-btn" data-uid="'+escapeHtml(r.actorUserId)+'" title="Show only this person\'s activity">'+profileChip(r.actorUserId)+'</button>'+
         '<div style="min-width:0;flex:1;"><div style="font-size:13px;">'+verb+(r.label?': <strong>'+escapeHtml(r.label)+'</strong>':'')+extra+'</div>'+
         '<div style="font-size:11.5px;color:var(--muted);">'+fmtDateTime(r.createdAt)+(roleLabel?' · '+escapeHtml(roleLabel):'')+'</div></div>'+
         '</div>';
     }).join('');
     hydrateProfiles(box);
+    Array.prototype.forEach.call(box.querySelectorAll('.activity-actor-btn'), function(btn){
+      btn.addEventListener('click', function(){
+        activityActorUid = btn.getAttribute('data-uid');
+        var nameEl = btn.querySelector('.pname');
+        activityActorName = nameEl ? nameEl.textContent : '';
+        renderActivity();
+      });
+    });
   }).catch(function(err){ box.innerHTML = '<div class="empty-state">Could not load activity - '+errMsg(err)+'</div>'; });
 }
 
@@ -5062,6 +5222,20 @@ function renderMeetingRoom(meetingId){
     var m = snap.data();
     var canHost = meetingIsHost(m);
 
+    // Real bug (2026-09-24, "when I end a call for everyone it quits but
+    // reappears under live calls"): a participant whose camera/mic
+    // permission was still resolving when the host ended the meeting would
+    // finish joining a moment later and unconditionally write status:'live'
+    // back onto an already-ended meeting (see the join-time write below,
+    // now also guarded). Never even starting to join an ended meeting's
+    // room closes off that whole race at the source, on top of guarding the
+    // write itself.
+    if(m.status==='ended'){
+      paint('<div class="empty-state"><strong>This meeting has ended</strong>'+(m.endedAt?fmtDateTime(m.endedAt)+'. ':'')+'Go back to <a href="#/meetings">Meetings</a> to see past meetings or start a new one.</div>');
+      activeMeetingRoomCleanup = null;
+      return;
+    }
+
     // Not time yet - show a countdown instead of turning the camera on.
     // 5-minute grace window so people can join a little early without
     // staring at a countdown for the last few minutes.
@@ -5226,7 +5400,12 @@ function renderMeetingRoom(meetingId){
       var nowIso = new Date().toISOString();
       var patch = { status:'live' };
       if(!m.startedAt) patch.startedAt = nowIso;
-      db.doc('meetings/'+meetingId).update(patch).catch(function(){});
+      // .neq('status','ended') instead of db.doc(...).update() - a genuine
+      // race (host ends the meeting while someone else's camera/mic
+      // permission prompt is still pending) can land this write AFTER the
+      // 'ended' one; this makes an 'ended' status win no matter which write
+      // lands last, instead of silently flipping the meeting back to live.
+      supabase.from('meetings').update(patch).eq('id', meetingId).neq('status','ended').then(function(){});
 
       var logId = 'mpl_'+uid8();
       myParticipantLogId = logId;

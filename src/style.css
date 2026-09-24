@@ -249,6 +249,16 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:6px;
 .add-client-card:hover{border-color:var(--blue);color:var(--blue);transform:translateY(-2px);}
 .section{margin-top:38px;}
 .section-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:13px;}
+.discussion-head{gap:8px;}
+.discussion-head .section-title{margin-right:2px;}
+/* "New" divider + highlighted rows for the episode Discussion panel's
+   unread tracking (2026-09-24) - deliberately NOT shared with the per-task
+   "Comments, links & files" boxes, which have no unread state at all. */
+.discussion-unread-divider{display:flex;align-items:center;gap:8px;margin:10px 0;font-size:11px;font-weight:700;color:var(--overdue);text-transform:uppercase;letter-spacing:.04em;}
+.discussion-unread-divider::before,.discussion-unread-divider::after{content:'';flex:1;height:1px;background:var(--overdue-soft);}
+.comment-unread{background:var(--blue-soft);border-radius:8px;margin:2px -6px;padding:4px 6px;}
+.discussion-jump-unread-btn{display:block;width:100%;text-align:center;background:var(--blue-soft);color:var(--blue-2);border:none;border-radius:8px;padding:7px 10px;font-size:12px;font-weight:700;cursor:pointer;margin-bottom:10px;}
+.discussion-jump-unread-btn:hover{filter:brightness(0.97);}
 .section-title{font-size:19px;}
 .strip{display:flex;flex-direction:column;gap:8px;}
 .strip-item{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--line);border-radius:9px;padding:11px 14px;text-decoration:none;color:var(--ink);transition:border-color .15s ease,transform .15s ease;}
@@ -712,6 +722,12 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:6px;
 .roster-row:hover{box-shadow:var(--shadow-sm);}
 .roster-name{font-weight:600;font-size:13.5px;flex:1;}
 .roster-role{font-size:11.5px;color:var(--muted);}
+/* Activity Log's actor chip, made clickable to filter to just that person
+   (2026-09-24) - resets all <button> chrome so it reads exactly like the
+   plain profileChip() span it wraps everywhere else, just with a pointer
+   cursor and an underline-on-hover to hint it does something. */
+.activity-actor-btn{display:flex;align-items:center;background:none;border:none;padding:0;margin:0;cursor:pointer;font:inherit;text-align:left;}
+.activity-actor-btn:hover .pname{text-decoration:underline;}
 .connect-btn{display:inline-flex;align-items:center;gap:6px;background:linear-gradient(155deg,var(--good),#25824a);color:#fff;border:none;border-radius:99px;padding:7px 14px;font-size:12.5px;font-weight:700;cursor:pointer;transition:transform .12s ease,filter .15s ease;}
 .connect-btn:hover{transform:translateY(-1px);filter:brightness(1.06);}
 .connect-btn[disabled]{background:var(--line);color:var(--muted);cursor:default;}
