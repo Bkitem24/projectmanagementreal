@@ -60,7 +60,12 @@ alter table public."meetingParticipantLogs" enable row level security;
 drop policy if exists "meetings readable" on public.meetings;
 create policy "meetings readable" on public.meetings for select using (
   "hostUserId" = auth.uid()
-  or exists (select 1 from public."meetingInvitees" mi where mi."meetingId" = id and mi."userId" = auth.uid())
+  -- Explicitly qualified as meetings.id, not the bare "id" - inside this
+  -- subquery an unqualified "id" resolves to meetingInvitees' OWN id
+  -- column (text) instead of the outer meetings.id (uuid), which is
+  -- exactly what threw "operator does not exist: uuid = text" the first
+  -- time this ran.
+  or exists (select 1 from public."meetingInvitees" mi where mi."meetingId" = meetings.id and mi."userId" = auth.uid())
   or public.is_admin()
   or (public.current_role() = 'manager' and "teamId" = public.current_team())
 );
