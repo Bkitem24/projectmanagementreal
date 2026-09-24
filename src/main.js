@@ -34,6 +34,21 @@ var CLIENT_COLORS = ['#2f8fd1','#3f6b8a','#7a5ea8','#4f8f6b','#b8567a','#a15c2f'
 var WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
 
 function roleOf(key){ for(var i=0;i<ROLES.length;i++){ if(ROLES[i].key===key) return ROLES[i]; } return null; }
+// ---------- ROLES SCOPED PER TEAM (2026-09-30, schema_v24.sql) ----------
+// A role's own "key" is still the one real identifier used everywhere else
+// (profileRoles.role, tasks.role, template step role, invites.roles[]) and
+// stays globally unique - "teamId" is just metadata for which team's
+// dropdowns/checklists should OFFER a given role, so task assignment,
+// notifications, and permission checks (which all key off `role`, never
+// off team) need no changes at all. Manager/Admin have no teamId (same
+// carve-out as schema_v15.sql - they're fixed cross-team tiers, not a
+// team-owned job title), so they always pass the `!r.teamId` half of the
+// filter below regardless of which team is being asked about. A role with
+// no teamId for any OTHER reason (shouldn't happen post-backfill, but
+// fails open rather than silently hiding a role that exists) is treated
+// the same way - visible to every team - rather than orphaned.
+function jobTitleRoles(){ return ROLES.filter(function(r){ return r.key!=='manager' && r.key!=='admin'; }); }
+function rolesForTeam(teamId){ return jobTitleRoles().filter(function(r){ return !r.teamId || r.teamId===teamId; }); }
 // ---------- MULTIPLE DEPENDENCIES (2026-09-22) ----------
 // A step (and the tasks generated from it) can now wait on more than one
 // other step, not just one. Both helpers below fall back to the old
@@ -1748,7 +1763,7 @@ function openCreateServiceTypeModal(clientIdToAttach){
     '<div class="field"><label>Scope</label><select name="scope" id="scopeSelect">'+scopeOptions+'</select></div>'+
     teamPickerHtml+
     '<div class="field"><label>Sub-tasks (one per line: label / role)</label><textarea name="subtasks" placeholder="Edit trailer / sr_video_editor&#10;Write show notes / seo_specialist" style="min-height:90px;"></textarea>'+
-    '<div class="field-hint">Roles: '+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return r.key;}).join(', ')+'</div></div>'+
+    '<div class="field-hint">Roles: '+jobTitleRoles().map(function(r){return r.key;}).join(', ')+'</div></div>'+
     (clientIdToAttach?'<div class="check-row"><input type="checkbox" name="attachTemplate" id="attachTemplate" checked><label for="attachTemplate">Also create a workflow template for this client from these sub-tasks</label></div>':''),
     function(fd){
       var name = (fd.get('name')||'').trim();
@@ -1913,12 +1928,17 @@ function openAddRuleModal(clientId){
 function openAddStepModal(templateId){
   db.doc('templates/'+templateId).get().then(function(snap){
     var t = snap.data();
+    return db.doc('clients/'+t.clientId).get().then(function(cSnap){
+      return { t: t, teamId: (cSnap.data()||{}).teamId };
+    });
+  }).then(function(ctx){
+    var t = ctx.t;
     var existingSteps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
     var checksHtml = existingSteps.length ? existingSteps.map(function(s){
       return '<div class="check-row"><input type="checkbox" name="dependsOnStepIds" value="'+escapeHtml(s.stepId)+'" id="newdep_'+escapeHtml(s.stepId)+'"><label for="newdep_'+escapeHtml(s.stepId)+'">'+escapeHtml(s.label)+'</label></div>';
     }).join('') : '<div class="field-hint">No other steps yet.</div>';
     openModal('Add workflow step', '<div class="field"><label>Step description</label><input required name="label" type="text" placeholder="e.g. Edit trailer"></div>'+
-      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+rolesForTeam(ctx.teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
       '<div class="field"><label>Group</label><select name="groupChoice">'+groupOptionsHtml(existingSteps, null)+'</select>'+
       '<input name="groupNew" type="text" placeholder="e.g. Editing" data-group-new-field style="margin-top:6px;"></div></div>'+
       '<div class="field"><label>Depends on (optional, pick any number)</label>'+checksHtml+'</div>'+
@@ -1988,13 +2008,28 @@ function openAddStepModal(templateId){
 function openEditStepModal(tplId, stepId){
   db.doc('templates/'+tplId).get().then(function(snap){
     var t = snap.data();
+    return db.doc('clients/'+t.clientId).get().then(function(cSnap){
+      return { t: t, teamId: (cSnap.data()||{}).teamId };
+    });
+  }).then(function(ctx){
+    var t = ctx.t;
     var steps = (t.steps||[]).slice().sort(function(a,b){return (a.order||0)-(b.order||0);});
     var self = steps.filter(function(s){ return s.stepId===stepId; })[0];
     if(!self){ showToast('error','That step no longer exists - try refreshing.'); return; }
     var selfGroup = (self.group||'').trim() || 'Tasks';
+    // Whatever role this step already holds always stays a valid option,
+    // even if it belongs to a different team than the client's current one
+    // (e.g. the role since got reassigned) - otherwise the <select> would
+    // silently fall back to its first option and Save would quietly change
+    // the step's role to something nobody picked.
+    var roleOptions = rolesForTeam(ctx.teamId);
+    if(!roleOptions.some(function(r){ return r.key===self.role; })){
+      var currentRole = roleOf(self.role);
+      if(currentRole) roleOptions = roleOptions.concat([currentRole]);
+    }
     openModal('Edit "'+escapeHtml(self.label)+'"',
       '<div class="field"><label>Step description</label><input required name="label" type="text" value="'+escapeHtml(self.label)+'"></div>'+
-      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'"'+(r.key===self.role?' selected':'')+'>'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+      '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+roleOptions.map(function(r){return '<option value="'+r.key+'"'+(r.key===self.role?' selected':'')+'>'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
       '<div class="field"><label>Group</label><select name="groupChoice">'+groupOptionsHtml(steps, selfGroup)+'</select>'+
       '<input name="groupNew" type="text" placeholder="e.g. Editing" data-group-new-field style="margin-top:6px;"></div></div>',
       function(fd){
@@ -2426,8 +2461,10 @@ function renderEpisode(episodeId){
 }
 
 function openAddCustomTaskModal(episodeId, episode){
-  openModal('Add a custom task', '<div class="field"><label>What needs doing</label><input required name="label" type="text" placeholder="e.g. Cut a bonus 60-second teaser"></div>'+
-    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+ROLES.filter(function(r){return r.key!=='manager'&&r.key!=='admin';}).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
+  db.doc('clients/'+episode.clientId).get().then(function(cSnap){
+    var teamId = (cSnap.data()||{}).teamId;
+    openModal('Add a custom task', '<div class="field"><label>What needs doing</label><input required name="label" type="text" placeholder="e.g. Cut a bonus 60-second teaser"></div>'+
+    '<div class="field-row"><div class="field"><label>Role</label><select name="role">'+rolesForTeam(teamId).map(function(r){return '<option value="'+r.key+'">'+escapeHtml(r.label)+'</option>';}).join('')+'</select></div>'+
     '<div class="field"><label>Group</label><input name="group" type="text" placeholder="e.g. Editing"></div></div>',
     function(fd){
       var label = (fd.get('label')||'').trim();
@@ -2444,6 +2481,7 @@ function openAddCustomTaskModal(episodeId, episode){
         notifyRoleAssignment(role, label, episode.title, episode.clientName, '#/episode/'+episodeId);
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Add task');
+  }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 
 // ---------- comments/links/attachments (shared by per-subtask AND
@@ -4274,7 +4312,10 @@ function showInviteCodeModal(email, roleLabel, code){
 // same "check-row" pattern as the workflow "depends on" picker - not a
 // single-value <select>, and createInvite() takes the whole checked array.
 function openInviteModal(){
-  var roleChecksHtml = INVITABLE_ROLES.map(function(r){
+  // Scoped to the inviter's own Team (myTeamId) - a Manager only ever
+  // invites into their own Team, so unlike Admin's own invite modal below
+  // there's no Team picker needed here at all.
+  var roleChecksHtml = rolesForTeam(myTeamId).map(function(r){
     return '<div class="check-row"><input type="checkbox" name="roles" value="'+r.key+'" id="invrole_'+r.key+'"><label for="invrole_'+r.key+'">'+escapeHtml(r.label)+'</label></div>';
   }).join('');
   openModal('Invite a teammate', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
@@ -4300,12 +4341,21 @@ function openInviteModal(){
 // group (round 8.8/schema_v10) so Admin can grant, say, Manager + a
 // job-title role to the same invite at once.
 function openAdminInviteModal(){
-  var roleChecksHtml = ASSIGNABLE_ROLES.map(function(r){
-    return '<div class="check-row"><input type="checkbox" name="roles" value="'+r.key+'" id="adminvrole_'+r.key+'"><label for="adminvrole_'+r.key+'">'+escapeHtml(r.label)+'</label></div>';
-  }).join('');
+  // Job-title roles are Team-scoped now, but which Team this invite is
+  // even going to is picked in this same modal - so the role checkboxes
+  // re-render live as the Team select changes, always with 'manager'
+  // (global, no Team of its own) pinned at the top regardless of Team.
+  var managerRole = ASSIGNABLE_ROLES.filter(function(r){ return r.key==='manager'; })[0];
+  var defaultTeamId = sortedTeamList().length ? sortedTeamList()[0].id : '';
+  function rolesForInvite(teamId){ return (managerRole?[managerRole]:[]).concat(rolesForTeam(teamId)); }
+  function roleChecksHtmlFor(teamId){
+    return rolesForInvite(teamId).map(function(r){
+      return '<div class="check-row"><input type="checkbox" name="roles" value="'+r.key+'" id="adminvrole_'+r.key+'"><label for="adminvrole_'+r.key+'">'+escapeHtml(r.label)+'</label></div>';
+    }).join('');
+  }
   openModal('Invite someone', '<div class="field"><label>Email</label><input required name="email" type="email" placeholder="name@bluekitemedia.com"></div>'+
-    '<div class="field-row"><div class="field"><label>Role(s)</label>'+roleChecksHtml+'</div>'+
-    '<div class="field"><label>Team</label><select name="teamId" required>'+teamOptionsHtml()+'</select></div></div>',
+    '<div class="field-row"><div class="field" id="adminInviteRolesField"><label>Role(s)</label><div id="adminInviteRolesBox">'+roleChecksHtmlFor(defaultTeamId)+'</div></div>'+
+    '<div class="field"><label>Team</label><select name="teamId" id="adminInviteTeamSelect" required>'+teamOptionsHtml(defaultTeamId)+'</select></div></div>',
     function(fd){
       var email = (fd.get('email')||'').trim();
       if(!email){ showModalError('Enter their email.'); return; }
@@ -4318,10 +4368,32 @@ function openAdminInviteModal(){
         route();
       }).catch(function(err){ showModalError(errMsg(err)); });
     }, 'Create invite');
+  var teamSelect = document.getElementById('adminInviteTeamSelect');
+  var rolesBox = document.getElementById('adminInviteRolesBox');
+  if(teamSelect && rolesBox) teamSelect.addEventListener('change', function(){ rolesBox.innerHTML = roleChecksHtmlFor(teamSelect.value); });
 }
 
 // ---------- ADMIN ----------
+// Which Team's roles the "Job-title roles" section is currently showing -
+// Admin isn't on any one Team (unlike a Manager, who only ever has one to
+// worry about), so unlike everywhere else in the app that just reads
+// myTeamId, Admin needs an explicit switcher here. Persisted per device
+// (same reasoning as the music-box position/sound-mute toggle - which
+// Team you were just looking at is a personal browsing-state thing, not
+// something to sync across devices or people).
+var adminRolesTeamId = null;
+function loadAdminRolesTeamId(){
+  var saved = null; try{ saved = localStorage.getItem('bko_adminRolesTeam'); }catch(e){}
+  var list = sortedTeamList();
+  if(saved && list.some(function(t){ return t.id===saved; })) return saved;
+  return list.length ? list[0].id : null;
+}
+function saveAdminRolesTeamId(teamId){
+  adminRolesTeamId = teamId;
+  try{ localStorage.setItem('bko_adminRolesTeam', teamId||''); }catch(e){}
+}
 function renderAdmin(){
+  adminRolesTeamId = loadAdminRolesTeamId();
   paint(
     '<div class="page-head"><div><div class="eyebrow">Admin</div><h1 class="page-title">Teams & company settings</h1>'+
     '<div class="page-sub">Only visible to you.</div></div>'+
@@ -4333,8 +4405,11 @@ function renderAdmin(){
     '<div class="section"><div class="section-head"><h2 class="section-title">Pending invites</h2></div>'+
     '<div class="page-sub" style="margin:-6px 0 12px;">Across every team - this used to only be visible from a Manager\'s own Team page.</div>'+
     '<div id="allInvitesBox"><div class="skeleton" style="height:40px;"></div></div></div>'+
-    '<div class="section"><div class="section-head"><h2 class="section-title">Job-title roles</h2><button type="button" class="btn btn-sm" id="newRoleBtn">+ New role</button></div>'+
-    '<div class="page-sub" style="margin:-6px 0 12px;">Roles employees/invites can hold, alongside Manager and Admin (fixed tiers, not editable here) - used for task assignment, role-based visibility, and workflow step ownership. Renaming keeps everything already assigned to a role intact; deleting doesn\'t touch anyone/anything already holding it, it just stops showing up for new assignments.</div>'+
+    '<div class="section"><div class="section-head"><h2 class="section-title">Job-title roles</h2>'+
+    '<div style="display:flex;align-items:center;gap:8px;">'+
+    (sortedTeamList().length>1 ? '<label style="font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px;">Team<select id="rolesTeamFilter" style="width:auto;">'+teamOptionsHtml(adminRolesTeamId)+'</select></label>' : '')+
+    '<button type="button" class="btn btn-sm" id="newRoleBtn">+ New role</button></div></div>'+
+    '<div class="page-sub" style="margin:-6px 0 12px;">Each Team has its own set of job-title roles (separate from Manager and Admin, which are fixed tiers, not editable here, and apply everywhere) - used for task assignment, role-based visibility, and workflow step ownership. Renaming keeps everything already assigned to a role intact; deleting doesn\'t touch anyone/anything already holding it, it just stops showing up for new assignments.</div>'+
     '<div id="rolesBox"></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Global services</h2><button type="button" class="btn btn-sm" id="newGlobalServiceBtn">+ New service type</button></div><div id="globalServicesBox"></div></div>'
   );
@@ -4350,6 +4425,8 @@ function renderAdmin(){
   document.getElementById('newGlobalServiceBtn').addEventListener('click', function(){ openCreateServiceTypeModal(null); });
   document.getElementById('adminInviteBtn').addEventListener('click', openAdminInviteModal);
   document.getElementById('newRoleBtn').addEventListener('click', function(){ openRoleModal(null); });
+  var rolesTeamFilter = document.getElementById('rolesTeamFilter');
+  if(rolesTeamFilter) rolesTeamFilter.addEventListener('change', function(){ saveAdminRolesTeamId(rolesTeamFilter.value); renderRolesBox(); });
   renderRolesBox();
 
   // Ported over from the Manager's Team Settings page (renderTeamSettings) -
@@ -4471,8 +4548,18 @@ function renderAdmin(){
     // Promise.all above), not the single p.role field.
     var empBox = document.getElementById('employeesBox');
     var employees = profiles.filter(function(p){ return !empHasRole(p.id,'admin'); }).sort(function(a,b){ return (a.displayName||a.email||'').localeCompare(b.displayName||b.email||''); });
+    var managerRoleRow = ASSIGNABLE_ROLES.filter(function(r){ return r.key==='manager'; })[0];
     empBox.innerHTML = employees.length ? '<div class="roster-table">'+employees.map(function(p){
-      var roleChecksHtml = ASSIGNABLE_ROLES.map(function(r){
+      // Only offer this employee's own Team's job-title roles (plus the
+      // global Manager tier) - but a role they already hold stays visible/
+      // checkable even if it's from a different Team (e.g. left over from
+      // before they were moved), so Admin can still see and uncheck it
+      // instead of it just silently disappearing from this list.
+      var teamRoles = (managerRoleRow?[managerRoleRow]:[]).concat(rolesForTeam(p.teamId));
+      ASSIGNABLE_ROLES.forEach(function(r){
+        if(empHasRole(p.id, r.key) && teamRoles.indexOf(r)===-1) teamRoles.push(r);
+      });
+      var roleChecksHtml = teamRoles.map(function(r){
         var checked = empHasRole(p.id, r.key);
         return '<label style="display:flex;align-items:center;gap:4px;font-size:12px;white-space:nowrap;"><input type="checkbox" value="'+r.key+'" '+(checked?'checked':'')+' style="width:14px;height:14px;">'+escapeHtml(r.label)+'</label>';
       }).join('');
@@ -4554,7 +4641,11 @@ function renderAdmin(){
 function renderRolesBox(){
   var box = document.getElementById('rolesBox');
   if(!box) return;
-  var editable = ROLES.filter(function(r){ return r.key!=='admin' && r.key!=='manager'; });
+  // Scoped to whichever Team the switcher above is currently set to (see
+  // adminRolesTeamId) - a role with no teamId at all (shouldn't happen
+  // after schema_v24.sql's backfill, but fails open rather than hiding a
+  // real role) shows up under every Team rather than none.
+  var editable = jobTitleRoles().filter(function(r){ return !adminRolesTeamId || !r.teamId || r.teamId===adminRolesTeamId; });
   box.innerHTML = editable.length ? editable.map(function(r){
     return '<div class="roster-row"><span class="role-chip" style="background:'+escapeHtml(r.color)+'">'+escapeHtml(r.label)+'</span>'+
       '<div style="margin-left:auto;display:flex;gap:8px;">'+
@@ -4590,17 +4681,22 @@ function slugifyRoleKey(label){
 
 function openRoleModal(existingKey){
   var existing = existingKey ? ROLES.filter(function(r){ return r.key===existingKey; })[0] : null;
+  var teamFieldHtml = sortedTeamList().length>1
+    ? '<div class="field"><label>Team</label><select name="teamId" required>'+teamOptionsHtml(existing?existing.teamId:adminRolesTeamId)+'</select></div>'
+    : ''; // only one Team exists at all - nothing to actually choose between yet
   openModal(existing ? 'Edit role' : 'New role',
     '<div class="field"><label>Label</label><input required name="label" type="text" value="'+(existing?escapeHtml(existing.label):'')+'" placeholder="e.g. Audio Engineer"></div>'+
+    teamFieldHtml+
     '<div class="field"><label>Color</label><input name="color" type="color" value="'+(existing?escapeHtml(existing.color):'#5b6472')+'" style="height:38px;width:70px;padding:2px;"></div>'+
     '<div class="field-hint">Role labels are always shown in white text on this color - pick something mid-to-dark so it stays readable.</div>',
     function(fd){
       var label = (fd.get('label')||'').trim();
       if(!label){ showModalError('Name the role.'); return; }
       var color = fd.get('color') || '#5b6472';
+      var teamId = fd.get('teamId') || (sortedTeamList()[0] && sortedTeamList()[0].id) || null;
       setModalBusy(true);
       if(existing){
-        db.doc('roles/'+existing.key).update({label:label, color:color}).then(function(){
+        db.doc('roles/'+existing.key).update({label:label, color:color, teamId:teamId}).then(function(){
           return refreshRolesCache();
         }).then(function(){
           closeModal(); showToast('success','Role updated'); route();
@@ -4610,7 +4706,7 @@ function openRoleModal(existingKey){
         var key = base, n = 2;
         while(ROLES.some(function(r){ return r.key===key; })){ key = base+'_'+n; n++; }
         var maxOrder = ROLES.reduce(function(m,r){ return Math.max(m, r.sortOrder||0); }, 0);
-        db.doc('roles/'+key).set({key:key, label:label, color:color, sortOrder:maxOrder+1, createdAt:new Date().toISOString()}).then(function(){
+        db.doc('roles/'+key).set({key:key, label:label, color:color, teamId:teamId, sortOrder:maxOrder+1, createdAt:new Date().toISOString()}).then(function(){
           return refreshRolesCache();
         }).then(function(){
           closeModal(); showToast('success','Role created'); route();
