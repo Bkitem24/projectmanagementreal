@@ -351,6 +351,12 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:6px;
 .task-desc::placeholder{color:var(--muted);}
 .task-desc-view{margin-top:8px;padding:7px 9px;font-size:12.5px;line-height:1.5;color:var(--ink-soft);white-space:pre-wrap;word-break:break-word;}
 .task-desc-view a{color:var(--blue-2);}
+/* Activity page (round 27) - a plain segmented control for the two log
+   categories, same pill shape as the app's other toggle-style controls. */
+.segmented{display:inline-flex;background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:3px;margin:14px 0;gap:2px;}
+.segmented-btn{border:none;background:none;color:var(--ink-soft);font-size:12.5px;font-weight:600;padding:7px 16px;border-radius:999px;cursor:pointer;transition:background-color .15s ease,color .15s ease;}
+.segmented-btn.active{background:var(--surface);color:var(--ink);box-shadow:var(--shadow-sm);}
+.segmented-btn:hover:not(.active){color:var(--ink);}
 /* Round 12: a dashed top border on an otherwise bare box read as an
    afterthought and felt cramped ("too small") - now a proper card with its
    own background/border/padding and a real minimum height so it presents

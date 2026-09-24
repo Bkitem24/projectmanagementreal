@@ -527,6 +527,37 @@ function servicesForMyScope(){
   return servicesCache.filter(function(s){ return s.scope==='global' || s.teamId===myTeamId || isAdmin(); });
 }
 
+// ---------- ACTIVITY LOG (2026-09-30, schema_v25.sql) ----------
+// Manager/Admin-only history of what happened and when - see renderActivity().
+// Every write is fire-and-forget from the caller's point of view (never
+// blocks or fails the actual action it's recording) since a missed log
+// entry is a lot less bad than, say, a task failing to save because
+// logging it hit a snag.
+var _clientTeamIdCache = {};
+function clientTeamIdCached(clientId){
+  if(!clientId) return Promise.resolve(null);
+  if(clientId in _clientTeamIdCache) return Promise.resolve(_clientTeamIdCache[clientId]);
+  return db.doc('clients/'+clientId).get().then(function(s){
+    var t = (s.data()||{}).teamId || null;
+    _clientTeamIdCache[clientId] = t;
+    return t;
+  }).catch(function(){ return null; });
+}
+// fields needs EITHER a `teamId` (already known - e.g. a Connect call,
+// which has no client) OR a `clientId` (teamId gets resolved from it).
+function logActivity(category, eventType, fields){
+  function commit(teamId){
+    var row = Object.assign({}, fields, {
+      id: 'al_'+uid8(), category: category, eventType: eventType,
+      actorUserId: myUid, actorRole: (myRoles&&myRoles[0])||null,
+      teamId: teamId, createdAt: new Date().toISOString()
+    });
+    supabase.from('activityLog').insert(row).catch(function(err){ console.warn('[blue-kite-ops] activity log write failed:', err); });
+  }
+  if('teamId' in fields) commit(fields.teamId);
+  else clientTeamIdCached(fields.clientId).then(commit);
+}
+
 function renderIdentityCard(){
   var box = document.getElementById('roleBox');
   if(!box) return;
@@ -787,6 +818,7 @@ function route(){
   else if(hash==='/team') renderTeamSettings();
   else if(hash==='/admin') renderAdmin();
   else if(hash==='/workflows') renderWorkflows();
+  else if(hash==='/activity') renderActivity();
   else if(mClient) renderClient(mClient[1]);
   else if(mEpisode) renderEpisode(mEpisode[1]);
   else renderHome();
@@ -2391,6 +2423,19 @@ function renderEpisode(episodeId){
             done: checked,
             doneByUserId: checked ? myUid : null,
             doneAt: checked ? new Date().toISOString() : null
+          }).then(function(){
+            if(!checked) return;
+            var t = taskById[taskId];
+            if(!t) return;
+            logActivity('task', 'task_item_done', { clientId: t.clientId, episodeId: t.episodeId, taskId: taskId, label: t.label });
+            // Whole-episode completion (Humayun's "every time the entire
+            // task got completed" - in this app's own vocabulary, an
+            // episode's checklist IS its "task", so this fires once the
+            // LAST checklist item on it gets checked off).
+            db.collection('tasks').where('episodeId','==',t.episodeId).get().then(function(snap){
+              var allDone = snap.docs.every(function(d){ return d.id===taskId || d.data().done; });
+              if(allDone) logActivity('task', 'episode_completed', { clientId: t.clientId, episodeId: t.episodeId, label: t.episodeTitle||t.label });
+            }).catch(function(){});
           }).catch(function(err){ cb.checked=!checked; showToast('error', errMsg(err)); });
         });
       });
@@ -3019,6 +3064,25 @@ function loadCollab(kind, id, panel){
               supabase.from(cfg.comments).update({mentions: allMentionedIds}).eq('id', commentId).then(function(){});
             }
           });
+          // Activity log (round 27) - a file-only message (no text) logs as
+          // its own "attachment" event since that's genuinely a distinct
+          // thing to want in the log; text-with-or-without-a-file logs as
+          // a normal comment/reply. Needs this thread's clientId, which
+          // this composer doesn't otherwise carry (it only knows `kind`/
+          // `id` - a task or episode id) - looked up fresh rather than
+          // trusting a maybe-stale cache, since this fires once per
+          // message sent, not often enough to matter.
+          (kind==='task' ? db.doc('tasks/'+id).get() : db.doc('episodes/'+id).get()).then(function(s){
+            var d = s.data()||{};
+            var evt = (file && !body) ? 'attachment' : (replyingTo ? 'reply' : 'comment');
+            var lbl = (file && !body) ? file.name : (body.length>80 ? body.slice(0,80)+'…' : body);
+            logActivity('social', evt, {
+              clientId: d.clientId||null,
+              episodeId: kind==='episode' ? id : (d.episodeId||null),
+              taskId: kind==='task' ? id : null,
+              label: lbl
+            });
+          }).catch(function(){});
           loadCollab(kind, id, panel);
         }).catch(function(err){
           sendBtn.disabled = false;
@@ -3384,7 +3448,15 @@ function renderBoardBody(box, tasks, depById, showingAll, liveStepByEpisodeId){
   Array.prototype.forEach.call(box.querySelectorAll('.task-check:not([disabled])'), function(cb){
     cb.addEventListener('change', function(){
       var taskId = cb.getAttribute('data-task');
-      db.doc('tasks/'+taskId).update({done:true, doneByUserId:myUid, doneAt:new Date().toISOString()}).catch(function(err){ cb.checked=false; showToast('error', errMsg(err)); });
+      db.doc('tasks/'+taskId).update({done:true, doneByUserId:myUid, doneAt:new Date().toISOString()}).then(function(){
+        var t = tasks.filter(function(x){ return x._id===taskId; })[0];
+        if(!t) return;
+        logActivity('task', 'task_item_done', { clientId: t.clientId, episodeId: t.episodeId, taskId: taskId, label: t.label });
+        db.collection('tasks').where('episodeId','==',t.episodeId).get().then(function(snap){
+          var allDone = snap.docs.every(function(d){ return d.id===taskId || d.data().done; });
+          if(allDone) logActivity('task', 'episode_completed', { clientId: t.clientId, episodeId: t.episodeId, label: t.episodeTitle||t.label });
+        }).catch(function(){});
+      }).catch(function(err){ cb.checked=false; showToast('error', errMsg(err)); });
     });
   });
 }
@@ -3940,6 +4012,14 @@ function renderCallBar(){
 function hangupCall(){
   if(!activeCall) return;
   var call = activeCall;
+  if(call.hadOtherParticipant && call.startedAt){
+    var names = Object.keys(call.participants).map(function(uid){ return call.participants[uid].name||'Someone'; });
+    logActivity('social', 'call', {
+      teamId: myTeamId,
+      label: 'Call with '+(names.join(', ')||'someone'),
+      durationSec: Math.round((Date.now()-call.startedAt)/1000)
+    });
+  }
   Object.keys(call.participants).forEach(function(uid){
     var p = call.participants[uid];
     if(p.audioEl){ try{ p.audioEl.remove(); }catch(e){} }
@@ -3957,6 +4037,7 @@ function hangupCall(){
 function pullParticipant(call, meta){
   if(!call.pc || !meta || !meta.sessionId || call.participants[meta.uid]) return Promise.resolve();
   call.participants[meta.uid] = { uid: meta.uid, name: meta.name, sessionId: meta.sessionId };
+  if(!call.hadOtherParticipant) call.startedAt = Date.now(); // first real connection - see hangupCall()'s activity-log duration
   call.hadOtherParticipant = true;
   call.pendingPullUids.push(meta.uid);
   renderCallBar();
@@ -4371,6 +4452,82 @@ function openAdminInviteModal(){
   var teamSelect = document.getElementById('adminInviteTeamSelect');
   var rolesBox = document.getElementById('adminInviteRolesBox');
   if(teamSelect && rolesBox) teamSelect.addEventListener('change', function(){ rolesBox.innerHTML = roleChecksHtmlFor(teamSelect.value); });
+}
+
+// ---------- ACTIVITY (round 27, schema_v25.sql) ----------
+// Manager/Admin-only. A Manager only ever sees their own Team (myTeamId,
+// no picker needed); Admin isn't on any one Team, so gets the same kind of
+// "which Team am I currently looking at" switcher the roles page uses
+// (adminRolesTeamId) - a separate persisted choice though, since someone
+// might genuinely want to browse one Team's roles while looking at a
+// different Team's activity.
+var ACTIVITY_EVENT_LABELS = {
+  task_item_done: 'marked a task done',
+  episode_completed: 'completed the whole episode',
+  comment: 'commented',
+  reply: 'replied',
+  attachment: 'attached a file',
+  call: 'was on a call'
+};
+var activityCategory = 'task';
+function loadActivityTeamId(){
+  var saved = null; try{ saved = localStorage.getItem('bko_adminActivityTeam'); }catch(e){}
+  var list = sortedTeamList();
+  if(saved && list.some(function(t){ return t.id===saved; })) return saved;
+  return list.length ? list[0].id : null;
+}
+function saveActivityTeamId(teamId){ try{ localStorage.setItem('bko_adminActivityTeam', teamId||''); }catch(e){} }
+function formatDurationShort(sec){
+  sec = sec||0;
+  if(sec<60) return sec+'s';
+  var m = Math.floor(sec/60), s = sec%60;
+  return m+'m'+(s?' '+s+'s':'');
+}
+function renderActivity(){
+  if(!canManage()){ paint('<div class="empty-state"><strong>Not available</strong>Only managers and admins can view activity logs.</div>'); return; }
+  var teamId = isAdmin() ? loadActivityTeamId() : myTeamId;
+  paint(
+    '<div class="page-head"><div><div class="eyebrow">Activity</div><h1 class="page-title">Who did what, and when</h1>'+
+    '<div class="page-sub">'+(isAdmin()?'Scoped to whichever Team you pick below.':'Your Team only.')+'</div></div>'+
+    (isAdmin() && sortedTeamList().length>1 ? '<select id="activityTeamFilter" style="width:auto;">'+teamOptionsHtml(teamId)+'</select>' : '')+
+    '</div>'+
+    '<div class="segmented" id="activityTabs">'+
+    '<button type="button" class="segmented-btn'+(activityCategory==='task'?' active':'')+'" data-cat="task">Task activity</button>'+
+    '<button type="button" class="segmented-btn'+(activityCategory==='social'?' active':'')+'" data-cat="social">Comments, files &amp; calls</button>'+
+    '</div>'+
+    '<div id="activityListBox"><div class="skeleton" style="height:60px;"></div></div>'
+  );
+  var teamFilter = document.getElementById('activityTeamFilter');
+  if(teamFilter) teamFilter.addEventListener('change', function(){ saveActivityTeamId(teamFilter.value); renderActivity(); });
+  Array.prototype.forEach.call(document.querySelectorAll('#activityTabs [data-cat]'), function(btn){
+    btn.addEventListener('click', function(){ activityCategory = btn.getAttribute('data-cat'); renderActivity(); });
+  });
+  loadActivityList(teamId, activityCategory);
+}
+// A plain .get() (not a live subscription) - this is a historical log
+// people check in on, not something that needs to visibly update itself
+// while the page sits open, and a snapshot listener on a growing
+// append-only table is a needless ongoing cost for that.
+function loadActivityList(teamId, category){
+  var box = document.getElementById('activityListBox');
+  if(!box) return;
+  if(!teamId){ box.innerHTML = '<div class="empty-state">No team to show yet.</div>'; return; }
+  db.collection('activityLog').where('teamId','==',teamId).where('category','==',category).orderBy('createdAt','desc').limit(150).get().then(function(snap){
+    box = document.getElementById('activityListBox'); // route() may have moved on by the time this resolves
+    if(!box) return;
+    if(snap.empty){ box.innerHTML = '<div class="empty-state">Nothing recorded here yet.</div>'; return; }
+    box.innerHTML = snap.docs.map(function(d){
+      var r = d.data();
+      var verb = ACTIVITY_EVENT_LABELS[r.eventType] || r.eventType;
+      var extra = (r.eventType==='call' && r.durationSec) ? ' ('+formatDurationShort(r.durationSec)+')' : '';
+      var roleLabel = r.actorRole ? (roleOf(r.actorRole)||{}).label || r.actorRole : '';
+      return '<div class="roster-row">'+profileChip(r.actorUserId)+
+        '<div style="min-width:0;flex:1;"><div style="font-size:13px;">'+verb+(r.label?': <strong>'+escapeHtml(r.label)+'</strong>':'')+extra+'</div>'+
+        '<div style="font-size:11.5px;color:var(--muted);">'+fmtDateTime(r.createdAt)+(roleLabel?' · '+escapeHtml(roleLabel):'')+'</div></div>'+
+        '</div>';
+    }).join('');
+    hydrateProfiles(box);
+  }).catch(function(err){ box.innerHTML = '<div class="empty-state">Could not load activity - '+errMsg(err)+'</div>'; });
 }
 
 // ---------- ADMIN ----------
@@ -5097,6 +5254,7 @@ function hideIdleWarningOverlay(){
         }
         var adminNav = document.getElementById('navAdmin'); if(adminNav) adminNav.hidden = !isAdmin();
         var workflowsNav = document.getElementById('navWorkflows'); if(workflowsNav) workflowsNav.hidden = !canManage();
+        var activityNav = document.getElementById('navActivity'); if(activityNav) activityNav.hidden = !canManage();
         // Real bug (2026-09-29, "my own role/everyone's role shows as a raw
         // lowercase key, even after reloading"): this render call used to
         // be the ONLY place renderIdentityCard() ever runs, and it fired
