@@ -72,15 +72,23 @@ Screenshots were viewed directly in the browser pane during this session (not sa
 
 I'd lean toward option 1 first (cheap, fast, and Humayun already has his own developer instincts) unless he'd rather not spend the setup time and just wants a working answer now (option 2).
 
-## Spike 3 - Gmail IMAP/SMTP via app password - SCAFFOLDED, waiting on Humayun
+## Spike 3 - Gmail IMAP/SMTP via app password - PASS
 
 **Question:** Can a Cloudflare Worker log into Gmail with an app password over raw IMAP/SMTP, list recent mail, and send a threaded reply?
 
-**Built, not yet run for real:** `spike-imap/` - a Worker (`compatibility_flags = ["nodejs_compat"]`) that hand-rolls the IMAP tagged-command protocol (LOGIN, SELECT INBOX, UID SEARCH SINCE, UID FETCH ENVELOPE+Message-ID) and SMTP (EHLO, AUTH PLAIN, MAIL FROM/RCPT TO/DATA with In-Reply-To/References headers for threading) over `cloudflare:sockets`. Two endpoints: `GET /read?account=gmail|workspace`, `GET /send-reply?account=...&inReplyTo=<message-id>`.
+**Built:** `spike-imap/` - a Worker (`compatibility_flags = ["nodejs_compat"]`) that hand-rolls the IMAP tagged-command protocol (LOGIN, SELECT INBOX, UID SEARCH SINCE, UID FETCH ENVELOPE+Message-ID) and SMTP (EHLO, AUTH PLAIN, MAIL FROM/RCPT TO/DATA with In-Reply-To/References headers for threading) over `cloudflare:sockets`. Two endpoints: `GET /read?account=gmail|workspace`, `GET /send-reply?account=...&inReplyTo=<message-id>`.
 
-**Blocked on:** an app password, which only Humayun can create (Google Account → Security → turn on 2-Step Verification if it's off → App passwords → create one for "Mail") and paste into `spike-imap/.dev.vars` himself (copied from the gitignored `.dev.vars.example` already in place) - I can't create this myself, and don't need to see the password to run the spike once it's there. A second Workspace-domain app password is optional (`WORKSPACE_USER`/`WORKSPACE_APP_PASSWORD`), for the "mix of both" account types Humayun mentioned.
+**Tested for real** against Humayun's account (`podcast@americanmasculinity.com` - a Google Workspace/custom-domain address pasted into `GMAIL_USER`, which turned out to be a good test in itself: Workspace mail is served by the exact same `imap.gmail.com`/`smtp.gmail.com`, so this one account proved both the plain-Gmail and Workspace paths at once, not just plain Gmail):
 
-**To finish this spike:** once `.dev.vars` is filled in, `cd spike-imap && npx wrangler dev` (local) then `npx wrangler dev --remote` (Cloudflare's real network), then hit `/read` and `/send-reply` and confirm the reply actually threads in Gmail's own UI.
+- **`GET /read` - real result:** logged in, selected INBOX (798 messages), searched the last 30 days (42 matches), fetched the last 5 with real subjects/senders/Message-IDs. Saw Google's own "2-Step Verification turned on" and "Security alert" notification emails in the results - expected, confirms the app-password flow was actually set up correctly on the account.
+- **`GET /send-reply` - real result:** connected, authenticated, sent a real reply with `In-Reply-To`/`References` headers set to a fetched message's Message-ID. Confirmed it actually arrived: the very next `/read` call showed it sitting in the inbox (Gmail delivers a self-sent message back to the same inbox).
+- **Tested on BOTH hosts, as the plan asked:** first via `npx wrangler dev` (my own machine), then via `npx wrangler dev --remote` (Cloudflare's real edge network - confirmed genuinely different infrastructure both times, by the IMAP greeting itself reporting a different source IP/datacenter for each: a plain IPv4 the first time, a Cloudflare edge IPv6 range the second). **Port 993 (IMAP) and 465 (SMTP) are both reachable from Cloudflare's real network**, not just locally - this was a real open question per the plan, now answered.
+- **Timing:** roughly 2 seconds for a full login+search+fetch, roughly 2 seconds for a full connect+auth+send, on both hosts - comfortably fast for a once-a-minute poll.
+- **Cron Triggers:** already proven available on this Cloudflare account - `worker-r2/wrangler.toml` already uses them in production (`[triggers] crons = [...]`), no separate check needed.
+
+**Not tested:** a second, distinct app password for a true `@gmail.com` consumer address (only the Workspace one was provided) - low-risk gap, since Workspace and consumer Gmail are the same underlying mail servers and the protocol code doesn't distinguish them at all.
+
+**Recommendation:** proceed - this is solid, verified evidence the raw-socket IMAP/SMTP approach works end to end, on real infrastructure, for Phase A's Client Communications feature. Humayun should delete the test "Re: Blue Kite Ops spike test" emails this left in the test inbox whenever convenient (harmless, just clutter).
 
 ## Spike 5 - Slack session capture - INFRASTRUCTURE PROVEN, needs a live login to finish
 
