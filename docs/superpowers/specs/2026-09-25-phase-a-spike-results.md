@@ -42,5 +42,35 @@ Built a real spike page (`src/react/SpikePage.jsx`) wired into the router at `#/
 
 Screenshots were viewed directly in the browser pane during this session (not saved as files - unlike Spike 1's native-window captures, there was no simple way to export these to disk).
 
+## Spike 4 - WhatsApp Business "coexistence" - AMBIGUOUS, not a clean go/no-go
+
+**Question:** Can Humayun keep using his WhatsApp Business phone app AND connect the same Pakistani number to our own app via the Cloud API, as a business self-building its own app rather than going through a Meta partner?
+
+**Research only this round** (web search + Meta's own developer docs) - the plan gates creating an actual Meta developer account on research saying a clear GO, and it didn't. **Status: needs Humayun's decision before any more work happens here.**
+
+**Country:** Pakistan **is** a supported WhatsApp Business Platform market - found multiple Cloud-API-provider services (BSPs) explicitly operating there, and Pakistan appears in Meta's own per-country pricing tables (below). Not a blocker.
+
+**The real open question - is Coexistence itself self-serve, or partner-only?** This split into two different things that easy WhatsApp reading online blurs together:
+- **Plain Cloud API (API-only, no more phone app on that number):** clearly self-serve. A business building only for itself ("Direct Developer" in Meta's own terminology) can create its own Meta app and skip the full App Review process Meta requires of apps meant to onboard OTHER businesses (Tech Providers/Solution Partners) - a System User with the right permissions is enough.
+- **Coexistence (keeping BOTH the phone app and the API working on the same number, which is what Humayun actually wants):** Meta's OWN official documentation for this (`developers.facebook.com/.../embedded-signup/onboarding-business-app-users`, fetched directly) is written entirely for Tech Providers/Solution Partners onboarding THEIR business customers - it never describes a path for a business to onboard its own single number without going through a partner. I could not find a Meta doc describing direct self-serve Coexistence. This may mean it genuinely requires a partner/BSP today, or it may just mean Meta's docs are partner-centric and a Direct Developer's own app CAN still do it (same underlying Embedded Signup API) - **I can't tell which from documentation alone; only actually trying Embedded Signup as a Direct Developer would settle it**, which is real work (a Meta Business Portfolio + app) I'm not doing without Humayun's go-ahead given the ambiguity.
+
+**What Coexistence limits, once active (confirmed, applies regardless of self-serve vs. partner):**
+- Throughput capped at 20 messages/second on that number (irrelevant at Blue Kite Media's scale).
+- Broadcast lists become read-only; disappearing messages and "view once" messages get disabled.
+- Unsupported linked devices (Windows/WearOS companion apps, if used) get unlinked on activation.
+- Message-history sync window on activation: sources disagreed (one said up to 180 days for 1:1 chats, another said a 24-hour sync-or-offboard window) - **this needs confirming directly if Coexistence is pursued**, not something to rely on secondhand.
+- New messages after activation mirror both ways (phone app ↔ API) via webhooks in real time.
+
+**Pricing - corrected from what I told you earlier in this conversation, which is now out of date:** Meta changed WhatsApp Business pricing **October 1, 2026** (days from now). The old "free if you reply within 24 hours" model is going away. New model: **1,000 free service messages per month per number**, then **$0.015/message** for Service, Utility, and Authentication messages in Pakistan, and **$0.0473/message** for Marketing (business-initiated template) messages. A Free Entry Point window (72 hours, unlimited free messages) still applies when someone messages in from a Click-to-WhatsApp ad or Page button - not the normal case for existing clients messaging in directly. At Blue Kite Media's likely volume (a handful of clients, not mass marketing), the 1,000 free/month tier probably covers ordinary conversation entirely - the paid tier mainly matters if you're the one starting a conversation with many people or sending marketing-style messages.
+
+**Fallback (self-serve, no ambiguity):** a second, API-only WhatsApp Business number just for the app - clients would see a different number than the one Humayun uses personally today, and he'd stop using the Business app for that new number specifically (his current number/app stays exactly as-is for anything not moved). Zero setup ambiguity, but changes what number clients message.
+
+**Recommendation - this needs Humayun's call, not mine:**
+1. **Try it:** create a Meta Business Portfolio + a Meta developer app himself (his own account, his own verification - I can't do this step), and actually attempt Embedded Signup as a Direct Developer. Either it offers Coexistence directly (question answered, proceed) or it doesn't (fall back to a BSP or the second-number option) - costs him maybe 30-60 minutes, no money, to get a definitive answer instead of my secondhand research.
+2. **Skip the ambiguity, use a BSP** (a paid service like the ones found in this search - 360dialog, Wati, and several Pakistan-specific ones) that already has Coexistence built and approved - costs a monthly fee on top of Meta's own per-message pricing, in exchange for certainty and a supported integration.
+3. **Accept the trade-off** and use a second, API-only number instead of Coexistence - zero ambiguity, but a different number for clients.
+
+I'd lean toward option 1 first (cheap, fast, and Humayun already has his own developer instincts) unless he'd rather not spend the setup time and just wants a working answer now (option 2).
+
 **Recommendation:** proceed with React + Tailwind + shadcn/ui for Phase A, exactly as scoped. Use Setup A (full preflight, matches shadcn's own default/expectations) since it's already safe for every current page - just flag the "bare heading/list" trap in the Phase A spec so nobody reintroduces it unknowingly during the page-by-page migration. Pin `@vitejs/plugin-react` to `^4.x`. Plan for `shadcn add <component>` (non-interactive, works fine) rather than depending on `shadcn init` finishing unattended. Before Phase A actually starts, do the two checks this spike couldn't (a real login, 5 minutes): confirm `/react-spike` behaves correctly inside the real app shell (back button, dark theme) and eyeball 2-3 real authenticated pages for anything this static-harness approach might have missed.
 
