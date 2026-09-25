@@ -1,0 +1,25 @@
+# Client Communications - Gmail Worker. Polls every connected Gmail/Workspace
+# inbox on a Cron Trigger, matches senders against commsContacts, and writes
+# new messages into Supabase. Also exposes POST /send for the app to send a
+# threaded reply immediately (not waiting for the next poll cycle).
+#
+# The IMAP/SMTP protocol code below is copied verbatim from spike-imap/
+# (proven live on two hosts - see docs/superpowers/specs/2026-09-25-phase-a-
+# spike-results.md, Spike 3, PASS) - only the wiring around it is new.
+#
+# Deploy: cd worker-comms-gmail && npx wrangler deploy
+# Secrets (never in .env, never in the app):
+#   npx wrangler secret put SUPABASE_URL
+#   npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+#   npx wrangler secret put GMAIL_APP_PASSWORD_<ACCOUNT_ID>   (one per connected
+#     Gmail account - ACCOUNT_ID is that account's row id from commsAccounts,
+#     uppercased, e.g. GMAIL_APP_PASSWORD_CACC_A1B2C3D4)
+name = "blue-kite-ops-comms-gmail"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Every 2 minutes - Spike 3 measured ~2s per account per poll, cheap even
+# with several connected inboxes.
+[triggers]
+crons = ["*/2 * * * *"]
