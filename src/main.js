@@ -536,6 +536,11 @@ var navCurrentHash = null;
 // next - see route()'s own comment for why a plain live-subscription
 // unsubscribe (clearSubs()) isn't enough for a meeting room on its own.
 var activeMeetingRoomCleanup = null;
+// Phase A: unmount pattern for React pages, same as activeMeetingRoomCleanup
+// above - proven in Spike 2 (docs/superpowers/specs/2026-09-25-phase-a-
+// spike-results.md) so a React root's data subscriptions don't keep
+// running after navigating away from it.
+var activeReactRoot = null;
 function goBack(){
   if(!navBackStack.length) return;
   var prev = navBackStack.pop();
@@ -900,6 +905,7 @@ function route(){
   // close sessions, stop recording) whenever navigation moves away from
   // it, not just an unsubscribe. See renderMeetingRoom().
   if(activeMeetingRoomCleanup){ activeMeetingRoomCleanup(); activeMeetingRoomCleanup=null; }
+  if(activeReactRoot){ activeReactRoot.unmount(); activeReactRoot=null; }
   clearSubs();
   var hash = location.hash.replace(/^#/,'') || '/';
   if(navCurrentHash!==null && navCurrentHash!==hash){
@@ -935,6 +941,7 @@ function route(){
     renderActivity();
   }
   else if(hash==='/meetings') renderMeetingsList();
+  else if(hash==='/comms') renderComms();
   else if(mClient) renderClient(mClient[1]);
   else if(mEpisode) renderEpisode(mEpisode[1]);
   else if(mMeeting) renderMeetingRoom(mMeeting[1]);
@@ -5077,6 +5084,23 @@ function renderMeetingsUsageMeter(box){
 }
 
 // ---- list page ----
+// Client Communications (Phase A) - a React page mounted inside the
+// vanilla-JS router, same pattern proven in Spike 2: paint() the mount
+// point (keeps the back button working), dynamic-import React only for
+// this one route (main.js itself stays plain JS, no JSX transform), and
+// register the root in activeReactRoot so route()'s top-of-function check
+// unmounts it on navigating away.
+function renderComms(){
+  paint('<div id="reactRoot" style="height:calc(100vh - 0px);"></div>');
+  Promise.all([import('react'), import('react-dom/client'), import('./react/CommsPage.jsx')]).then(function(mods){
+    var React = mods[0];
+    var createRoot = mods[1].createRoot;
+    var CommsPage = mods[2].default;
+    var root = createRoot(document.getElementById('reactRoot'));
+    activeReactRoot = root;
+    root.render(React.createElement(CommsPage, { myUid: myUid, isAdmin: isAdmin() }));
+  });
+}
 function renderMeetingsList(){
   paint(
     '<div class="page-head"><div><div class="eyebrow">Meetings</div><h1 class="page-title">Video meetings</h1>'+
@@ -6699,6 +6723,23 @@ function hideIdleWarningOverlay(){
         var adminNav = document.getElementById('navAdmin'); if(adminNav) adminNav.hidden = !isAdmin();
         var workflowsNav = document.getElementById('navWorkflows'); if(workflowsNav) workflowsNav.hidden = !canManage();
         var activityNav = document.getElementById('navActivity'); if(activityNav) activityNav.hidden = !canManage();
+        // Client Comms (Phase A, 2026-09-25): admin/manager always see it;
+        // an employee only sees it if an admin explicitly granted them
+        // access to at least one account (checked async below - same
+        // "render once, re-render when the async cache resolves" pattern
+        // CLAUDE.md documents for ROLES/musicMoods, since this can't be
+        // known synchronously at first paint). This is a convenience only -
+        // the real boundary is the commsAccounts*/commsThreads/commsMessages
+        // RLS policies in schema_v35.sql, not this hidden attribute.
+        var commsNav = document.getElementById('navComms');
+        if(commsNav){
+          commsNav.hidden = !canManage();
+          if(!canManage()){
+            import('./lib/comms.js').then(function(comms){ return comms.hasAnyCommsGrant(myUid); })
+              .then(function(hasGrant){ if(hasGrant) commsNav.hidden = false; })
+              .catch(function(){});
+          }
+        }
         // Real bug (2026-09-29, "my own role/everyone's role shows as a raw
         // lowercase key, even after reloading"): this render call used to
         // be the ONLY place renderIdentityCard() ever runs, and it fired
