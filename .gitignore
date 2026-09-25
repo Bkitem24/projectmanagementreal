@@ -2,6 +2,8 @@ node_modules/
 dist/
 .env
 .env.local
+.dev.vars
+*.local
 src-tauri/target/
 src-tauri/gen/
 *.log
