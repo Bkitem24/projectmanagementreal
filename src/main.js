@@ -5448,8 +5448,17 @@ function renderMeetingRoom(meetingId){
   var meetingUnsub = null;
   var stopHealthWatch = null;
   var onMeetingDeviceChange = null; // Round 39 - assigned once the local session is up
-  // Placeholder until Task 4 wires recording + logging - returns the new mic track.
-  function afterMicSwap(track){ return track; }
+  // Round 39: the recorder's Web Audio source is bound to the exact track it
+  // was given; switchDevice() stops that track, so the host's own voice
+  // silently vanished from a recording after any mic switch. Connect the
+  // new track too (the old, stopped one just goes silent). Called after
+  // EVERY mic swap: device picker, processing toggles, unplug fallback,
+  // health-watch reacquire.
+  function afterMicSwap(track){
+    console.log('[meetings] mic swapped', track && track.label, 'enabled:', track && track.enabled, track && track.getSettings && track.getSettings());
+    if(track && iAmRecording && recorder) recorder.addAudioSource(new MediaStream([track]));
+    return track;
+  }
 
   function cleanup(){
     if(leftAlready) return;
@@ -5663,7 +5672,10 @@ function renderMeetingRoom(meetingId){
       // backgrounded, instead of leaving a frozen/silent tile with no
       // explanation.
       stopHealthWatch = meetingsLib.startDeviceHealthWatch(mainSession,
-        function(kind){ showToast('info', (kind==='camera'?'Camera':'Microphone')+' reconnected'); },
+        function(kind){
+          if(kind==='mic') afterMicSwap(mainSession.stream.getAudioTracks()[0]);
+          showToast('info', (kind==='camera'?'Camera':'Microphone')+' reconnected');
+        },
         function(kind, err){ console.warn('[meetings] could not reacquire '+kind+' after it went unhealthy:', err); });
 
       // Round 39: tell people when their mic changes under them (unplugged
@@ -5853,14 +5865,18 @@ function renderMeetingRoom(meetingId){
         // (setSinkId - WebView2 yes; the macOS build needs re-checking).
         var canPickSpeaker = typeof HTMLMediaElement.prototype.setSinkId === 'function' && res.speakers.length > 0;
         var spkOptions = deviceOptions(res.speakers, savedSpeakerId() || 'default', 'Speaker');
+        var proc = meetingsLib.getMicProcessing();
         var html = [
           '<div class="field"><label>Microphone</label><select name="micId">'+(micOptions||'<option value="">No microphones found</option>')+'</select>'+
             '<div class="mic-meter"><div class="mic-meter-bar" id="micMeterBar"></div></div>'+
             '<div class="field-hint">'+(curMic ? 'Now using: '+escapeHtml(curMic.label||'unknown microphone') : 'No microphone active')+(micOn?'':' (you\'re muted - unmute to see the level)')+'</div></div>',
           canPickSpeaker ? '<div class="field"><label>Speaker / headphones</label><select name="spkId">'+spkOptions+'</select>'+
             '<button type="button" class="btn btn-sm" id="testSpeakerBtn" style="width:auto;margin-top:6px;">Play test sound</button></div>' : '',
-          '<div class="field"><label>Camera</label><select name="camId">'+(camOptions||'<option value="">No cameras found</option>')+'</select></div>'
-          // Task 4 (Round 39) appends the audio-processing toggles here
+          '<div class="field"><label>Camera</label><select name="camId">'+(camOptions||'<option value="">No cameras found</option>')+'</select></div>',
+          '<div class="field"><label>Audio processing</label>'+
+            '<div class="check-row"><input type="checkbox" name="procEC" id="procECCheck"'+(proc.echoCancellation?' checked':'')+'><label for="procECCheck">Echo cancellation</label></div>'+
+            '<div class="check-row"><input type="checkbox" name="procNS" id="procNSCheck"'+(proc.noiseSuppression?' checked':'')+'><label for="procNSCheck">Noise suppression &amp; auto volume</label></div>'+
+            '<div class="field-hint">Leave both on unless you\'re wearing headphones and need people to hear music or an instrument exactly as it sounds (like Zoom\'s "Original sound").</div></div>'
         ];
         openModal('Audio & video', html.join(''),
           function(fd){
@@ -5870,8 +5886,15 @@ function renderMeetingRoom(meetingId){
               saveSpeakerId(spkId === 'default' ? '' : spkId);
               Object.keys(audioEls).forEach(function(k){ applySpeaker(audioEls[k]); });
             }
+            // Processing toggles only take effect on a freshly opened mic, so a
+            // change re-opens the SAME device (switchDevice keeps mute state).
+            var nextProc = { echoCancellation: fd.get('procEC') === 'on', noiseSuppression: fd.get('procNS') === 'on' };
+            var procChanged = proc.echoCancellation !== nextProc.echoCancellation || proc.noiseSuppression !== nextProc.noiseSuppression;
+            meetingsLib.setMicProcessing(nextProc);
+            var micChanged = !!micId && (!curMic || curMic.getSettings().deviceId !== micId);
+            var micTarget = micChanged ? micId : (curMic && curMic.getSettings().deviceId);
             Promise.all([
-              (micId && (!curMic || curMic.getSettings().deviceId!==micId)) ? meetingsLib.switchDevice(mainSession, 'mic', micId).then(afterMicSwap) : Promise.resolve(),
+              ((micChanged || procChanged) && micTarget) ? meetingsLib.switchDevice(mainSession, 'mic', micTarget).then(afterMicSwap) : Promise.resolve(),
               (camId && (!curCam || curCam.getSettings().deviceId!==camId)) ? meetingsLib.switchDevice(mainSession, 'camera', camId) : Promise.resolve(),
             ]).then(function(){
               closeModal(); showToast('success','Devices updated');

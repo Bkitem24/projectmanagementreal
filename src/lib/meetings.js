@@ -29,6 +29,28 @@ import { supabase } from './supabaseClient.js';
 const MEETINGS_WORKER_URL = import.meta.env.VITE_MEETINGS_WORKER_URL || '';
 export const meetingsConfigured = /^https?:\/\//i.test(MEETINGS_WORKER_URL);
 
+// Mic processing preferences (Round 39) - "Echo cancellation" and "Noise
+// suppression & auto volume" switches, both ON by default (Discord-style;
+// Zoom's equivalent is "Original sound"). A per-computer choice (depends on
+// whether THIS machine uses headphones), so localStorage, same as music.js.
+const MIC_PROCESSING_KEY = 'bko_micProcessing';
+export function getMicProcessing() {
+  try {
+    const v = JSON.parse(localStorage.getItem(MIC_PROCESSING_KEY) || 'null');
+    if (v && typeof v.echoCancellation === 'boolean' && typeof v.noiseSuppression === 'boolean') return v;
+  } catch (e) {}
+  return { echoCancellation: true, noiseSuppression: true };
+}
+export function setMicProcessing(p) {
+  try { localStorage.setItem(MIC_PROCESSING_KEY, JSON.stringify({ echoCancellation: !!p.echoCancellation, noiseSuppression: !!p.noiseSuppression })); } catch (e) {}
+}
+function micConstraints(micId) {
+  const p = getMicProcessing();
+  const c = { echoCancellation: p.echoCancellation, noiseSuppression: p.noiseSuppression, autoGainControl: p.noiseSuppression };
+  if (micId) c.deviceId = { exact: micId };
+  return c;
+}
+
 export function newMeetingId() {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   // Extremely unlikely fallback path (only if crypto.randomUUID is somehow
@@ -316,7 +338,7 @@ export async function startLocalSession(withCamera, deviceIds) {
   let audioStream = null, videoStream = null;
   try {
     audioStream = await navigator.mediaDevices.getUserMedia({
-      audio: (deviceIds && deviceIds.micId) ? { deviceId: { exact: deviceIds.micId } } : true,
+      audio: micConstraints(deviceIds && deviceIds.micId),
     });
   } catch (err) {
     throw new Error(describeMediaError(err, 'microphone'));
@@ -347,7 +369,7 @@ export async function startLocalSession(withCamera, deviceIds) {
 export async function switchDevice(session, kind, deviceId) {
   const constraints = kind === 'camera'
     ? { video: { deviceId: { exact: deviceId }, width: { ideal: 1280, max: 1280 }, height: { ideal: 720, max: 720 }, frameRate: { ideal: 24, max: 30 } } }
-    : { audio: { deviceId: { exact: deviceId } } };
+    : { audio: micConstraints(deviceId) };
   let newStream;
   try {
     newStream = await navigator.mediaDevices.getUserMedia(constraints);
@@ -356,6 +378,10 @@ export async function switchDevice(session, kind, deviceId) {
   }
   const newTrack = kind === 'camera' ? newStream.getVideoTracks()[0] : newStream.getAudioTracks()[0];
   const oldTrack = kind === 'camera' ? session.stream.getVideoTracks()[0] : session.stream.getAudioTracks()[0];
+  // Round 39, real privacy bug: a brand-new track is always enabled, so a
+  // MUTED person who switched mic (or toggled echo cancellation) went live
+  // without knowing - same for camera-off. Carry the old on/off state over.
+  newTrack.enabled = oldTrack ? oldTrack.enabled : true;
   const sender = session.pc.getSenders().find((s) => s.track && s.track.kind === newTrack.kind);
   if (sender) await sender.replaceTrack(newTrack);
   if (oldTrack) { session.stream.removeTrack(oldTrack); oldTrack.stop(); }
