@@ -18,8 +18,21 @@ function toSnapshot(row) {
 
 function applyFilters(q, filters) {
   filters.forEach((f) => {
-    if (f.op === '==') q = q.eq(f.field, f.value);
-    else if (f.op === '!=') q = q.neq(f.field, f.value);
+    // Real, confirmed bug (2026-09-24): postgrest-js's .eq()/.neq() just
+    // string-interpolate the value straight into the query
+    // (`eq.${value}`) - .eq(field, null) sends the literal text "eq.null",
+    // which PostgREST reads as comparing to the FOUR-CHARACTER STRING
+    // "null", not SQL NULL. That matches nothing, ever, not even rows that
+    // genuinely are null - confirmed by reading postgrest-js's own source,
+    // which explicitly documents this for .neq() ("does not include rows
+    // where column is NULL - use .is(column, null) instead") but the same
+    // string-interpolation applies to .eq() too. Real-world impact: any
+    // .where(field,'==',null) (e.g. inviting a host's whole team by
+    // teamId, when the host has no team) silently matched zero rows -
+    // reproduced live: an admin account with no team hosting an instant
+    // meeting invited nobody at all, with no error anywhere.
+    if (f.op === '==') q = f.value === null ? q.is(f.field, null) : q.eq(f.field, f.value);
+    else if (f.op === '!=') q = f.value === null ? q.not(f.field, 'is', null) : q.neq(f.field, f.value);
     else if (f.op === '<') q = q.lt(f.field, f.value);
     else if (f.op === '<=') q = q.lte(f.field, f.value);
     else if (f.op === '>') q = q.gt(f.field, f.value);

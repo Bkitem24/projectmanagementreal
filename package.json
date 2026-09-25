@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "upload-installer": "node scripts/upload-installer-to-drive.mjs",
+    "build-and-upload": "tauri build && node scripts/upload-installer-to-drive.mjs"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",

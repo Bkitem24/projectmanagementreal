@@ -95,6 +95,16 @@ let currentMoodFilter = null; // null = Mixed (every mood combined); otherwise o
 let currentTrack = null; // { id, name, size }
 let listeners = new Set();
 
+// Real bug: pausing or muting the player had no memory at all - every
+// reload (including the routine "was already clocked in" relaunch check)
+// called notifyClockedIn(), which just unconditionally called play(),
+// ignoring whatever the person had explicitly set last time. Persisted
+// here so a reload actually respects it instead of blowing it away.
+function savedPaused() { try { return localStorage.getItem('bko_musicPaused') === '1'; } catch (e) { return false; } }
+function savePaused(v) { try { localStorage.setItem('bko_musicPaused', v ? '1' : '0'); } catch (e) {} }
+function savedMuted() { try { return localStorage.getItem('bko_musicMuted') === '1'; } catch (e) { return false; } }
+function saveMuted(v) { try { localStorage.setItem('bko_musicMuted', v ? '1' : '0'); } catch (e) {} }
+
 function notify() { listeners.forEach((cb) => { try { cb(state()); } catch (e) {} }); }
 
 function state() {
@@ -170,6 +180,7 @@ export function initPlayer(_mountElId, signupMoods) {
     audioEl = new Audio();
     audioEl.preload = 'auto';
     audioEl.volume = 0.7;
+    audioEl.muted = savedMuted(); // respect a mute from before this reload
     audioEl.addEventListener('ended', () => loadRandom(true));
     audioEl.addEventListener('play', notify);
     audioEl.addEventListener('pause', notify);
@@ -195,6 +206,7 @@ export function initPlayer(_mountElId, signupMoods) {
 // playing element is a harmless no-op.
 export function notifyClockedIn() {
   if (!audioEl) return; // not configured, or player hasn't mounted yet
+  if (savedPaused()) return; // real bug fix - a reload used to ignore this and just autoplay regardless
   audioEl.play().catch(() => { armAutoplayOnFirstGesture(); });
 }
 
@@ -208,13 +220,13 @@ export function setFilter(moodKey) {
   loadRandom(wasPlaying);
 }
 
-export function play() { if (audioEl) audioEl.play().catch(() => {}); }
-export function pause() { if (audioEl) audioEl.pause(); }
+export function play() { savePaused(false); if (audioEl) audioEl.play().catch(() => {}); }
+export function pause() { savePaused(true); if (audioEl) audioEl.pause(); }
 export function toggle() { if (state().playing) pause(); else play(); }
 export function next() { loadRandom(true); }
 
-export function mute() { if (audioEl) { audioEl.muted = true; notify(); } }
-export function unmute() { if (audioEl) { audioEl.muted = false; notify(); } }
+export function mute() { saveMuted(true); if (audioEl) { audioEl.muted = true; notify(); } }
+export function unmute() { saveMuted(false); if (audioEl) { audioEl.muted = false; notify(); } }
 export function toggleMute() { if (state().muted) unmute(); else mute(); }
 export function setVolume(v) {
   if (!audioEl) return;

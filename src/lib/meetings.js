@@ -57,6 +57,7 @@ export function joinMeetingRoom(meetingId, myProfile, initialMeta, handlers) {
   var myMeta = Object.assign({ uid: myProfile.id, name: myProfile.name || '' }, initialMeta || {});
   var room = null;
   var leftBeforeReady = false;
+  var reconnectAttempt = 0; // presence-channel error/timeout/close recovery - see wireAndSubscribe's .subscribe() callback
 
   function pullableTracksFor(meta) {
     var list = [];
@@ -102,8 +103,29 @@ export function joinMeetingRoom(meetingId, myProfile, initialMeta, handlers) {
         });
       })
       .on('presence', { event: 'leave' }, function (payload) {
+        // A metadata-only update (updateMeta() re-tracking - toggling mic/
+        // camera/starting or stopping screen share) surfaces as a leave+join
+        // pair for the SAME key in Phoenix Presence, not just a join -
+        // confirmed by reading @supabase/phoenix's Presence.syncDiff: its
+        // joins loop runs before its leaves loop, so by the time onLeave
+        // fires for a re-track, that key's state already has the NEW meta
+        // merged in too, and onLeave's own "delete this key" only happens
+        // if metas end up empty - which they don't, for a re-track. Real bug
+        // this caused (2026-09-24, "the other user randomly disappeared
+        // from the call, but on their own end they were still on the
+        // call"): every leave was treated as a real departure, tearing down
+        // a still-present participant's tile/audio on every one of their
+        // mute/camera/screen-share toggles - and since `sync` sees their
+        // track key as already-pulled, it never re-pulls the video/audio to
+        // rebuild what onLeft just tore down, leaving an empty, silent tile.
+        // payload.currentPresences (what's still there for this key after
+        // the diff) is the disambiguator: empty means genuinely gone,
+        // non-empty means "still here, just updated."
+        var stillPresent = {};
+        (payload.currentPresences || []).forEach(function (meta) { if (meta && meta.uid) stillPresent[meta.uid] = true; });
         (payload.leftPresences || []).forEach(function (meta) {
           if (!meta || meta.uid === myProfile.id) return;
+          if (stillPresent[meta.uid]) return; // metadata re-track, not a real leave
           // Forget every track key for this session AND their screen
           // session, so if they rejoin (or restart screen share with a new
           // session id) it gets pulled fresh instead of being treated as
@@ -123,7 +145,32 @@ export function joinMeetingRoom(meetingId, myProfile, initialMeta, handlers) {
         if (handlers.onHostControl) handlers.onHostControl(msg.payload || {});
       })
       .subscribe(function (status) {
-        if (status === 'SUBSCRIBED') room.track(myMeta);
+        if (status === 'SUBSCRIBED') { reconnectAttempt = 0; room.track(myMeta); return; }
+        // Real, confirmed gap (2026-09-25, "screen share went black and
+        // restarting sharing/camera didn't fix it for the other person"):
+        // this callback only ever handled 'SUBSCRIBED' - if the channel
+        // hits 'CHANNEL_ERROR', 'TIMED_OUT', or 'CLOSED' (real Realtime
+        // states, e.g. from exactly the kind of long backgrounding + a
+        // device change a person switching tabs and plugging in
+        // headphones would cause), there was NO recovery at all: that
+        // person's OWN presence channel just stayed dead for the rest of
+        // the meeting. Since it's THEIR channel that's broken, nothing the
+        // sharer does on their end (toggling screen share/camera, which
+        // only affects the SHARER's own re-tracked metadata) could ever
+        // reach them - matching exactly what was reported. Now tears down
+        // and rebuilds the channel on any non-SUBSCRIBED terminal status,
+        // with backoff, same rebuild path already used for a stale
+        // pre-existing channel above.
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          if (leftBeforeReady) return;
+          reconnectAttempt++;
+          var delay = Math.min(1000 * Math.pow(2, reconnectAttempt - 1), 10000);
+          setTimeout(function () {
+            if (leftBeforeReady) return;
+            try { supabase.removeChannel(room); } catch (e) {}
+            wireAndSubscribe();
+          }, delay);
+        }
       });
   }
 
@@ -313,6 +360,44 @@ export async function switchDevice(session, kind, deviceId) {
   return newTrack;
 }
 
+// Borrowed from Cloudflare's own reference implementation for this same
+// SFU (github.com/cloudflare/orange, via its partytracks library -
+// resilientTrack$.ts) at Humayun's request after he pointed us at it. A
+// camera/mic track can go stale while this window sits backgrounded for a
+// while (device reclaimed by the OS, driver hiccup, etc.) with no event
+// firing to tell the app - the tab/window only finds out once it's back in
+// the foreground. Cloudflare's own client re-checks track health exactly
+// on that visibilitychange and silently reacquires the SAME device if it's
+// gone bad, rather than leaving the person mid-meeting with a frozen tile
+// and no idea why. Same idea here, scaled to this app's simpler needs (one
+// device, not a full priority-ordered device list).
+function isTrackHealthy(track) {
+  return !!track && track.readyState === 'live' && !track.muted;
+}
+export function startDeviceHealthWatch(session, onReacquired, onFailure) {
+  var checking = false;
+  function handler() {
+    if (document.visibilityState !== 'visible' || checking || !session || !session.pc) return;
+    checking = true;
+    Promise.resolve().then(async () => {
+      for (const kind of ['camera', 'mic']) {
+        const track = kind === 'camera' ? session.stream.getVideoTracks()[0] : session.stream.getAudioTracks()[0];
+        if (!track || isTrackHealthy(track)) continue;
+        const deviceId = track.getSettings && track.getSettings().deviceId;
+        if (!deviceId) continue;
+        try {
+          await switchDevice(session, kind, deviceId);
+          if (onReacquired) onReacquired(kind);
+        } catch (err) {
+          if (onFailure) onFailure(kind, err);
+        }
+      }
+    }).finally(() => { checking = false; });
+  }
+  document.addEventListener('visibilitychange', handler);
+  return function stop() { document.removeEventListener('visibilitychange', handler); };
+}
+
 // Screen/window/tab share, with system audio if the OS/browser offers it
 // AND the person ticks that checkbox in the OS's own share picker (not
 // every source supports it either - a bare window share commonly has no
@@ -338,12 +423,26 @@ export async function startScreenShareSession(opts) {
     stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: 15, max: 24 } },
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      // Explicit hint (Chromium-specific getDisplayMedia extension) that
+      // system/tab audio should actually be offered and captured, not just
+      // left to whatever this engine defaults to without it - cheap and
+      // can only help toward a report of "checked system audio, recording
+      // has none."
+      systemAudio: 'include',
     });
+    console.log('[meetings] screen share audio tracks:', stream.getAudioTracks().length, stream.getAudioTracks().map((t) => t.label));
   } catch (err) {
     throw new Error(describeMediaError(err, 'screen share'));
   }
+  const hadNoAudioTrack = stream.getAudioTracks().length === 0;
   if (opts && opts.hdrCompensate) stream = compensateHdrVideo(stream);
-  return publishSession(stream, (t) => (t.kind === 'video' ? 'screen' : 'screenAudio'));
+  const session = await publishSession(stream, (t) => (t.kind === 'video' ? 'screen' : 'screenAudio'));
+  // Surfaced to the caller (main.js) so it can warn immediately instead of
+  // the person only finding out there's no audio much later - real,
+  // documented Windows/Chromium limitation: sharing a single Window (not
+  // Entire Screen) never offers system audio at all, no error anywhere.
+  session.noSystemAudio = hadNoAudioTrack;
+  return session;
 }
 
 // HDR-display workaround (2026-09-30, Humayun: shared screen "appears
@@ -365,23 +464,69 @@ function compensateHdrVideo(stream) {
   if (!videoTrack) return stream;
   const settings = videoTrack.getSettings ? videoTrack.getSettings() : {};
   const width = settings.width || 1920, height = settings.height || 1080;
+  // Real bug, confirmed by direct reproduction (a <video> fed by
+  // captureStream() via srcObject and never attached to the document never
+  // actually starts decoding in this engine - play() just hangs forever,
+  // readyState stays 0, videoWidth stays 0 - so every drawImage() below was
+  // silently throwing and getting swallowed, leaving the canvas (and thus
+  // the whole compensated stream sent to everyone else) solid black. Fixed
+  // by actually attaching it to the DOM - off-screen (position:fixed,
+  // pushed off the left edge), NOT display:none (browsers withhold
+  // rendering from display:none elements too, same underlying problem).
   const videoEl = document.createElement('video');
   videoEl.srcObject = new MediaStream([videoTrack]);
   videoEl.muted = true;
   videoEl.playsInline = true;
+  videoEl.style.position = 'fixed';
+  videoEl.style.left = '-9999px';
+  videoEl.style.top = '0';
+  videoEl.style.width = '2px';
+  videoEl.style.height = '2px';
+  document.body.appendChild(videoEl);
   videoEl.play().catch(() => {});
   const canvas = document.createElement('canvas');
   canvas.width = width; canvas.height = height;
   const ctx = canvas.getContext('2d');
-  let running = true;
-  (function draw() {
-    if (!running) return;
+  // setInterval, not requestAnimationFrame - the person sharing their
+  // screen usually isn't looking at THIS window while they do it (that's
+  // the whole point of screen share), and Chromium suspends/heavily
+  // throttles rAF callbacks once a window's document goes hidden -
+  // wouldn't just slow the compensation down, it can stop it outright for
+  // as long as the app stays backgrounded, which reads as "still not
+  // compensated" from the far end. setInterval keeps running regardless of
+  // window visibility.
+  let drawTimer = setInterval(() => {
     ctx.filter = 'brightness(0.62) contrast(0.88) saturate(0.92)';
     try { ctx.drawImage(videoEl, 0, 0, width, height); } catch (e) {}
-    requestAnimationFrame(draw);
-  })();
-  videoTrack.addEventListener('ended', () => { running = false; });
+  }, 1000 / 15);
   const processed = canvas.captureStream(15);
+  // Second and third real bugs, both from the same cause: the published
+  // track is this canvas's own captureStream track, with NO lifecycle tie
+  // to the original screen-capture track in EITHER direction.
+  //   - Original ends (person clicks the browser/OS's native "Stop
+  //     sharing" control) but the canvas track just keeps going, so the
+  //     app's own vTrack.onended listener (wired to whichever track ends
+  //     up in the returned stream) never fires - "have to click the share
+  //     button again to actually stop it."
+  //   - Canvas track ends (person clicks the app's OWN stop-sharing
+  //     button, which just calls session.stream.getTracks().forEach(stop))
+  //     but the ORIGINAL getDisplayMedia track was never included in that
+  //     stream, so it just keeps capturing the screen in the background
+  //     indefinitely - a real resource leak, and the OS's own "you are
+  //     sharing your screen" indicator would never go away either.
+  // Wiring both directions closes the loop, with a shared idempotent
+  // cleanup so it doesn't matter which side triggers first.
+  let cleanedUp = false;
+  function cleanup() {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    clearInterval(drawTimer);
+    videoEl.remove();
+    videoTrack.stop();
+    processed.getVideoTracks().forEach((t) => t.stop());
+  }
+  videoTrack.addEventListener('ended', cleanup);
+  processed.getVideoTracks().forEach((t) => t.addEventListener('ended', cleanup));
   return new MediaStream([...processed.getVideoTracks(), ...stream.getAudioTracks()]);
 }
 
@@ -394,11 +539,52 @@ function describeMediaError(err, what) {
   return 'Could not start ' + what + ' - ' + (err && err.message ? err.message : String(err));
 }
 
+// Real bug, root-caused by comparing against Cloudflare's own reference
+// client for this same SFU (partytracks, via github.com/cloudflare/orange):
+// this used to just call setRemoteDescription/renegotiate and return,
+// leaving the CALLER (main.js) to figure out which incoming pc.ontrack
+// event belonged to which pull by assuming they'd fire in the exact order
+// pulls were requested (a FIFO queue, pendingPulls.shift()). That
+// assumption is false under real network conditions: pc.ontrack fires once
+// SRTP/ICE is actually ready for a track, which is timed independently of
+// when the pull's HTTP round-trip resolves - two pulls in quick succession
+// (e.g. someone's camera tile PLUS their screen share both need pulling)
+// can easily have their ontrack events arrive in a different order than
+// requested, silently misassigning a track name and audio/video stream to
+// the WRONG participant's tile, or leaving one blank - matching real
+// reports of a camera/screen-share appearing blank on the far end and mute
+// state taking a long time to visibly update. Cloudflare's own client
+// resolves this correctly by matching each pulled track's real `mid`
+// (which their /tracks/new response already returns - the worker was
+// discarding it, now forwards it) against pc.getTransceivers(), completely
+// order-independent. Same fix here: resolve and return the actual
+// MediaStreamTrack directly, so the caller never needs pc.ontrack/FIFO
+// guessing at all.
+function resolveTransceiver(pc, matches, timeoutMs) {
+  return new Promise(function (resolve, reject) {
+    var existing = pc.getTransceivers().find(matches);
+    if (existing && existing.receiver && existing.receiver.track) { resolve(existing.receiver.track); return; }
+    var timer = setTimeout(function () {
+      pc.removeEventListener('track', handler);
+      reject(new Error('Timed out waiting for the pulled track to attach.'));
+    }, timeoutMs || 8000);
+    function handler() {
+      var t = pc.getTransceivers().find(matches);
+      if (t && t.receiver && t.receiver.track) {
+        clearTimeout(timer);
+        pc.removeEventListener('track', handler);
+        resolve(t.receiver.track);
+      }
+    }
+    pc.addEventListener('track', handler);
+  });
+}
+
 // Identical to Connect's own pullRemoteTrack (see src/lib/connect.js for
 // the full explanation of the renegotiation handshake) - reimplemented
 // here rather than imported, on purpose, so Meetings and Connect share no
 // code path at runtime.
-export async function pullRemoteTrack(localSessionId, remoteSessionId, trackName, pc) {
+async function pullRemoteTrackOnce(localSessionId, remoteSessionId, trackName, pc) {
   const res = await authedFetch('/session/' + localSessionId + '/pull', {
     method: 'POST', body: JSON.stringify({ remoteSessionId, trackName }),
   });
@@ -415,6 +601,32 @@ export async function pullRemoteTrack(localSessionId, remoteSessionId, trackName
     if (!renegRes.ok) throw new Error('Could not complete renegotiation for "' + trackName + '" (' + renegRes.status + ')' + await describeWorkerError(renegRes));
   } else if (body.answer) {
     await pc.setRemoteDescription(body.answer);
+  }
+
+  if (body.mid) {
+    return resolveTransceiver(pc, function (t) { return t.mid === body.mid; });
+  }
+  // No mid came back (an older/unpatched worker deploy) - fall back to
+  // null and let the caller keep using its own FIFO guess for this one
+  // pull, rather than hard-failing a call that used to work.
+  return null;
+}
+// Borrowed from Cloudflare's own reference client for this SFU (partytracks
+// - its pull path wraps every pull in retryWithBackoff()) - a transient
+// blip pulling someone's track used to just fail once and give up
+// (console.error, and that participant's tile silently stays empty
+// forever). Three attempts with a short backoff gives a flaky connection a
+// real chance to recover instead of a permanent dead tile over one bad
+// request.
+export async function pullRemoteTrack(localSessionId, remoteSessionId, trackName, pc) {
+  const delays = [500, 1500];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await pullRemoteTrackOnce(localSessionId, remoteSessionId, trackName, pc);
+    } catch (err) {
+      if (attempt >= delays.length) throw err;
+      await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+    }
   }
 }
 

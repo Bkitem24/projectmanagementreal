@@ -136,9 +136,20 @@ export default {
           return cors(json({ error: 'Cloudflare Realtime remote track pull failed', detail }, 502));
         }
         const tracksBody = await tracksRes.json();
+        // mid (2026-09-24, real bug fix): Cloudflare's own /tracks/new
+        // response already tells us exactly which mid this pulled track
+        // landed on (tracksBody.tracks[0].mid) - forwarding it lets the
+        // client identify the right RTCRtpTransceiver directly instead of
+        // assuming pc.ontrack events fire in the same order tracks were
+        // requested, which real network jitter can and does violate (two
+        // renegotiations can easily have their ontrack events arrive out
+        // of order). Same approach Cloudflare's own reference client
+        // (partytracks, used by github.com/cloudflare/orange) takes.
+        const pulledMid = tracksBody.tracks && tracksBody.tracks[0] && tracksBody.tracks[0].mid;
         return cors(json({
           answer: tracksBody.sessionDescription,
           requiresRenegotiation: !!tracksBody.requiresImmediateRenegotiation,
+          mid: pulledMid || null,
         }));
       } catch (err) {
         return cors(json({ error: String(err) }, 500));

@@ -184,6 +184,19 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:6px;
    as "too small" alongside the general chat redesign below. */
 .episode-side-col{width:440px;flex:0 0 auto;}
 .episode-side-panel{position:sticky;top:20px;background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);box-shadow:var(--shadow);padding:20px;min-height:min(640px,calc(100vh - 40px));max-height:calc(100vh - 40px);display:flex;flex-direction:column;}
+/* Real bug (2026-09-24, "the discussion box has no end, the whole page just
+   keeps going down"): .episode-side-scroll's flex:1/min-height:0 only
+   actually caps its height when it's a DIRECT flex child of
+   .episode-side-panel (the flex column with max-height above) - but the
+   collapsible Discussion feature wraps it in #discussionBody, a plain,
+   non-flex <div>, breaking that chain. #discussionBody needs to be a flex
+   container itself (and take the remaining space) so the height limit
+   actually passes through to its child. Same [hidden]-vs-class-selector
+   specificity issue documented at .task-collab[hidden] above applies here
+   too - an id selector's display:flex would otherwise beat the browser's
+   own [hidden]{display:none}. */
+#discussionBody{display:flex;flex-direction:column;flex:1;min-height:0;}
+#discussionBody[hidden]{display:none;}
 .episode-side-scroll{flex:1;min-height:0;display:flex;flex-direction:column;}
 .episode-side-scroll .collab-list{flex:1;overflow-y:auto;}
 .episode-side-scroll .composer{flex:0 0 auto;}

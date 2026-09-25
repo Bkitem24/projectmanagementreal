@@ -7,6 +7,11 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    watch: {
+      // Without this, Vite's fs watcher trips over cargo's build output
+      // (e.g. a .lib file locked mid-write) and crashes with EBUSY on Windows.
+      ignored: ['**/src-tauri/**'],
+    },
   },
   build: {
     outDir: 'dist',

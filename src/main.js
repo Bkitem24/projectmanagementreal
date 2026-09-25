@@ -593,9 +593,39 @@ function logActivity(category, eventType, fields){
     var row = Object.assign({}, fields, {
       id: 'al_'+uid8(), category: category, eventType: eventType,
       actorUserId: myUid, actorRole: (myRoles&&myRoles[0])||null,
-      teamId: teamId, createdAt: new Date().toISOString()
+      // Real bug: a resolved teamId of null (the task's clientId missing,
+      // or that client itself having no teamId set) used to get written as
+      // a literal null - and since loadActivityList() filters with
+      // .where('teamId','==',teamId), a null-teamId row can never match
+      // ANY Team view, admin included, with no error anywhere to show it
+      // happened ("activities done on employee account don't reflect back
+      // in my activities nav"). Falling back to the actor's own team is a
+      // safe default - what they're doing overwhelmingly belongs to their
+      // own team regardless of what the client record says.
+      teamId: teamId || myTeamId || null, createdAt: new Date().toISOString()
     });
-    supabase.from('activityLog').insert(row).catch(function(err){ console.warn('[blue-kite-ops] activity log write failed:', err); });
+    // THE actual, definitive bug behind "activity log never updates",
+    // confirmed live by injecting an unhandledrejection listener into a
+    // real logged-in session and watching it fire the instant a task got
+    // checked off: `supabase.from(x).insert(row)` returns a
+    // PostgrestBuilder, which - confirmed by reading postgrest-js's own
+    // source - explicitly `implements PromiseLike<...>` and defines ONLY
+    // `.then()`, not the full Promise interface. Calling `.catch(...)`
+    // directly on it (as this line did) throws a synchronous
+    // `TypeError: ...insert(...).catch is not a function` BEFORE the
+    // network request is ever even attempted - not silently swallowed
+    // somewhere downstream, never sent at all. This has been broken since
+    // Activity Logs first shipped (schema_v25) - every single task
+    // completion, comment, reply, attachment and call has silently failed
+    // to log, the whole time, regardless of team/filter/null-teamId fixes
+    // (all real, legitimate fixes for OTHER gaps, just never reachable
+    // because this line always threw first). Fixed by using .then()'s
+    // second (rejection) argument instead of .catch() - the one method
+    // PromiseLike actually implements.
+    supabase.from('activityLog').insert(row).then(function(){}, function(err){
+      console.warn('[blue-kite-ops] activity log write failed:', err);
+      showToast('error', 'Could not log this activity - '+errMsg(err));
+    });
   }
   if('teamId' in fields) commit(fields.teamId);
   else clientTeamIdCached(fields.clientId).then(commit);
@@ -870,7 +900,22 @@ function route(){
   else if(hash==='/team') renderTeamSettings();
   else if(hash==='/admin') renderAdmin();
   else if(hash==='/workflows') renderWorkflows();
-  else if(hash==='/activity') renderActivity();
+  else if(hash==='/activity') {
+    // Real bug: the comment above activityDateRange/activityActorUid always
+    // claimed these "reset back to defaults on a fresh visit... rather
+    // than persisting", but nothing ever actually did that reset - they're
+    // plain globals that just kept whatever a click last set them to, for
+    // the rest of the session. Once you clicked an employee's name to
+    // filter "just this person" ANY time before, it stayed silently stuck
+    // on every later visit, hiding everyone else's activity - looks
+    // identical to "activity still isn't showing up" every single time.
+    // Fixed HERE (the router's actual navigation entry), not inside
+    // renderActivity() itself, since that function is also called
+    // directly by the in-page filter clicks (date range, category, the
+    // actor chip) which must NOT reset on every one of those.
+    activityDateRange = 'all'; activityActorUid = null; activityActorName = '';
+    renderActivity();
+  }
   else if(hash==='/meetings') renderMeetingsList();
   else if(mClient) renderClient(mClient[1]);
   else if(mEpisode) renderEpisode(mEpisode[1]);
@@ -2548,17 +2593,22 @@ function renderEpisode(episodeId){
             doneByUserId: checked ? myUid : null,
             doneAt: checked ? new Date().toISOString() : null
           }).then(function(){
-            if(!checked) return;
             var t = taskById[taskId];
             if(!t) return;
-            logActivity('task', 'task_item_done', { clientId: t.clientId, episodeId: t.episodeId, taskId: taskId, label: t.label });
+            // Real request: show which client/episode + deadline alongside
+            // the log entry (schema_v32's denormalized columns, same
+            // baked-in-at-generation values t.clientName/episodeTitle/
+            // dueDate already carry) - and log an unmark too, not just a
+            // mark-done, so undoing a completion is visible history too.
+            logActivity('task', checked?'task_item_done':'task_item_undone', { clientId: t.clientId, episodeId: t.episodeId, taskId: taskId, label: t.label, clientName: t.clientName, episodeTitle: t.episodeTitle, dueDate: t.dueDate });
+            if(!checked) return;
             // Whole-episode completion (Humayun's "every time the entire
             // task got completed" - in this app's own vocabulary, an
             // episode's checklist IS its "task", so this fires once the
             // LAST checklist item on it gets checked off).
             db.collection('tasks').where('episodeId','==',t.episodeId).get().then(function(snap){
               var allDone = snap.docs.every(function(d){ return d.id===taskId || d.data().done; });
-              if(allDone) logActivity('task', 'episode_completed', { clientId: t.clientId, episodeId: t.episodeId, label: t.episodeTitle||t.label });
+              if(allDone) logActivity('task', 'episode_completed', { clientId: t.clientId, episodeId: t.episodeId, label: t.episodeTitle||t.label, clientName: t.clientName, episodeTitle: t.episodeTitle, dueDate: t.dueDate });
             }).catch(function(){});
           }).catch(function(err){ cb.checked=!checked; showToast('error', errMsg(err)); });
         });
@@ -3704,10 +3754,10 @@ function renderBoardBody(box, tasks, depById, showingAll, liveStepByEpisodeId){
       db.doc('tasks/'+taskId).update({done:true, doneByUserId:myUid, doneAt:new Date().toISOString()}).then(function(){
         var t = tasks.filter(function(x){ return x._id===taskId; })[0];
         if(!t) return;
-        logActivity('task', 'task_item_done', { clientId: t.clientId, episodeId: t.episodeId, taskId: taskId, label: t.label });
+        logActivity('task', 'task_item_done', { clientId: t.clientId, episodeId: t.episodeId, taskId: taskId, label: t.label, clientName: t.clientName, episodeTitle: t.episodeTitle, dueDate: t.dueDate });
         db.collection('tasks').where('episodeId','==',t.episodeId).get().then(function(snap){
           var allDone = snap.docs.every(function(d){ return d.id===taskId || d.data().done; });
-          if(allDone) logActivity('task', 'episode_completed', { clientId: t.clientId, episodeId: t.episodeId, label: t.episodeTitle||t.label });
+          if(allDone) logActivity('task', 'episode_completed', { clientId: t.clientId, episodeId: t.episodeId, label: t.episodeTitle||t.label, clientName: t.clientName, episodeTitle: t.episodeTitle, dueDate: t.dueDate });
         }).catch(function(){});
       }).catch(function(err){ cb.checked=false; showToast('error', errMsg(err)); });
     });
@@ -4731,6 +4781,7 @@ function openAdminInviteModal(){
 // see the "ROLES ACROSS TEAMS" note near jobTitleRoles()).
 var ACTIVITY_EVENT_LABELS = {
   task_item_done: 'marked a task done',
+  task_item_undone: 'un-marked a task',
   episode_completed: 'completed the whole episode',
   comment: 'commented',
   reply: 'replied',
@@ -4820,11 +4871,16 @@ function loadActivityList(teamId, category){
       var verb = ACTIVITY_EVENT_LABELS[r.eventType] || r.eventType;
       var extra = (r.eventType==='call' && r.durationSec) ? ' ('+formatDurationShort(r.durationSec)+')' : '';
       var roleLabel = r.actorRole ? (roleOf(r.actorRole)||{}).label || r.actorRole : '';
+      // Real request: show which client/episode this is for, alongside the
+      // episode's own deadline (schema_v32's denormalized columns) - a
+      // task completion on its own didn't say what it even belonged to.
+      var context = [r.clientName, r.episodeTitle].filter(Boolean).join(' · ') + (r.dueDate ? ' · due '+fmtDate(r.dueDate) : '');
       // The actor chip doubles as a "filter to just this person" button -
       // clicking a name is the request's exact wording ("filter... by
       // clicking on name of the employee").
       return '<div class="roster-row"><button type="button" class="activity-actor-btn" data-uid="'+escapeHtml(r.actorUserId)+'" title="Show only this person\'s activity">'+profileChip(r.actorUserId)+'</button>'+
         '<div style="min-width:0;flex:1;"><div style="font-size:13px;">'+verb+(r.label?': <strong>'+escapeHtml(r.label)+'</strong>':'')+extra+'</div>'+
+        (context?'<div style="font-size:11.5px;color:var(--muted);">'+escapeHtml(context)+'</div>':'')+
         '<div style="font-size:11.5px;color:var(--muted);">'+fmtDateTime(r.createdAt)+(roleLabel?' · '+escapeHtml(roleLabel):'')+'</div></div>'+
         '</div>';
     }).join('');
@@ -4850,7 +4906,13 @@ function loadActivityList(teamId, category){
 var ICON_MIC = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1"/><line x1="12" y1="18" x2="12" y2="22"/></svg>';
 var ICON_MIC_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="2" x2="22" y2="22"/><path d="M9 9v3a3 3 0 0 0 4.6 2.55M15 9.34V5a3 3 0 0 0-5.94-.6"/><path d="M19 10v1a7 7 0 0 1-.11 1.23M5 10v1a7 7 0 0 0 11.6 5.29"/><line x1="12" y1="18" x2="12" y2="22"/></svg>';
 var ICON_CAM = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>';
-var ICON_CAM_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h1"/><path d="M23 7l-7 5 7 5V7z"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+// Same defect class as the hangup icon fixed just below (an incomplete
+// hand-drawn path, "looks half cut out" being literally accurate) - this
+// one just wasn't caught in that same round. The old body path started at
+// (16,16) and simply never drew the top edge back to its own start point.
+// Using the complete, verified Feather "video-off" path rather than
+// hand-patching it again.
+var ICON_CAM_OFF = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
 var ICON_SCREEN = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>';
 var ICON_RECORD = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="7"/></svg>';
 var ICON_SETTINGS = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2.2"/><circle cx="12" cy="12" r="2.2"/><circle cx="19" cy="12" r="2.2"/></svg>';
@@ -4882,17 +4944,29 @@ function formatMeetingCountdown(scheduledIso){
   return 'Meeting starts in '+minutes+' minute'+(minutes!==1?'s':'');
 }
 function renderMeetingWaitingScreen(meetingId, m, canHost){
+  // Real bug: "Add to calendar (.ics)" only ever showed up in the modal
+  // right after SCHEDULING a meeting - which only the person who created
+  // it ever sees. Everyone invited only ever lands here (via their
+  // notification link), which had no calendar option at all - not "hidden
+  // from invitees" so much as never built for them in the first place.
+  // Same downloadIcsForMeeting() helper, just wired to a screen invitees
+  // actually reach.
   paint(
     '<div class="page-head"><div><div class="eyebrow">Meeting</div><h1 class="page-title">'+escapeHtml(m.title)+'</h1></div></div>'+
     '<div class="empty-state" style="padding:60px 20px;"><strong id="meetingCountdownText" style="font-size:16px;">'+escapeHtml(formatMeetingCountdown(m.scheduledAt)||'Meeting starts soon')+'</strong>'+
     (canHost?'<div style="margin-top:16px;"><button type="button" class="btn btn-primary" id="startNowBtn" style="width:auto;">Start now</button></div>'
       :'<div style="margin-top:10px;color:var(--muted);">You\'ll join automatically once it\'s time, or as soon as the host starts it.</div>')+
+    (m.scheduledAt?'<div style="margin-top:16px;display:flex;gap:8px;justify-content:center;"><button type="button" class="btn btn-sm btn-primary" id="waitingGcalBtn" style="width:auto;">Add to Google Calendar</button><button type="button" class="btn btn-sm" id="waitingIcsBtn" style="width:auto;">Other calendar (.ics)</button></div>':'')+
     '</div>'
   );
   var startBtn = document.getElementById('startNowBtn');
   if(startBtn) startBtn.addEventListener('click', function(){
     db.doc('meetings/'+meetingId).update({status:'live', startedAt:new Date().toISOString()}).then(route).catch(function(err){ showToast('error', errMsg(err)); });
   });
+  var gcalBtn = document.getElementById('waitingGcalBtn');
+  if(gcalBtn) gcalBtn.addEventListener('click', function(){ openGoogleCalendarForMeeting(m.title, m.scheduledAt, meetingId); });
+  var icsBtn = document.getElementById('waitingIcsBtn');
+  if(icsBtn) icsBtn.addEventListener('click', function(){ downloadIcsForMeeting(m.title, m.scheduledAt, meetingId); });
   var interval = setInterval(function(){
     var el = document.getElementById('meetingCountdownText');
     if(!el){ clearInterval(interval); return; }
@@ -4901,7 +4975,7 @@ function renderMeetingWaitingScreen(meetingId, m, canHost){
     el.textContent = text;
   }, 15000);
   var unsub = db.doc('meetings/'+meetingId).onSnapshot(function(s){
-    if(s.exists && s.data().status==='live'){ clearInterval(interval); route(); }
+    if(s.exists && (s.data().status==='live' || s.data().status==='cancelled')){ clearInterval(interval); route(); }
   }, function(){});
   activeUnsubs.push(unsub);
   activeMeetingRoomCleanup = function(){ clearInterval(interval); };
@@ -4943,7 +5017,7 @@ function renderMeetingsList(){
     '<button type="button" class="btn btn-sm" id="scheduleMeetingBtn">+ Schedule</button>'+
     '<button type="button" class="btn btn-primary btn-sm" id="newInstantMeetingBtn" style="width:auto;">+ Start instant meeting</button></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Upcoming &amp; live</h2></div><div id="upcomingMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'+
-    '<div class="section"><div class="section-head"><h2 class="section-title">Past</h2></div><div id="pastMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'
+    '<div class="section"><div class="section-head"><h2 class="section-title">Past</h2><button type="button" class="btn btn-sm" id="clearPastMeetingsBtn" style="width:auto;">Clear past meetings</button></div><div id="pastMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'
   );
   if(!meetingsLib.meetingsConfigured){
     showToast('error','Meetings isn\'t set up yet - deploy worker-meetings and set VITE_MEETINGS_WORKER_URL (see README.md).');
@@ -4951,12 +5025,33 @@ function renderMeetingsList(){
   document.getElementById('recSettingsBtn').addEventListener('click', openRecordingSettingsModal);
   document.getElementById('newInstantMeetingBtn').addEventListener('click', createAndJoinInstantMeeting);
   document.getElementById('scheduleMeetingBtn').addEventListener('click', function(){ openScheduleMeetingModal(); });
+  // "Give me an option to clear past meetings history." Needed schema_v31's
+  // new DELETE policy first (meetings had none at all before - select/
+  // insert/update only, so RLS denied any delete unconditionally). Attempts
+  // every currently-listed past meeting; one this account isn't allowed to
+  // delete (not its host, not admin) just fails quietly and stays - same
+  // as any other bulk action in this app that some rows might not qualify
+  // for.
+  document.getElementById('clearPastMeetingsBtn').addEventListener('click', function(){
+    var box = document.getElementById('pastMeetingsBox');
+    var ids = box ? Array.prototype.map.call(box.querySelectorAll('[data-meeting-id]'), function(el){ return el.getAttribute('data-meeting-id'); }) : [];
+    if(!ids.length){ showToast('info','No past meetings to clear.'); return; }
+    if(!confirm('Clear '+ids.length+' past meeting'+(ids.length===1?'':'s')+'? This can\'t be undone.')) return;
+    Promise.all(ids.map(function(id){ return db.doc('meetings/'+id).delete().catch(function(){}); }))
+      .then(function(){ showToast('success','Past meetings cleared'); });
+  });
+
+  function refreshMeetingsLists(list){
+    // 'cancelled' (schema_v31) reads as past, same as 'ended' - a
+    // cancelled meeting never happened, it doesn't belong in "Upcoming".
+    renderMeetingsGroup('upcomingMeetingsBox', list.filter(function(m){ return m.status==='scheduled' || m.status==='live'; }), true);
+    renderMeetingsGroup('pastMeetingsBox', list.filter(function(m){ return m.status==='ended' || m.status==='cancelled'; }), false);
+    checkUpcomingMeetingReminders(list);
+  }
 
   var unsub = db.collection('meetings').orderBy('createdAt','desc').limit(100).onSnapshot(function(snap){
     var list = snap.docs.map(function(d){ var m=d.data(); m._id=d.id; return m; });
-    renderMeetingsGroup('upcomingMeetingsBox', list.filter(function(m){ return m.status!=='ended'; }), true);
-    renderMeetingsGroup('pastMeetingsBox', list.filter(function(m){ return m.status==='ended'; }), false);
-    checkUpcomingMeetingReminders(list);
+    refreshMeetingsLists(list);
   }, function(err){
     // Was a silent no-op before - a real query failure (e.g. the RLS
     // recursion bug schema_v28.sql fixes) left both boxes stuck on their
@@ -4966,18 +5061,47 @@ function renderMeetingsList(){
     var past = document.getElementById('pastMeetingsBox'); if(past) past.innerHTML = msg;
   });
   activeUnsubs.push(unsub);
+
+  // Real bug (2026-09-24, "when I start an instant meeting, it doesn't
+  // appear for the other user to join"): Supabase Realtime applies each
+  // subscriber's own RLS at the moment a row changes, and `meetings`'
+  // INSERT necessarily happens BEFORE this teammate's `meetingInvitees` row
+  // exists (that insert can only happen after, since it references the
+  // meeting's id) - so if they already had this page open, the `meetings`
+  // table's own change event was invisible to them at broadcast time, and
+  // nothing re-pushes that same row once they're actually invited a moment
+  // later. A brand-new invite IS its own visible change though - its RLS
+  // just checks "userId" = auth.uid(), true regardless of timing - so
+  // subscribing to that too and re-querying meetings whenever one lands
+  // closes the gap without needing anything server-side.
+  var unsubInvites = db.collection('meetingInvitees').where('userId','==',myUid).onSnapshot(function(){
+    db.collection('meetings').orderBy('createdAt','desc').limit(100).get().then(function(snap){
+      var list = snap.docs.map(function(d){ var m=d.data(); m._id=d.id; return m; });
+      refreshMeetingsLists(list);
+    }).catch(function(){});
+  });
+  activeUnsubs.push(unsubInvites);
 }
 function renderMeetingsGroup(boxId, list, isUpcoming){
   var box = document.getElementById(boxId);
   if(!box) return;
   box.innerHTML = list.length ? list.map(function(m){
-    var when = m.status==='live' ? 'Live now' : (m.scheduledAt ? fmtDateTime(m.scheduledAt) : fmtDateTime(m.createdAt));
-    return '<div class="roster-row"><div style="min-width:0;flex:1;"><div class="roster-name">'+escapeHtml(m.title)+
+    var when = m.status==='live' ? 'Live now' : m.status==='cancelled' ? 'Cancelled' : (m.scheduledAt ? fmtDateTime(m.scheduledAt) : fmtDateTime(m.createdAt));
+    var canCancel = isUpcoming && m.status==='scheduled' && meetingIsHost(m);
+    return '<div class="roster-row" data-meeting-id="'+escapeHtml(m._id)+'"><div style="min-width:0;flex:1;"><div class="roster-name">'+escapeHtml(m.title)+
       (m.status==='live'?' <span class="badge" style="background:var(--overdue-soft);color:var(--overdue);">Live</span>':'')+'</div>'+
       '<div class="roster-role">'+escapeHtml(when)+'</div></div>'+
+      (canCancel ? '<button type="button" class="icon-btn" data-cancel-meeting="'+escapeHtml(m._id)+'" title="Cancel this meeting">'+ICON_TRASH+'</button>' : '')+
       (isUpcoming ? '<a href="#/meeting/'+m._id+'" class="btn btn-sm btn-primary" style="width:auto;">'+(m.status==='live'?'Join':'Open')+'</a>' : '')+
       '</div>';
   }).join('') : '<div class="empty-state">Nothing here yet.</div>';
+  Array.prototype.forEach.call(box.querySelectorAll('[data-cancel-meeting]'), function(btn){
+    btn.addEventListener('click', function(){
+      var id = btn.getAttribute('data-cancel-meeting');
+      if(!confirm('Cancel this scheduled meeting? Invitees won\'t be notified automatically - let them know separately if needed.')) return;
+      db.doc('meetings/'+id).update({ status:'cancelled', endedAt: new Date().toISOString() }).catch(function(err){ showToast('error', errMsg(err)); });
+    });
+  });
 }
 // Best-effort "meeting starting soon" nudge - checked whenever the
 // Meetings list page loads/refreshes. A real "ping me even if I'm not
@@ -5037,7 +5161,17 @@ function createAndJoinInstantMeeting(){
     id:id, title:title, hostUserId:myUid, teamId:myTeamId, status:'live', isInstant:true,
     scheduledAt:null, startedAt:nowIso, endedAt:null, createdAt:nowIso
   }).then(function(){
-    return db.collection('profiles').where('teamId','==',myTeamId).get();
+    // Real bug, confirmed live: an admin account with no team assigned
+    // (myTeamId === null) hosting an instant meeting invited literally
+    // nobody - db.js's .where('teamId','==',null) is fixed now (see its
+    // own comment), but even fixed, that would only match OTHER teamless
+    // profiles, not an admin's actual team members, since "invite my
+    // team" doesn't mean anything for someone with no single team. An
+    // admin overseeing every team starting an instant meeting should
+    // reach everyone, not nobody - so no team filter at all in that case.
+    return myTeamId
+      ? db.collection('profiles').where('teamId','==',myTeamId).get()
+      : db.collection('profiles').get();
   }).then(function(snap){
     var teammateIds = snap.docs.map(function(d){ return d.id; }).filter(function(uid){ return uid!==myUid; });
     return Promise.all(teammateIds.map(function(uid){
@@ -5053,44 +5187,90 @@ function createAndJoinInstantMeeting(){
   }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 
-// Calendar reminders (2026-09-30, Humayun's ask): a real Google Calendar
-// API integration needs its own Google Cloud OAuth app/consent screen -
-// meaningful setup, similar to the Drive music service-account work - and
-// only helps people who use Google Calendar specifically. A .ics file is
-// the plain-text calendar-invite FORMAT every major calendar (Google,
-// Outlook, Apple) already knows how to import with one click, needs no
-// API/OAuth/Google Cloud project at all, and works for anyone regardless
-// of which calendar they use - the pragmatic choice here over a deeper
-// integration that would only serve part of the team anyway.
-function buildIcsForMeeting(title, scheduledIso, meetingId){
-  function fmt(d){ return d.toISOString().replace(/[-:]/g,'').split('.')[0]+'Z'; }
+// Calendar reminders (2026-09-30, Humayun's ask, revised 2026-09-24 after
+// his own better idea). A real Google Calendar API integration needs its
+// own Google Cloud OAuth app/consent screen - meaningful setup, similar to
+// the Drive music service-account work. But Google Calendar also has a
+// plain URL that opens its own "Add event" page pre-filled and ready for
+// one click ("render?action=TEMPLATE&..."), no API/OAuth/file download/
+// upload round-trip needed at all - opened in the system's default browser
+// via Tauri's opener plugin (openUrl - a DIFFERENT command/permission from
+// openPath, which only handles local files). This is now the primary,
+// one-click action. A downloadable .ics is kept as a secondary option for
+// anyone on Outlook/Apple Calendar instead of Google.
+function fmtIcsDate(d){ return d.toISOString().replace(/[-:]/g,'').split('.')[0]+'Z'; }
+function meetingCalendarWindow(scheduledIso){
   var start = new Date(scheduledIso);
-  var end = new Date(start.getTime() + 60*60*1000); // 1hr default block - editable by the person after importing, same as any calendar invite
+  var end = new Date(start.getTime() + 60*60*1000); // 1hr default block - editable after adding it, same as any calendar invite
+  return { start: start, end: end };
+}
+function openGoogleCalendarForMeeting(title, scheduledIso, meetingId){
+  var w = meetingCalendarWindow(scheduledIso);
+  var url = 'https://calendar.google.com/calendar/render?' + [
+    'action=TEMPLATE',
+    'text=' + encodeURIComponent(title),
+    'dates=' + fmtIcsDate(w.start) + '/' + fmtIcsDate(w.end),
+    'details=' + encodeURIComponent('Join from the Blue Kite Ops Meetings page: ' + location.origin + '/#/meeting/' + meetingId)
+  ].join('&');
+  import('@tauri-apps/plugin-opener').then(function(mod){
+    return mod.openUrl(url);
+  }).catch(function(){
+    window.open(url, '_blank'); // not running inside Tauri (e.g. this dev server in a plain browser tab)
+  });
+}
+function buildIcsForMeeting(title, scheduledIso, meetingId){
+  var w = meetingCalendarWindow(scheduledIso);
   return [
     'BEGIN:VCALENDAR','VERSION:2.0','PRODID:-//Blue Kite Ops//Meetings//EN','BEGIN:VEVENT',
-    'UID:'+meetingId+'@blue-kite-ops','DTSTAMP:'+fmt(new Date()),'DTSTART:'+fmt(start),'DTEND:'+fmt(end),
+    'UID:'+meetingId+'@blue-kite-ops','DTSTAMP:'+fmtIcsDate(new Date()),'DTSTART:'+fmtIcsDate(w.start),'DTEND:'+fmtIcsDate(w.end),
     'SUMMARY:'+title.replace(/[\r\n]+/g,' '),
     'DESCRIPTION:Join from the Blue Kite Ops Meetings page.',
     'END:VEVENT','END:VCALENDAR'
   ].join('\r\n');
 }
+// Real, confirmed bug (not a guess - checked against src-tauri/capabilities/
+// default.json directly): this used to call fs's writeTextFile, but only
+// fs:allow-write-file (the BINARY variant) is granted there - Tauri v2
+// gates every fs command separately, so writeTextFile was being silently
+// rejected by the ACL, which is exactly what "something went wrong" was.
+// Fixed by using writeFile with a UTF-8-encoded Uint8Array instead - the
+// same already-working pattern src/lib/r2.js's downloadProtectedFile uses,
+// rather than adding yet another fs permission for one text file.
 function downloadIcsForMeeting(title, scheduledIso, meetingId){
-  var blob = new Blob([buildIcsForMeeting(title, scheduledIso, meetingId)], { type:'text/calendar' });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url; a.download = title.replace(/[^a-z0-9]+/gi,'-').slice(0,60)+'.ics';
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  var filename = title.replace(/[^a-z0-9]+/gi,'-').slice(0,60)+'.ics';
+  var bytes = new TextEncoder().encode(buildIcsForMeeting(title, scheduledIso, meetingId));
+  Promise.all([
+    import('@tauri-apps/plugin-dialog').catch(function(){ return null; }),
+    import('@tauri-apps/plugin-fs').catch(function(){ return null; })
+  ]).then(function(mods){
+    var dialogMod = mods[0], fsMod = mods[1];
+    if(dialogMod && fsMod){
+      return dialogMod.save({ defaultPath: filename }).then(function(path){
+        if(!path) return; // cancelled
+        return fsMod.writeFile(path, bytes).then(function(){ showToast('success','Saved '+filename); });
+      });
+    }
+    var blob = new Blob([bytes], { type:'text/calendar' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+  }).catch(function(err){ showToast('error', errMsg(err)); });
 }
 function showMeetingScheduledModal(title, scheduledIso, meetingId){
   openModal('Meeting scheduled', '<div class="field-hint">"'+escapeHtml(title)+'" - '+escapeHtml(fmtDateTime(scheduledIso))+'. Everyone invited already got a notification - add it to your own calendar too if you\'d like a reminder there.</div>',
     function(){ closeModal(); }, 'Done');
   var actions = document.querySelector('.modal-actions');
   if(actions){
-    var btn = document.createElement('button');
-    btn.type = 'button'; btn.className = 'btn btn-sm'; btn.style.width = 'auto'; btn.textContent = 'Add to calendar (.ics)';
-    btn.addEventListener('click', function(){ downloadIcsForMeeting(title, scheduledIso, meetingId); });
-    actions.insertBefore(btn, actions.firstChild);
+    var icsBtn = document.createElement('button');
+    icsBtn.type = 'button'; icsBtn.className = 'btn btn-sm'; icsBtn.style.width = 'auto'; icsBtn.textContent = 'Other calendar (.ics)';
+    icsBtn.addEventListener('click', function(){ downloadIcsForMeeting(title, scheduledIso, meetingId); });
+    actions.insertBefore(icsBtn, actions.firstChild);
+    var gcalBtn = document.createElement('button');
+    gcalBtn.type = 'button'; gcalBtn.className = 'btn btn-sm btn-primary'; gcalBtn.style.width = 'auto'; gcalBtn.textContent = 'Add to Google Calendar';
+    gcalBtn.addEventListener('click', function(){ openGoogleCalendarForMeeting(title, scheduledIso, meetingId); });
+    actions.insertBefore(gcalBtn, actions.firstChild);
   }
 }
 
@@ -5167,6 +5347,14 @@ function openScreenShareOptionsModal(onProceed){
   var savedHdr = false; try{ savedHdr = localStorage.getItem('bko_hdrCompensate')==='1'; }catch(e){}
   openModal('Share your screen',
     '<div class="field-hint">If you plan to share audio (a video, music, etc.), use headphones if you can - sharing your speaker output back out is what causes the other person to hear an echo of their own voice, not your microphone.</div>'+
+    // Real, documented Windows/Chromium limitation, not something this app
+    // can work around: system-audio capture is only offered for "Entire
+    // Screen" (and a browser Tab, not applicable here) - picking "A
+    // Window" in the next dialog silently omits the audio checkbox
+    // entirely, no error shown anywhere. Confirmed as the likely cause of
+    // a real "no system audio" report where a specific window (not the
+    // whole screen) was almost certainly what got shared.
+    '<div class="field-hint" style="margin-top:8px;color:var(--overdue);">For system audio (a video/music playing) to be capturable at all, choose <strong>Entire Screen</strong> in the next dialog - Windows doesn\'t offer audio capture when sharing a single window, with no warning when it\'s missing.</div>'+
     '<div class="check-row" style="margin-top:10px;"><input type="checkbox" id="hdrCompCheck" name="hdr" '+(savedHdr?'checked':'')+'><label for="hdrCompCheck">My screen looks washed out/overly bright to others (HDR display) - try to compensate</label></div>',
     function(fd){
       var hdr = fd.get('hdr')==='on';
@@ -5203,10 +5391,12 @@ function renderMeetingRoom(meetingId){
   var iAmRecording = false;
   var leftAlready = false;
   var meetingUnsub = null;
+  var stopHealthWatch = null;
 
   function cleanup(){
     if(leftAlready) return;
     leftAlready = true;
+    if(stopHealthWatch) stopHealthWatch();
     if(iAmRecording && recorder){ recorder.stop().catch(function(){}); }
     if(roomHandle){ roomHandle.leave(); }
     meetingsLib.endSession(mainSession);
@@ -5232,6 +5422,11 @@ function renderMeetingRoom(meetingId){
     // write itself.
     if(m.status==='ended'){
       paint('<div class="empty-state"><strong>This meeting has ended</strong>'+(m.endedAt?fmtDateTime(m.endedAt)+'. ':'')+'Go back to <a href="#/meetings">Meetings</a> to see past meetings or start a new one.</div>');
+      activeMeetingRoomCleanup = null;
+      return;
+    }
+    if(m.status==='cancelled'){
+      paint('<div class="empty-state"><strong>This meeting was cancelled</strong>Go back to <a href="#/meetings">Meetings</a> to see past meetings or start a new one.</div>');
       activeMeetingRoomCleanup = null;
       return;
     }
@@ -5396,6 +5591,15 @@ function renderMeetingRoom(meetingId){
       ensureTile('me', (myProfile&&myProfile.displayName)||'You');
       setTileVideo('me', session.stream);
       updateTileName('me', 'You');
+      // Borrowed from Cloudflare's own Orange Meets reference client
+      // (its partytracks library) at Humayun's request - re-checks camera/
+      // mic health when this window comes back to the foreground and
+      // silently reacquires the same device if it went stale while
+      // backgrounded, instead of leaving a frozen/silent tile with no
+      // explanation.
+      stopHealthWatch = meetingsLib.startDeviceHealthWatch(mainSession,
+        function(kind){ showToast('info', (kind==='camera'?'Camera':'Microphone')+' reconnected'); },
+        function(kind, err){ console.warn('[meetings] could not reacquire '+kind+' after it went unhealthy:', err); });
 
       var nowIso = new Date().toISOString();
       var patch = { status:'live' };
@@ -5411,18 +5615,38 @@ function renderMeetingRoom(meetingId){
       myParticipantLogId = logId;
       supabase.from('meetingParticipantLogs').insert({ id: logId, meetingId: meetingId, userId: myUid, joinedAt: nowIso }).then(function(){});
 
+      // Real bug, root-caused against Cloudflare's own reference client for
+      // this SFU: pullRemoteTrack() used to just trigger the renegotiation
+      // and the ACTUAL track was picked up here via pc.ontrack, matched to
+      // a participant purely by assuming events fire in the same order
+      // pulls were requested (pendingPulls, a FIFO queue). That assumption
+      // doesn't hold under real network timing - a camera pull and a
+      // screen-share pull requested moments apart can have their ontrack
+      // events arrive in either order, silently misassigning a track to
+      // the wrong tile or leaving one blank. pullRemoteTrack now resolves
+      // and returns the actual MediaStreamTrack itself (matched by the
+      // pulled track's real `mid`, exactly like Cloudflare's own client
+      // does), so it's attached directly here with no event-order
+      // guessing at all. pc.ontrack is kept ONLY as a defense-in-depth
+      // fallback for the unlikely case pullRemoteTrack couldn't resolve a
+      // mid (see its own comment) - pendingPulls stays around for just
+      // that one fallback path.
+      function attachPulledTrack(uid, trackName, track){
+        var stream = new MediaStream([track]);
+        if(trackName==='mic') playRemoteAudio(uid, stream);
+        else if(trackName==='camera') setTileVideo(uid, stream);
+        else if(trackName==='screen'){
+          var meta = remoteMeta[uid];
+          showScreenShare(uid, (meta&&meta.name)||'Someone', stream);
+        } else if(trackName==='screenAudio'){
+          if(!audioEls['screen_'+uid]){ audioEls['screen_'+uid]=document.createElement('audio'); audioEls['screen_'+uid].autoplay=true; document.body.appendChild(audioEls['screen_'+uid]); }
+          audioEls['screen_'+uid].srcObject = stream;
+        }
+      }
       mainSession.pc.ontrack = function(ev){
         var item = pendingPulls.shift();
         if(!item) return;
-        if(item.trackName==='mic') playRemoteAudio(item.uid, ev.streams[0]);
-        else if(item.trackName==='camera') setTileVideo(item.uid, ev.streams[0]);
-        else if(item.trackName==='screen'){
-          var meta = remoteMeta[item.uid];
-          showScreenShare(item.uid, (meta&&meta.name)||'Someone', ev.streams[0]);
-        } else if(item.trackName==='screenAudio'){
-          if(!audioEls['screen_'+item.uid]){ audioEls['screen_'+item.uid]=document.createElement('audio'); audioEls['screen_'+item.uid].autoplay=true; document.body.appendChild(audioEls['screen_'+item.uid]); }
-          audioEls['screen_'+item.uid].srcObject = ev.streams[0];
-        }
+        attachPulledTrack(item.uid, item.trackName, ev.track);
       };
 
       roomHandle = meetingsLib.joinMeetingRoom(meetingId, { id: myUid, name: (myProfile&&myProfile.displayName)||'' }, {
@@ -5432,8 +5656,10 @@ function renderMeetingRoom(meetingId){
           remoteMeta[meta.uid] = meta;
           ensureTile(meta.uid, meta.name);
           updateTileName(meta.uid, meta.name);
-          pendingPulls.push({ uid: meta.uid, trackName: trackName });
-          return meetingsLib.pullRemoteTrack(mainSession.sessionId, sessionId, trackName, mainSession.pc);
+          return meetingsLib.pullRemoteTrack(mainSession.sessionId, sessionId, trackName, mainSession.pc).then(function(track){
+            if(track) attachPulledTrack(meta.uid, trackName, track);
+            else pendingPulls.push({ uid: meta.uid, trackName: trackName }); // fallback path only - see comment above
+          });
         },
         onMeta: function(uid, meta){
           remoteMeta[uid] = meta;
@@ -5514,7 +5740,9 @@ function renderMeetingRoom(meetingId){
       openScreenShareOptionsModal(function(opts){
         meetingsLib.startScreenShareSession(opts).then(function(session){
           screenSession = session;
+          if(session.noSystemAudio) showToast('info', 'No system audio was captured - on Windows, sharing a single window never offers audio. Stop and re-share, picking "Entire Screen" instead if you need sound.', { duration: 8000 });
           if(!micOn) session.stream.getAudioTracks().forEach(function(t){ t.enabled = false; }); // stay muted through a screen share started while already muted
+          if(iAmRecording && recorder) recorder.addAudioSource(session.stream); // screen share started mid-recording - wire its (system) audio in too
           showScreenShare('me', 'You', session.stream);
           if(roomHandle) roomHandle.updateMeta({ screenSessionId: session.sessionId });
           btn.classList.add('active');
@@ -5564,12 +5792,27 @@ function renderMeetingRoom(meetingId){
         }).catch(function(err){ recordBtn.disabled=false; showToast('error', errMsg(err)); });
         return;
       }
+      // Real bug: addAudioSource() only actually connects anything once
+      // this.audioCtx exists, which recorder.start() itself creates -
+      // calling it BEFORE start() (as this used to) silently no-ops every
+      // single call (a truthiness check on an audioCtx that doesn't exist
+      // yet), so nobody's mic ever made it into a recording no matter who
+      // was already in the call. Audio sources are now wired up AFTER
+      // start() resolves, once there's an actual audioCtx to connect to -
+      // including screen-share audio, which had no wiring to the recorder
+      // at all before this (a separate, real gap - "they don't capture
+      // system audio" wasn't a bug so much as a feature that was never
+      // built).
       recorder = new MeetingRecorder();
-      syncRecorderTiles();
-      if(mainSession) recorder.addAudioSource(mainSession.stream);
-      syncRecorderAudio();
-      recorder.start({ title: m.title }).then(function(){
+      recorder.start({
+        title: m.title,
+        onWriteError: function(err){ showToast('error', 'Recording may have stopped saving properly - '+errMsg(err)); }
+      }).then(function(){
         iAmRecording = true;
+        syncRecorderTiles();
+        if(mainSession) recorder.addAudioSource(mainSession.stream);
+        if(screenSession) recorder.addAudioSource(screenSession.stream);
+        syncRecorderAudio();
         recordBtn.classList.add('active');
         setRecBanner(true);
         if(roomHandle) roomHandle.updateMeta({ recording:true });
@@ -5590,9 +5833,18 @@ function renderMeetingRoom(meetingId){
 
     // If the host ends the meeting, every other participant's own page
     // needs to know - a plain onSnapshot on the meeting doc itself.
+    // Real bug: this used to skip redirecting anyone meetingIsHost() called
+    // true for - but that helper deliberately returns true for ANY admin
+    // (not just whoever actually clicked "End"), so if the account testing
+    // this was itself an admin, it never got kicked out, staying in the
+    // room "until they leave" on their own. The person who actually clicks
+    // End already navigates away in their own click handler right above -
+    // this listener should redirect EVERYONE else, admin or not, with no
+    // special case (a harmless no-op redirect for whoever just triggered it
+    // themselves, since they're already on their way to the same page).
     meetingUnsub = db.doc('meetings/'+meetingId).onSnapshot(function(s){
-      if(s.exists && s.data().status==='ended' && !meetingIsHost(s.data())){
-        showToast('info','The host ended this meeting');
+      if(s.exists && s.data().status==='ended'){
+        showToast('info','This meeting has ended');
         location.hash = '#/meetings';
       }
     }, function(){});

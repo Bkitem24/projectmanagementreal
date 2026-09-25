@@ -1,0 +1,16 @@
+-- Blue Kite Ops - schema v33 (2026-09-24)
+--
+-- Run this in the Supabase SQL editor. Safe to re-run. Independent of every
+-- other schema file. Fixes a real bug in schema_v32.sql - run this whether
+-- or not v32 already ran cleanly.
+--
+-- Bug: "due Invalid Date" in the Activity Log. Root cause: schema_v32.sql
+-- typed activityLog.dueDate as timestamptz, but the SOURCE columns
+-- (episodes.dueDate, tasks.dueDate - see schema.sql) are plain `date`, and
+-- this app's fmtDate() helper (src/main.js) expects the plain
+-- "YYYY-MM-DD" string a `date` column returns, parsed by splitting on '-'.
+-- Round-tripping a plain date THROUGH a timestamptz column reformats it to
+-- a full timestamp with a time/timezone part on the way back out
+-- ("2026-09-26T00:00:00+00:00"), which fmtDate()'s naive split mangles
+-- into NaN date parts. Fixed by matching the source columns' actual type.
+alter table public."activityLog" alter column "dueDate" type date using "dueDate"::date;
