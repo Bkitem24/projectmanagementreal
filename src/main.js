@@ -5017,7 +5017,7 @@ function renderMeetingsList(){
     '<button type="button" class="btn btn-sm" id="scheduleMeetingBtn">+ Schedule</button>'+
     '<button type="button" class="btn btn-primary btn-sm" id="newInstantMeetingBtn" style="width:auto;">+ Start instant meeting</button></div></div>'+
     '<div class="section"><div class="section-head"><h2 class="section-title">Upcoming &amp; live</h2></div><div id="upcomingMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'+
-    '<div class="section"><div class="section-head"><h2 class="section-title">Past</h2><button type="button" class="btn btn-sm" id="clearPastMeetingsBtn" style="width:auto;">Clear past meetings</button></div><div id="pastMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'
+    '<div class="section"><div class="section-head"><h2 class="section-title">Past</h2>'+(canManage()?'<button type="button" class="btn btn-sm" id="clearPastMeetingsBtn" style="width:auto;">Clear past meetings</button>':'')+'</div><div id="pastMeetingsBox"><div class="skeleton" style="height:60px;"></div></div></div>'
   );
   if(!meetingsLib.meetingsConfigured){
     showToast('error','Meetings isn\'t set up yet - deploy worker-meetings and set VITE_MEETINGS_WORKER_URL (see README.md).');
@@ -5025,14 +5025,14 @@ function renderMeetingsList(){
   document.getElementById('recSettingsBtn').addEventListener('click', openRecordingSettingsModal);
   document.getElementById('newInstantMeetingBtn').addEventListener('click', createAndJoinInstantMeeting);
   document.getElementById('scheduleMeetingBtn').addEventListener('click', function(){ openScheduleMeetingModal(); });
-  // "Give me an option to clear past meetings history." Needed schema_v31's
-  // new DELETE policy first (meetings had none at all before - select/
-  // insert/update only, so RLS denied any delete unconditionally). Attempts
-  // every currently-listed past meeting; one this account isn't allowed to
-  // delete (not its host, not admin) just fails quietly and stays - same
-  // as any other bulk action in this app that some rows might not qualify
-  // for.
-  document.getElementById('clearPastMeetingsBtn').addEventListener('click', function(){
+  // "Give me an option to clear past meetings history." Admin/manager-only
+  // since Round 39 (schema_v34): the button only renders for canManage(),
+  // and the database's own DELETE policy enforces the same rule (admin, or
+  // a manager of that meeting's Team), so hiding the button isn't the only
+  // guard. Attempts every currently-listed past meeting; one this account
+  // isn't allowed to delete just fails quietly and stays.
+  var clearPastBtn = document.getElementById('clearPastMeetingsBtn');
+  if(clearPastBtn) clearPastBtn.addEventListener('click', function(){
     var box = document.getElementById('pastMeetingsBox');
     var ids = box ? Array.prototype.map.call(box.querySelectorAll('[data-meeting-id]'), function(el){ return el.getAttribute('data-meeting-id'); }) : [];
     if(!ids.length){ showToast('info','No past meetings to clear.'); return; }
