@@ -290,6 +290,9 @@ export async function listMediaDevices() {
   return {
     cameras: devices.filter((d) => d.kind === 'videoinput'),
     mics: devices.filter((d) => d.kind === 'audioinput'),
+    // Output devices (Round 39) - only usable where HTMLMediaElement.setSinkId
+    // exists (Chromium/WebView2 yes; re-check for the macOS/WebKit build).
+    speakers: devices.filter((d) => d.kind === 'audiooutput'),
   };
 }
 

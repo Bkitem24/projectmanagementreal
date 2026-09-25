@@ -4922,6 +4922,56 @@ var ICON_SETTINGS = '<svg width="18" height="18" viewBox="0 0 24 24" fill="curre
 // X rather than risk another hand-drawn curve.
 var ICON_HANGUP = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
 
+// ---- Meetings audio output + mic diagnostics (Round 39) ----
+// Speaker choice is a per-computer convenience (which headset is plugged in
+// HERE), so localStorage is the right home - not the database.
+var MEETING_SPEAKER_KEY = 'bko_meetingSpeakerId';
+function savedSpeakerId(){ try { return localStorage.getItem(MEETING_SPEAKER_KEY) || ''; } catch(e){ return ''; } }
+function saveSpeakerId(id){ try { if(id) localStorage.setItem(MEETING_SPEAKER_KEY, id); else localStorage.removeItem(MEETING_SPEAKER_KEY); } catch(e){} }
+// Routes one <audio> element to the saved speaker. If that device is gone
+// (headset unplugged), fall back to the system default instead of going
+// silent.
+function applySpeaker(el){
+  if(!el || typeof el.setSinkId !== 'function') return Promise.resolve();
+  var id = savedSpeakerId();
+  return el.setSinkId(id).catch(function(err){
+    console.warn('[meetings] saved speaker unavailable, using default output:', err);
+    return el.setSinkId('').catch(function(){});
+  });
+}
+function playTestTone(sinkId){
+  var ctx = new AudioContext();
+  var ready = (sinkId && typeof ctx.setSinkId === 'function') ? ctx.setSinkId(sinkId) : Promise.resolve();
+  return ready.then(function(){
+    var osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.frequency.value = 660; gain.gain.value = 0.15;
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.onended = function(){ ctx.close(); };
+    osc.start(); osc.stop(ctx.currentTime + 0.6);
+  }, function(err){ ctx.close(); throw err; });
+}
+// Live level bar for the mic actually in use - makes "what is my mic
+// hearing?" visible (Round 39 #5: a headset adapter leaking playback into a
+// detached mic socket showed up as mystery system audio). Stops itself once
+// its bar leaves the DOM (modal closed), so callers can't leak it.
+function startMicMeter(track, barEl){
+  var ctx = new AudioContext();
+  var src = ctx.createMediaStreamSource(new MediaStream([track]));
+  var analyser = ctx.createAnalyser(); analyser.fftSize = 512;
+  src.connect(analyser);
+  var data = new Uint8Array(analyser.fftSize);
+  var stopped = false;
+  function stop(){ if(stopped) return; stopped = true; clearInterval(timer); try { src.disconnect(); } catch(e){} ctx.close(); }
+  var timer = setInterval(function(){
+    if(!document.body.contains(barEl)) return stop();
+    analyser.getByteTimeDomainData(data);
+    var peak = 0;
+    for(var i=0;i<data.length;i++){ var v = Math.abs(data[i]-128); if(v>peak) peak = v; }
+    barEl.style.width = Math.min(100, Math.round(peak/128*160)) + '%';
+  }, 80);
+  return stop;
+}
+
 function meetingIsHost(m){ return !!(m && (m.hostUserId===myUid || isAdmin())); }
 // Returns a human countdown string, or null once it's actually time (the
 // caller then proceeds straight into the real room instead of a waiting
@@ -5397,11 +5447,15 @@ function renderMeetingRoom(meetingId){
   var leftAlready = false;
   var meetingUnsub = null;
   var stopHealthWatch = null;
+  var onMeetingDeviceChange = null; // Round 39 - assigned once the local session is up
+  // Placeholder until Task 4 wires recording + logging - returns the new mic track.
+  function afterMicSwap(track){ return track; }
 
   function cleanup(){
     if(leftAlready) return;
     leftAlready = true;
     if(stopHealthWatch) stopHealthWatch();
+    if(onMeetingDeviceChange) navigator.mediaDevices.removeEventListener('devicechange', onMeetingDeviceChange);
     if(iAmRecording && recorder){ recorder.stop().catch(function(){}); }
     if(roomHandle){ roomHandle.leave(); }
     meetingsLib.endSession(mainSession);
@@ -5526,7 +5580,7 @@ function renderMeetingRoom(meetingId){
     // just needs to actually play).
     var audioEls = {};
     function playRemoteAudio(uid, stream){
-      if(!audioEls[uid]){ audioEls[uid] = document.createElement('audio'); audioEls[uid].autoplay = true; document.body.appendChild(audioEls[uid]); }
+      if(!audioEls[uid]){ audioEls[uid] = document.createElement('audio'); audioEls[uid].autoplay = true; document.body.appendChild(audioEls[uid]); applySpeaker(audioEls[uid]); }
       audioEls[uid].srcObject = stream;
       remoteStreamsForRecording[uid] = stream;
       syncRecorderAudio();
@@ -5612,6 +5666,29 @@ function renderMeetingRoom(meetingId){
         function(kind){ showToast('info', (kind==='camera'?'Camera':'Microphone')+' reconnected'); },
         function(kind, err){ console.warn('[meetings] could not reacquire '+kind+' after it went unhealthy:', err); });
 
+      // Round 39: tell people when their mic changes under them (unplugged
+      // headset, Windows switching the default device) instead of silently
+      // sending whatever the new device hears.
+      var lastMicLabel = (mainSession.stream.getAudioTracks()[0]||{}).label || '';
+      onMeetingDeviceChange = function(){
+        if(!mainSession) return;
+        var t = mainSession.stream.getAudioTracks()[0];
+        if(t && t.readyState === 'ended'){
+          meetingsLib.switchDevice(mainSession, 'mic', 'default').then(function(nt){
+            afterMicSwap(nt);
+            lastMicLabel = nt.label || '';
+            showToast('info', 'Your microphone was disconnected - now using: '+(nt.label||'default microphone'));
+          }).catch(function(err){ showToast('error', 'Microphone disconnected and no other microphone was found - '+errMsg(err)); });
+          return;
+        }
+        if(t && t.label && t.label !== lastMicLabel){
+          lastMicLabel = t.label;
+          showToast('info', 'Microphone is now: '+t.label);
+        }
+        Object.keys(audioEls).forEach(function(k){ applySpeaker(audioEls[k]); });
+      };
+      if(!leftAlready) navigator.mediaDevices.addEventListener('devicechange', onMeetingDeviceChange);
+
       var nowIso = new Date().toISOString();
       var patch = { status:'live' };
       if(!m.startedAt) patch.startedAt = nowIso;
@@ -5650,7 +5727,7 @@ function renderMeetingRoom(meetingId){
           var meta = remoteMeta[uid];
           showScreenShare(uid, (meta&&meta.name)||'Someone', stream);
         } else if(trackName==='screenAudio'){
-          if(!audioEls['screen_'+uid]){ audioEls['screen_'+uid]=document.createElement('audio'); audioEls['screen_'+uid].autoplay=true; document.body.appendChild(audioEls['screen_'+uid]); }
+          if(!audioEls['screen_'+uid]){ audioEls['screen_'+uid]=document.createElement('audio'); audioEls['screen_'+uid].autoplay=true; document.body.appendChild(audioEls['screen_'+uid]); applySpeaker(audioEls['screen_'+uid]); }
           audioEls['screen_'+uid].srcObject = stream;
         }
       }
@@ -5769,21 +5846,45 @@ function renderMeetingRoom(meetingId){
       if(!mainSession) return;
       var curMic = mainSession.stream.getAudioTracks()[0], curCam = mainSession.stream.getVideoTracks()[0];
       meetingsLib.listMediaDevices().then(function(res){
-        var micOptions = res.mics.map(function(d,i){ return '<option value="'+escapeHtml(d.deviceId)+'"'+((curMic&&curMic.getSettings().deviceId===d.deviceId)?' selected':'')+'>'+escapeHtml(d.label||'Microphone '+(i+1))+'</option>'; }).join('');
-        var camOptions = res.cameras.map(function(d,i){ return '<option value="'+escapeHtml(d.deviceId)+'"'+((curCam&&curCam.getSettings().deviceId===d.deviceId)?' selected':'')+'>'+escapeHtml(d.label||'Camera '+(i+1))+'</option>'; }).join('');
-        openModal('Camera & microphone',
-          '<div class="field"><label>Microphone</label><select name="micId">'+(micOptions||'<option value="">No microphones found</option>')+'</select></div>'+
-          '<div class="field"><label>Camera</label><select name="camId">'+(camOptions||'<option value="">No cameras found</option>')+'</select></div>',
+        function deviceOptions(list, curId, fallback){ return list.map(function(d,i){ return '<option value="'+escapeHtml(d.deviceId)+'"'+(curId===d.deviceId?' selected':'')+'>'+escapeHtml(d.label||fallback+' '+(i+1))+'</option>'; }).join(''); }
+        var micOptions = deviceOptions(res.mics, curMic && curMic.getSettings().deviceId, 'Microphone');
+        var camOptions = deviceOptions(res.cameras, curCam && curCam.getSettings().deviceId, 'Camera');
+        // Speaker picker only where the engine can actually route audio
+        // (setSinkId - WebView2 yes; the macOS build needs re-checking).
+        var canPickSpeaker = typeof HTMLMediaElement.prototype.setSinkId === 'function' && res.speakers.length > 0;
+        var spkOptions = deviceOptions(res.speakers, savedSpeakerId() || 'default', 'Speaker');
+        var html = [
+          '<div class="field"><label>Microphone</label><select name="micId">'+(micOptions||'<option value="">No microphones found</option>')+'</select>'+
+            '<div class="mic-meter"><div class="mic-meter-bar" id="micMeterBar"></div></div>'+
+            '<div class="field-hint">'+(curMic ? 'Now using: '+escapeHtml(curMic.label||'unknown microphone') : 'No microphone active')+(micOn?'':' (you\'re muted - unmute to see the level)')+'</div></div>',
+          canPickSpeaker ? '<div class="field"><label>Speaker / headphones</label><select name="spkId">'+spkOptions+'</select>'+
+            '<button type="button" class="btn btn-sm" id="testSpeakerBtn" style="width:auto;margin-top:6px;">Play test sound</button></div>' : '',
+          '<div class="field"><label>Camera</label><select name="camId">'+(camOptions||'<option value="">No cameras found</option>')+'</select></div>'
+          // Task 4 (Round 39) appends the audio-processing toggles here
+        ];
+        openModal('Audio & video', html.join(''),
           function(fd){
             setModalBusy(true);
-            var micId = fd.get('micId'), camId = fd.get('camId');
+            var micId = fd.get('micId'), camId = fd.get('camId'), spkId = fd.get('spkId');
+            if(canPickSpeaker && spkId !== null){
+              saveSpeakerId(spkId === 'default' ? '' : spkId);
+              Object.keys(audioEls).forEach(function(k){ applySpeaker(audioEls[k]); });
+            }
             Promise.all([
-              (micId && (!curMic || curMic.getSettings().deviceId!==micId)) ? meetingsLib.switchDevice(mainSession, 'mic', micId) : Promise.resolve(),
+              (micId && (!curMic || curMic.getSettings().deviceId!==micId)) ? meetingsLib.switchDevice(mainSession, 'mic', micId).then(afterMicSwap) : Promise.resolve(),
               (camId && (!curCam || curCam.getSettings().deviceId!==camId)) ? meetingsLib.switchDevice(mainSession, 'camera', camId) : Promise.resolve(),
             ]).then(function(){
               closeModal(); showToast('success','Devices updated');
             }).catch(function(err){ showModalError(errMsg(err)); });
           }, 'Save');
+        var meterBar = document.getElementById('micMeterBar');
+        if(meterBar && curMic) startMicMeter(curMic, meterBar);
+        var testBtn = document.getElementById('testSpeakerBtn');
+        if(testBtn) testBtn.addEventListener('click', function(){
+          var sel = document.querySelector('select[name="spkId"]');
+          var id = sel ? sel.value : '';
+          playTestTone(id === 'default' ? '' : id).catch(function(err){ showToast('error', 'Could not play on that device - '+errMsg(err)); });
+        });
       }).catch(function(err){ showToast('error', errMsg(err)); });
     });
     var recordBtn = document.getElementById('recordBtn');
