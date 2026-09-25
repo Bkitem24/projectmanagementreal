@@ -42,11 +42,11 @@ Built a real spike page (`src/react/SpikePage.jsx`) wired into the router at `#/
 
 Screenshots were viewed directly in the browser pane during this session (not saved as files - unlike Spike 1's native-window captures, there was no simple way to export these to disk).
 
-## Spike 4 - WhatsApp Business "coexistence" - AMBIGUOUS, not a clean go/no-go
+## Spike 4 - WhatsApp Business "coexistence" - RESOLVED (no); second number and Web session capture both partially working
 
 **Question:** Can Humayun keep using his WhatsApp Business phone app AND connect the same Pakistani number to our own app via the Cloud API, as a business self-building its own app rather than going through a Meta partner?
 
-**Research only this round** (web search + Meta's own developer docs) - the plan gates creating an actual Meta developer account on research saying a clear GO, and it didn't. **Status: needs Humayun's decision before any more work happens here.**
+**Answer, confirmed live: no.** Humayun created a real Meta app (Direct Developer path, "Integrate with API," not the Partner route) under his existing unverified Business Portfolio, and tried to add his real, already-in-use WhatsApp Business app number. Meta's own screen offered exactly two choices: **migrate this phone number** (destructive - the docs-research below already flagged this risk) or **disconnect it from the existing account** - no third option, no coexistence toggle, nothing preserving both. We stopped before disconnecting anything - his main number and all his real client conversations in the WhatsApp Business app are untouched. This settles the ambiguity the desk research below couldn't: for a Direct Developer app on an unverified account, self-serve Coexistence genuinely isn't offered.
 
 **Country:** Pakistan **is** a supported WhatsApp Business Platform market - found multiple Cloud-API-provider services (BSPs) explicitly operating there, and Pakistan appears in Meta's own per-country pricing tables (below). Not a blocker.
 
@@ -71,6 +71,24 @@ Screenshots were viewed directly in the browser pane during this session (not sa
 3. **Accept the trade-off** and use a second, API-only number instead of Coexistence - zero ambiguity, but a different number for clients.
 
 I'd lean toward option 1 first (cheap, fast, and Humayun already has his own developer instincts) unless he'd rather not spend the setup time and just wants a working answer now (option 2).
+
+---
+
+### Live session, same night: second number (official API) + WhatsApp Web session capture
+
+**Confirmed live: no business verification was needed to get this far.** Contrary to what "unverified" sounds like, an unverified Business Portfolio can still create an app, add a phone number, configure webhooks, and request messaging permissions - Meta's own UI lists "Business verification" as a separate, later step (Step 3), not a gate on Steps 1-2. Worth remembering: verification only matters for higher message-volume tiers and an approved display name, not for basic functionality.
+
+**Second, dedicated number - registered a real physical SIM (not a virtual/VoIP number) directly through the Cloud API flow (OTP + PIN), no phone app needed for that path:**
+- OTP verification succeeded. The final "Register" step then failed repeatedly with a generic "Registration failed" error, even after a 10-minute wait and trying a different PIN - **a real, unresolved issue**, no server-side error code visible to diagnose further from outside Meta's own system. Most likely explanation (not confirmed): SIM number reuse in Pakistan - carriers recycle numbers, and if this exact number had ANY prior WhatsApp registration (even from a previous owner), Meta's systems can block a fresh registration for a mandatory cooldown period, sometimes documented as several days, with no user-facing indication of which case applies. **Next step for Humayun: try again after 24+ hours, or contact Meta Business Help Center with the exact error if it's still stuck.**
+- **A real webhook was built and verified end-to-end** (`spike-wa/`, deployed to `blue-kite-ops-spike-wa.bluekiteops.workers.dev`) - Meta's real verification handshake reached it and succeeded (`hub.challenge` echoed back correctly), confirmed live in the Worker's own logs (`wrangler tail`), not just "no error shown." Logs sender + message type only, never content, matching the plan's privacy rule. The webhook subscription for the `messages` field was also completed in Meta's dashboard.
+- Never got to prove a real inbound message reaching the webhook, since the number itself never finished registering - that's next up once the SIM registration issue clears.
+
+**WhatsApp Web session capture** (same honest, no-evasion-engineering approach as the Slack spike - real QR pairing, no automation of detection-evasion) - built `src-tauri/src/wa_web_spike.rs`, opens `web.whatsapp.com` in its own window:
+- **Real QR pairing worked.** Humayun scanned it with the WhatsApp Business app on the same fresh SIM (installed and registered normally through the Play Store app first, a separate step from the failing Cloud API registration above - and a real constraint worth remembering: **a single number can be on the Cloud API OR have a normal app account for WhatsApp Web capture, not both** - same underlying conflict as the Coexistence question above, just self-inflicted this time instead of Meta blocking it). Once paired, the real chat list loaded with genuine content (contact previews, timestamps, end-to-end encryption notices).
+- **A real, unresolved problem found: chat history did not survive an app restart.** Closed the app, reopened, opened the WhatsApp Web window again - it was still logged in (no QR re-scan needed, so the actual session/pairing DID persist correctly via the webview's own normal storage) - but the chat list showed **zero chats**, even after waiting about a minute with the phone confirmed powered on. Ruled out a stale/duplicate browser tab (checked the real target list, only one legitimate `web.whatsapp.com` page existed). Two live theories, neither confirmed: (a) the app was force-killed (`taskkill /F`) rather than closed normally the first time, which may have interrupted WhatsApp Web's local IndexedDB write mid-transaction, corrupting the local cache it needs to avoid a full resync; (b) a fresh device link's first full history resync may simply take meaningfully longer than the ~1 minute tested, even with the phone reachable. **Not resolved this session** - real follow-up work before Phase A can rely on this mechanism at all, since "reads reliably after any restart" is the whole point of it.
+- Confirms the architecture note from the plan: WhatsApp Web has no simple external API like Slack's - any real read/send implementation has to run scripts *inside* that live page against WhatsApp's own internal client code (the same approach open-source tools like `whatsapp-web.js` use), not simple `invoke()`-and-done calls from Rust. Not attempted this round - out of scope for tonight, and this restart issue needs solving first regardless.
+
+**Recommendation, updated:** for Phase A, the second-number Cloud API path is the one to keep building on once the registration issue clears (real webhook already proven working) - it's the officially-sanctioned, least fragile option. WhatsApp Web session capture is a real, working proof-of-concept for the "keep everything on one existing number" want, but has a real open reliability question (history sync after restart) that needs solving before depending on it, and would need meaningfully more engineering (driving WhatsApp's internal client code, not a plain API) than the Slack or Gmail spikes needed.
 
 ## Spike 3 - Gmail IMAP/SMTP via app password - PASS
 
