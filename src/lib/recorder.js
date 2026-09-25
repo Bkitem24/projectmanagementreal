@@ -250,13 +250,26 @@ export class MeetingRecorder {
     try { await this.audioCtx.close(); } catch (e) {}
     this.fileHandle = null;
     if (this.mimeType && this.mimeType.indexOf('mp4') > -1) {
-      await fixMp4Durations(path).catch((err) => console.warn('[meetings] could not fix up recording duration metadata (non-fatal - file is still fully playable, just may show no duration in some players):', err));
+      // Round 39: convert Chromium's fragmented MP4 into a regular MP4 so
+      // Windows' own Media Player plays and seeks it (src-tauri/src/mp4fix.rs).
+      // The converter never touches the file unless it fully parsed first;
+      // if it fails, fall back to the older duration-only patch below.
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const report = await invoke('mp4_defragment', { path });
+        console.log('[meetings] recording converted to a regular MP4:', report);
+      } catch (err) {
+        console.warn('[meetings] regular-MP4 conversion failed, using duration-only fallback:', err);
+        await fixMp4Durations(path).catch((e) => console.warn('[meetings] duration fallback also failed (file still plays in VLC):', e));
+      }
     }
     return path;
   }
 }
 
-// Real, evidence-based fix for "the recording plays like a live stream,
+// FALLBACK ONLY since Round 39 - the real fix is the native regular-MP4
+// conversion (mp4_defragment) in stop() above; this runs only if that fails.
+// Original note: fix for "the recording plays like a live stream,
 // no total duration shown" - confirmed by parsing an actual recorded
 // file's raw bytes (2026-09-25): Chromium's fragmented-MP4 muxer writes a
 // CORRECT top-level movie duration (the mvhd box), but the PER-TRACK
@@ -329,7 +342,10 @@ async function fixMp4Durations(path) {
         if (tkhd) {
           const v = buf[tkhd.bodyStart];
           // tkhd's duration is in the MOVIE's own timescale (same units as mvhd) - a direct copy, no conversion.
-          if (v === 1) patches.push({ offset: tkhd.bodyStart + 36, size: 8, value: movieDuration });
+          // v1 duration sits at body offset 28 (version/flags 4 + creation 8 +
+          // modification 8 + track_ID 4 + reserved 4). Was 36 until Round 39 -
+          // that wrote into reserved bytes and never fixed this field.
+          if (v === 1) patches.push({ offset: tkhd.bodyStart + 28, size: 8, value: movieDuration });
           else if (v === 0) patches.push({ offset: tkhd.bodyStart + 20, size: 4, value: movieDuration });
         }
         const mdia = findChild(p + 8, trakEnd, 'mdia');

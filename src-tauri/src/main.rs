@@ -5,6 +5,7 @@
 // system-wide while an employee is clocked in via TimeLog.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod mp4fix;
 mod timelog;
 
 // Launch-on-Windows-startup (Phase 2.5 batch A / A-fix, 2026-09-26/27):
@@ -56,6 +57,8 @@ fn main() {
             timelog::timelog_capture_screenshot,
             timelog::timelog_listener_error,
             timelog::timelog_seconds_idle,
+            // Round 39: Meetings recordings -> regular MP4 (src/mp4fix.rs)
+            mp4fix::mp4_defragment,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");

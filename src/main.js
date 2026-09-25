@@ -5914,6 +5914,7 @@ function renderMeetingRoom(meetingId){
     if(recordBtn) recordBtn.addEventListener('click', function(){
       if(iAmRecording){
         recordBtn.disabled = true;
+        showToast('info','Finalizing recording…');
         recorder.stop().then(function(path){
           iAmRecording = false;
           recordBtn.disabled = false;
