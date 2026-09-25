@@ -153,6 +153,14 @@ fn parse_moof(moof_start: u64, body: &[u8], tracks: &mut [Track]) -> Result<(), 
                 let gap = (dts - t.next_dts).min(u32::MAX as u64) as u32;
                 if let Some(last) = t.samples.last_mut() { last.duration = last.duration.saturating_add(gap); }
                 t.next_dts = dts;
+            } else if dts < t.next_dts {
+                // Overlap: the previous fragment's last sample was estimated too long.
+                // Shorten it (never below 1 tick) - the fragment's own start time wins.
+                if let Some(last) = t.samples.last_mut() {
+                    let cut = (t.next_dts - dts).min(last.duration.saturating_sub(1) as u64) as u32;
+                    last.duration -= cut;
+                    t.next_dts -= cut as u64;
+                }
             }
         }
         let mut cursor = base;
@@ -459,6 +467,109 @@ mod tests {
         let o = Command::new("ffprobe").args(args).arg(p).output().ok()?;
         if !o.status.success() { return None; }
         Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+    }
+
+    // Review finding: fragment start times (tfdt) are authoritative. The
+    // ffmpeg-made fixture has a 4-tick OVERLAP at its 2nd video fragment;
+    // ignoring overlaps (only fixing gaps) shifts every later timestamp and,
+    // over a 3-hour meeting, drifts audio vs video. Every packet's decode
+    // timestamp must survive conversion exactly.
+    #[test]
+    fn packet_timestamps_identical_after_conversion() {
+        for name in FIXTURES {
+            let orig = fixture_copy(name, "ts-orig");
+            let fixed = fixture_copy(name, "ts-fixed");
+            defragment_in_place(&fixed).unwrap();
+            for stream in ["v:0", "a:0"] {
+                let args = ["-v", "error", "-select_streams", stream, "-show_entries", "packet=dts", "-of", "csv=p=0"];
+                let Some(before) = probe(&orig, &args) else { eprintln!("ffprobe not on PATH - skipping"); return; };
+                let after = probe(&fixed, &args).unwrap();
+                // csv rows can carry trailing side-data columns (e.g. "2022310,") - compare the dts field only
+                let dts = |s: &str| s.split(',').next().unwrap_or("").trim().to_string();
+                let (b, a): (Vec<String>, Vec<String>) = (before.lines().map(dts).collect(), after.lines().map(dts).collect());
+                assert_eq!(b.len(), a.len(), "{} {} packet count", name, stream);
+                if let Some(i) = (0..b.len()).find(|&i| b[i] != a[i]) {
+                    panic!("{} {} first dts mismatch at packet {}: {} vs {}", name, stream, i, b[i], a[i]);
+                }
+            }
+        }
+    }
+
+    fn video_trak_body(moov_body: &[u8]) -> Vec<u8> {
+        for k in children(moov_body).unwrap().iter().filter(|k| &k.typ == b"trak") {
+            let tk = children(k.body).unwrap();
+            let mk = children(find(&tk, b"mdia").unwrap().body).unwrap();
+            if &find(&mk, b"hdlr").unwrap().body[8..12] == b"vide" { return k.body.to_vec(); }
+        }
+        panic!("no video track")
+    }
+
+    fn top_box_body(path: &Path, typ: &[u8; 4], last: bool) -> Vec<u8> {
+        let mut f = File::open(path).unwrap();
+        let len = f.metadata().unwrap().len();
+        let (mut pos, mut found) = (0, None);
+        while let Some(h) = read_hdr(&mut f, pos, len).unwrap() {
+            if &h.typ == typ { found = Some(h); if !last { break; } }
+            pos = h.start + h.size;
+        }
+        read_body(&mut f, &found.unwrap()).unwrap()
+    }
+
+    // For each video traf, in file order: (file offset of its tfdt value, tfdt version, tfdt value, sample count)
+    fn video_frags(path: &Path, vid: u32) -> Vec<(u64, u8, u64, u32)> {
+        let mut f = File::open(path).unwrap();
+        let len = f.metadata().unwrap().len();
+        let (mut pos, mut out) = (0, vec![]);
+        while let Some(h) = read_hdr(&mut f, pos, len).unwrap() {
+            if &h.typ == b"moof" {
+                let body = read_body(&mut f, &h).unwrap();
+                for traf in children(&body).unwrap().iter().filter(|c| &c.typ == b"traf") {
+                    let kids = children(traf.body).unwrap();
+                    if be32(find(&kids, b"tfhd").unwrap().body, 4).unwrap() != vid { continue; }
+                    let tfdt = find(&kids, b"tfdt").unwrap();
+                    let ver = tfdt.body[0];
+                    let value = if ver == 1 { be64(tfdt.body, 4).unwrap() } else { be32(tfdt.body, 4).unwrap() as u64 };
+                    let off = h.start + h.header_len + (tfdt.raw.as_ptr() as u64 - body.as_ptr() as u64) + 8 + 4;
+                    let count: u32 = kids.iter().filter(|k| &k.typ == b"trun").map(|k| be32(k.body, 4).unwrap()).sum();
+                    out.push((off, ver, value, count));
+                }
+            }
+            pos = h.start + h.size;
+        }
+        out
+    }
+
+    // Review finding: a fragment's own start time (tfdt) is authoritative. If
+    // the previous fragment's last sample was estimated too LONG (an
+    // overlap), it must be shortened - otherwise every later timestamp
+    // shifts and a 3-hour meeting drifts audio vs video.
+    #[test]
+    fn fragment_start_times_win_over_estimated_durations() {
+        let p = fixture_copy("rec-frag-moof.mp4", "overlap");
+        let vid = track_id_and_timescale(&video_trak_body(&top_box_body(&p, b"moov", false))).unwrap().0;
+        let frags = video_frags(&p, vid);
+        let (off, ver, value, _) = frags[2];
+        let target = value - 3; // plant a 3-tick overlap before video fragment #2
+        {
+            let mut f = OpenOptions::new().write(true).open(&p).unwrap();
+            f.seek(SeekFrom::Start(off)).unwrap();
+            if ver == 1 { f.write_all(&target.to_be_bytes()).unwrap(); } else { f.write_all(&(target as u32).to_be_bytes()).unwrap(); }
+        }
+        defragment_in_place(&p).unwrap();
+        let trak = video_trak_body(&top_box_body(&p, b"moov", true));
+        let tk = children(&trak).unwrap();
+        let mk = children(find(&tk, b"mdia").unwrap().body).unwrap();
+        let nk = children(find(&mk, b"minf").unwrap().body).unwrap();
+        let sk = children(find(&nk, b"stbl").unwrap().body).unwrap();
+        let stts = find(&sk, b"stts").unwrap().body;
+        let mut durations = vec![];
+        for i in 0..be32(stts, 4).unwrap() as usize {
+            let (count, delta) = (be32(stts, 8 + i * 8).unwrap(), be32(stts, 12 + i * 8).unwrap());
+            durations.extend(std::iter::repeat(delta as u64).take(count as usize));
+        }
+        let before: usize = frags[..2].iter().map(|f| f.3 as usize).sum();
+        let start_of_frag2 = frags[0].2 + durations[..before].iter().sum::<u64>();
+        assert_eq!(start_of_frag2, target, "converted timeline must follow the fragment's own start time");
     }
 
     #[test]

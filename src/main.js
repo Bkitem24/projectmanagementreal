@@ -5457,7 +5457,16 @@ function renderMeetingRoom(meetingId){
   function afterMicSwap(track){
     console.log('[meetings] mic swapped', track && track.label, 'enabled:', track && track.enabled, track && track.getSettings && track.getSettings());
     if(track && iAmRecording && recorder) recorder.addAudioSource(new MediaStream([track]));
+    watchMicEnded(track);
     return track;
+  }
+  // A physically unplugged mic fires its track's own 'ended' event; the
+  // separate navigator 'devicechange' event can arrive before OR after it,
+  // so both trigger the same fallback check (track.stop() by our own code
+  // never fires 'ended', so switching devices can't loop back into this).
+  var micFallbackInFlight = false;
+  function watchMicEnded(track){
+    if(track) track.addEventListener('ended', function(){ if(onMeetingDeviceChange) onMeetingDeviceChange(); });
   }
 
   function cleanup(){
@@ -5678,26 +5687,26 @@ function renderMeetingRoom(meetingId){
         },
         function(kind, err){ console.warn('[meetings] could not reacquire '+kind+' after it went unhealthy:', err); });
 
-      // Round 39: tell people when their mic changes under them (unplugged
-      // headset, Windows switching the default device) instead of silently
-      // sending whatever the new device hears.
-      var lastMicLabel = (mainSession.stream.getAudioTracks()[0]||{}).label || '';
+      // Round 39: when a device is plugged/unplugged, re-route speakers and,
+      // if the mic itself was disconnected, fall back to the default mic and
+      // SAY so - instead of going silent, or silently sending whatever the
+      // new device hears.
+      watchMicEnded(mainSession.stream.getAudioTracks()[0]);
       onMeetingDeviceChange = function(){
-        if(!mainSession) return;
-        var t = mainSession.stream.getAudioTracks()[0];
-        if(t && t.readyState === 'ended'){
-          meetingsLib.switchDevice(mainSession, 'mic', 'default').then(function(nt){
-            afterMicSwap(nt);
-            lastMicLabel = nt.label || '';
-            showToast('info', 'Your microphone was disconnected - now using: '+(nt.label||'default microphone'));
-          }).catch(function(err){ showToast('error', 'Microphone disconnected and no other microphone was found - '+errMsg(err)); });
-          return;
-        }
-        if(t && t.label && t.label !== lastMicLabel){
-          lastMicLabel = t.label;
-          showToast('info', 'Microphone is now: '+t.label);
-        }
+        if(!mainSession || leftAlready) return;
+        // Every time, not only when the mic is fine: a USB headset is usually
+        // BOTH the mic and the speaker, so unplugging it also kills the saved
+        // speaker - applySpeaker falls back to the default output.
         Object.keys(audioEls).forEach(function(k){ applySpeaker(audioEls[k]); });
+        var t = mainSession.stream.getAudioTracks()[0];
+        if(!t || t.readyState !== 'ended' || micFallbackInFlight) return;
+        micFallbackInFlight = true; // one unplug fires several events - switch once
+        meetingsLib.switchDevice(mainSession, 'mic', 'default').then(function(nt){
+          afterMicSwap(nt);
+          showToast('info', 'Your microphone was disconnected - now using: '+(nt.label||'default microphone'));
+        }).catch(function(err){
+          showToast('error', 'Microphone disconnected and no other microphone was found - '+errMsg(err));
+        }).then(function(){ micFallbackInFlight = false; });
       };
       if(!leftAlready) navigator.mediaDevices.addEventListener('devicechange', onMeetingDeviceChange);
 
