@@ -1,0 +1,73 @@
+/* Phase A - Tailwind entry point for the React/shadcn pages living alongside
+   the existing vanilla pages. Full preflight (matches shadcn's own
+   default/expectations) - confirmed SAFE for every current page in Spike 2
+   (docs/superpowers/specs/2026-09-25-phase-a-spike-results.md): every
+   heading in main.js carries an explicit-font-size class (.page-title,
+   .section-title) or sits inside a sized context (.panel, .modal-head), and
+   there's no bare <ul> anywhere today. FRAGILE, not accident-proof: any
+   FUTURE bare <h1>-<h6> or <ul> added without realizing preflight is active
+   will silently shrink / lose its bullets. Keep that in mind during the
+   page-by-page migration.
+
+   Theme variables below are shadcn/ui's standard "neutral" base-color
+   tokens (same names/values `shadcn init` would generate) - written by hand
+   because the CLI's own init hangs on an interactive re-install prompt in
+   this environment (confirmed in Spike 2) - use `shadcn add <component>`
+   (non-interactive, works fine) for new components instead of `init`. */
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-destructive: var(--destructive);
+  --radius-lg: var(--radius);
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+}

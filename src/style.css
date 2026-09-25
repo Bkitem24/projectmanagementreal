@@ -1,3 +1,10 @@
+/* Phase A - Tailwind import at the TOP of this file on purpose: style.css's
+   own rules below come later in source order, so they win the cascade over
+   Tailwind's preflight reset for anything they explicitly style - this is
+   WHY Spike 2 found every current page safe under full preflight. Keep this
+   import first if this file ever gets reorganized. */
+@import "./tailwind.css";
+
 /* ==========================================================================
    Blue Kite Ops - design system v2
    Palette: light blue gradients (brand/chrome) + white/black (surfaces/ink)
@@ -85,10 +92,16 @@
 *{box-sizing:border-box;}
 html,body{height:100%;margin:0;}
 body{
-  background:
+  /* Phase A: transparent so Windows 11 Mica shows through behind the
+     sidebar and any gaps (see src-tauri/tauri.conf.json's windowEffects).
+     #main below stays solid so page content keeps its own readable
+     background - confirmed working this way in Spike 1. Old gradient kept
+     commented in case Mica ever needs to be disabled/reverted. */
+  background: transparent;
+  /* background:
     radial-gradient(1200px 560px at 10% -10%, rgba(47,111,237,.09), transparent 60%),
     radial-gradient(900px 480px at 100% 0%, rgba(226,148,31,.05), transparent 55%),
-    var(--paper);
+    var(--paper); */
   color:var(--ink);font-family:var(--font-body);
   transition:background-color .25s ease,color .25s ease;
 }
@@ -160,7 +173,7 @@ select{background:var(--surface);border:1px solid var(--line);border-radius:6px;
 .notif-row.unread{background:var(--blue-soft);border-color:var(--blue);}
 .notif-msg{font-size:13px;line-height:1.4;}
 .notif-time{font-size:11px;color:var(--muted);margin-top:2px;}
-#main{flex:1;min-width:0;height:100vh;overflow-y:auto;scroll-behavior:smooth;}
+#main{flex:1;min-width:0;height:100vh;overflow-y:auto;scroll-behavior:smooth;background:var(--paper);}
 #app{max-width:1200px;margin:0 auto;padding:34px 30px 90px;}
 #app.anim{animation:viewIn .32s var(--ease);}
 @keyframes viewIn{from{opacity:0;transform:translateY(8px);}to{opacity:1;transform:translateY(0);}}

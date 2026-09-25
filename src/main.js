@@ -234,12 +234,30 @@ function syncNativeTitleBarTheme(mode){
     win.setTheme(theme).catch(function(){});
   });
 }
+// Phase A / Mica: the static "mica" effect in tauri.conf.json only follows
+// WINDOWS' own dark-mode setting, not the app's own theme toggle - a real
+// finding from Spike 1 (docs/superpowers/specs/2026-09-25-phase-a-spike-
+// results.md). Explicitly switching to micaLight/micaDark at runtime here
+// makes it follow the app's toggle instead. NOTE: Spike 1 also found that
+// calling setEffects() at runtime made PrintWindow-based screenshots go
+// blank afterward - unconfirmed whether that's a real visual bug or just a
+// screenshot-tool artifact, since the app itself kept responding fine
+// throughout. Watch for this on a real device; fall back to leaving the
+// static "mica" config alone (remove this call) if it turns out real.
+function syncMicaEffect(mode){
+  getNativeWindow().then(function(win){
+    if(!win || typeof win.setEffects !== 'function') return;
+    var isDark = mode==='dark' || (mode!=='light' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    win.setEffects({ effects: [isDark ? 'micaDark' : 'micaLight'] }).catch(function(){});
+  });
+}
 function applyTheme(mode){
   var root = document.documentElement;
   if(mode==='light' || mode==='dark') root.setAttribute('data-theme', mode);
   else root.removeAttribute('data-theme');
   try{ localStorage.setItem('bko_theme', mode||''); }catch(e){}
   syncNativeTitleBarTheme(mode);
+  syncMicaEffect(mode);
 }
 function initTheme(){
   var saved = ''; try{ saved = localStorage.getItem('bko_theme')||''; }catch(e){}
