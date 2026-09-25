@@ -403,34 +403,34 @@ export function startDeviceHealthWatch(session, onReacquired, onFailure) {
 // every source supports it either - a bare window share commonly has no
 // audio track at all, which is normal, not an error).
 //
-// echoCancellation/noiseSuppression on the AUDIO constraint (2026-09-30,
-// Humayun: "voice keeps echoing... despite my microphone being muted"):
-// system-audio capture is a completely separate signal path from the
-// microphone, and does NOT get the same acoustic echo cancellation the
-// mic does by default - so muting the mic does nothing about it. This is
-// what's actually happening: sharing "system audio" sends whatever's
-// playing through the sharer's OWN speakers (the other person's voice,
-// a YouTube video, anything) straight back out - if the sharer is on
-// speakers rather than headphones, the other person ends up hearing
-// their own voice echoed back a moment later. Chromium does support
-// requesting echo cancellation on a captured display audio track;
-// asking for it here can only help, though headphones on the sharer's
-// end is the real fix - see the confirm() prompt in main.js's screen-
-// share handler, which asks about exactly this before turning it on.
+// Shared audio echo (Round 39, see punch list): "Entire Screen + system
+// audio" records everything this PC plays. Two things used to loop back
+// into it - the other participants' voices played by this app, and the
+// sharer's own unmuted preview of the capture (now muted in main.js's
+// showScreenShare). restrictOwnAudio (standard constraint, confirmed
+// supported by the Chromium 153 WebView2 runtime this app ships on) keeps
+// this app's own playback out of the capture. Voice filters (echo
+// cancellation / noise suppression / auto gain) are turned OFF here: they
+// exist for a voice through a mic and turn music/video sound watery and
+// "echoey" - Meet/Zoom send shared audio untouched too. Engines that
+// don't know a constraint just ignore it (the future macOS/WebKit build).
 export async function startScreenShareSession(opts) {
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: 15, max: 24 } },
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        restrictOwnAudio: true,
+      },
       // Explicit hint (Chromium-specific getDisplayMedia extension) that
-      // system/tab audio should actually be offered and captured, not just
-      // left to whatever this engine defaults to without it - cheap and
-      // can only help toward a report of "checked system audio, recording
-      // has none."
+      // system/tab audio should actually be offered in the share picker.
       systemAudio: 'include',
     });
-    console.log('[meetings] screen share audio tracks:', stream.getAudioTracks().length, stream.getAudioTracks().map((t) => t.label));
+    const shareAudio = stream.getAudioTracks()[0];
+    console.log('[meetings] screen share audio:', shareAudio ? { label: shareAudio.label, settings: shareAudio.getSettings() } : 'none (window share, or box unticked)');
   } catch (err) {
     throw new Error(describeMediaError(err, 'screen share'));
   }

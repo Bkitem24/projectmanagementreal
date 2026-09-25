@@ -5340,13 +5340,18 @@ function openScheduleMeetingModal(){
 // Shown right before actually calling getDisplayMedia - covers two of
 // Humayun's 2026-09-30 reports in one small step: the "voice keeps
 // echoing" issue (a headphones nudge - see startScreenShareSession's own
-// comment for why muting the mic doesn't help) and the "appears extremely
+// comment, updated in Round 39) and the "appears extremely
 // bright" HDR issue (an opt-in workaround, remembered per device so it's
 // not re-asked every single share once set).
 function openScreenShareOptionsModal(onProceed){
   var savedHdr = false; try{ savedHdr = localStorage.getItem('bko_hdrCompensate')==='1'; }catch(e){}
   openModal('Share your screen',
-    '<div class="field-hint">If you plan to share audio (a video, music, etc.), use headphones if you can - sharing your speaker output back out is what causes the other person to hear an echo of their own voice, not your microphone.</div>'+
+    // Round 39: the app now keeps its own playback out of the capture
+    // (restrictOwnAudio) and never plays the capture back itself, so the
+    // old "your speakers echo their voice back" loop is gone - but on open
+    // speakers the MIC still hears the shared sound, so everyone gets it
+    // twice, a moment apart. Headphones are still the right advice.
+    '<div class="field-hint">If you plan to share audio (a video, music, etc.), use headphones if you can - on speakers your microphone also hears the shared sound, so people get it twice.</div>'+
     // Real, documented Windows/Chromium limitation, not something this app
     // can work around: system-audio capture is only offered for "Entire
     // Screen" (and a browser Tab, not applicable here) - picking "A
@@ -5539,6 +5544,12 @@ function renderMeetingRoom(meetingId){
       var screenTile = document.createElement('div');
       screenTile.className = 'meeting-tile screen-tile';
       var v = document.createElement('video');
+      // Always muted: for the sharer this element holds the raw captured
+      // system audio - playing it out loud fed it straight back into the
+      // "Entire Screen + system audio" capture (a real feedback loop = the
+      // echo reported in Round 39). Remote screen audio has its own <audio>
+      // element (attachPulledTrack's 'screenAudio' branch), so nothing is lost.
+      v.muted = true;
       v.autoplay = true; v.playsInline = true; v.srcObject = stream;
       screenTile.appendChild(v);
       var label = document.createElement('div');
@@ -5710,13 +5721,11 @@ function renderMeetingRoom(meetingId){
     document.getElementById('micBtn').addEventListener('click', function(){
       if(!mainSession) return;
       var next = !micOn;
+      // Mic only. Shared screen audio is independent on purpose (Round 39) -
+      // same as Meet/Zoom: muting yourself never silences what you're
+      // sharing. (Tying them together is why shared audio "only worked with
+      // the mic on".)
       mainSession.stream.getAudioTracks().forEach(function(t){ t.enabled = next; });
-      // Muting used to only touch the mic session's own audio track - if
-      // screen sharing with system audio is active, that's a completely
-      // separate outgoing audio track (screenAudio) that "mute" silently
-      // did nothing about. Mute now covers both, matching what someone
-      // actually expects "mute" to mean.
-      if(screenSession) screenSession.stream.getAudioTracks().forEach(function(t){ t.enabled = next; });
       updateMicBtn(next);
       if(roomHandle) roomHandle.updateMeta({ micOn: next });
     });
@@ -5741,7 +5750,6 @@ function renderMeetingRoom(meetingId){
         meetingsLib.startScreenShareSession(opts).then(function(session){
           screenSession = session;
           if(session.noSystemAudio) showToast('info', 'No system audio was captured - on Windows, sharing a single window never offers audio. Stop and re-share, picking "Entire Screen" instead if you need sound.', { duration: 8000 });
-          if(!micOn) session.stream.getAudioTracks().forEach(function(t){ t.enabled = false; }); // stay muted through a screen share started while already muted
           if(iAmRecording && recorder) recorder.addAudioSource(session.stream); // screen share started mid-recording - wire its (system) audio in too
           showScreenShare('me', 'You', session.stream);
           if(roomHandle) roomHandle.updateMeta({ screenSessionId: session.sessionId });
