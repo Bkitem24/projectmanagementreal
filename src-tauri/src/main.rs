@@ -53,31 +53,13 @@ mod embedded_webview;
 
 fn main() {
     tauri::Builder::default()
-        .manage(embedded_webview::EmbeddedWebviews(std::sync::Mutex::new(std::collections::HashMap::new())))
+        .manage(embedded_webview::EmbedsInFlight(std::sync::Mutex::new(std::collections::HashSet::new())))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         // Added 2026-09-30 for Meetings recording's "Open folder" button
         // (src/lib/recorder.js's revealInFolder) - the official Tauri v2
         // way to open/reveal a file in the OS's own file explorer.
         .plugin(tauri_plugin_opener::init())
-        // Phase B follow-up (2026-09-26): explicitly closes every embedded
-        // child webview (src/embedded_webview.rs) before the app is
-        // allowed to exit - a real "app won't close" hang was observed
-        // live with an embedded webview open, and Tauri's default shutdown
-        // may not know to tear down an "unstable"-feature child webview on
-        // its own.
-        .setup(|app| {
-            use tauri::Manager;
-            if let Some(window) = app.get_webview_window("main") {
-                let handle = app.handle().clone();
-                window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { .. } = event {
-                        embedded_webview::close_all_embedded(&handle);
-                    }
-                });
-            }
-            Ok(())
-        })
         .invoke_handler(tauri::generate_handler![
             timelog::timelog_start,
             timelog::timelog_stop,

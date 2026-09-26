@@ -1,56 +1,40 @@
-// Client Communications - embedded real web pages (2026-09-26 follow-up).
-// Replaces this round's earlier approach (a separate top-level window per
-// channel, src-tauri/src/whatsapp_web.rs and gmail_web.rs, both removed) -
-// live testing found those windows rendered fully blank and wouldn't
-// respond to being closed. Embedding hit the exact same symptom (blank,
-// and now the MAIN window itself wouldn't close either) - this round's
-// fix targets two concrete, confirmed-plausible causes rather than
-// guessing again:
+// Client Communications - real Gmail/WhatsApp/Slack pages embedded inside
+// the main window as child webviews (Tauri's multiwebview support,
+// `Window::add_child`, gated behind the "unstable" Cargo feature).
 //
-// 1. LOGICAL vs PHYSICAL pixels on an unusual multi-monitor setup. This
-//    machine's main window sits at a genuinely odd virtual-desktop
-//    position (observed live: rect -8,-8 to 3448,1400, spanning two
-//    monitors) - exactly the kind of layout where a Logical-to-Physical
-//    conversion bug in an "unstable"/experimental API (Tauri's own
-//    multiwebview support) could place a child webview off-screen or at
-//    zero size while it's still genuinely alive and even loading content
-//    correctly. Fixed by computing PHYSICAL pixels ourselves in JS
-//    (devicePixelRatio) and using PhysicalPosition/PhysicalSize here,
-//    removing any ambiguity about which scale factor Tauri applies
-//    internally for this code path.
-// 2. The app-close hang. Tauri's default shutdown may not know to tear
-//    down "unstable" child webviews on its own - if the underlying
-//    WebView2 child process for a genuinely stuck/loading embed never
-//    reports itself as closable, the whole app could hang waiting on it.
-//    Fixed by tracking every embedded label in app state and explicitly
-//    closing each one when the main window's close is requested (wired
-//    up in main.rs's .setup()), before the app is allowed to exit.
-//
-// Diagnostics: on_page_load now writes to a real file (not stdout, which
-// is invisible for a double-clicked GUI app with no attached console) -
-// %TEMP%\bko-embed-log.txt - so a real failure leaves a trace this round,
-// where the previous round's blank screenshot gave no signal at all. That
-// log is what caught the real bug below: add_child logged as called, hit
-// no error branch, yet a live Win32 EnumWindows/EnumChildWindows check
-// showed NO trace of any embedded webview at all - `add_child` returns
-// the new `Webview` by value, and this code was discarding it (`?`
-// propagates the Result but the success value was never bound to
-// anything). Nothing else was holding a reference, so it was dropped -
-// and, evidently, torn down - the instant this function returned, before
-// it ever got a chance to load. Fixed by keeping every embedded webview's
-// actual handle alive in app state for as long as the app runs, not just
-// its label.
-use std::collections::HashMap;
+// ROOT CAUSE of every blank/unclosable symptom this round (confirmed
+// 2026-09-26): these commands used to be synchronous (`pub fn`). Tauri
+// runs sync commands on the MAIN thread, and creating a webview from
+// there deadlocks on Windows - WebView2's controller creation waits in a
+// nested message pump for a callback only the outer event loop can
+// deliver (wry#583, tauri#4121; Tauri's own docs say window/webview
+// creation in a command must be async). Evidence from the live app: the
+// "creating child webview" log line appeared exactly ONCE per launch even
+// though the frontend calls this every 500ms - the first call never
+// returned, every later call queued behind it, no page ever started
+// loading, and the close button stopped working (closing needs the same
+// stuck thread). Windows didn't flag the window as "hung" because the
+// nested pump keeps processing basic messages. The earlier separate-
+// window attempt (whatsapp_web.rs/gmail_web.rs) failed the exact same way
+// for the exact same reason - both were sync too - while Slack's original
+// login window worked in the Phase A spike because open_slack_login
+// happened to be async. Keep every command here `async`.
+use std::collections::HashSet;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Mutex;
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, Webview, Wry};
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
-pub struct EmbeddedWebviews(pub Mutex<HashMap<String, Webview<Wry>>>);
+// Labels whose add_child is in flight. The frontend re-sends its rect
+// every 500ms, and WebView2 creation can take longer than that - without
+// this, a second call would try to create a duplicate with the same label.
+pub struct EmbedsInFlight(pub Mutex<HashSet<String>>);
 
+// %TEMP%\bko-embed-log.txt - stdout is invisible for a double-clicked GUI
+// app, and this log is what exposed the deadlock above.
 fn log_line(line: &str) {
     let path = std::env::temp_dir().join("bko-embed-log.txt");
     if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(path) {
@@ -58,8 +42,11 @@ fn log_line(line: &str) {
     }
 }
 
+// x/y/width/height arrive in PHYSICAL pixels (EmbeddedWebview.jsx
+// multiplies by devicePixelRatio), relative to the main window's client
+// area.
 #[tauri::command]
-pub fn embed_webview(
+pub async fn embed_webview(
     app: AppHandle,
     label: String,
     url: String,
@@ -78,58 +65,45 @@ pub fn embed_webview(
         return Ok(());
     }
 
-    // add_child is defined on the raw Window, not WebviewWindow (which
-    // wraps a Window + its own default Webview but doesn't Deref to it) -
-    // get_window (not get_webview_window) is the one that actually exposes
-    // it.
-    let window = app
-        .get_window(MAIN_WINDOW_LABEL)
-        .ok_or("main window not found")?;
-    let parsed_url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
-    let log_label = label.clone();
-    log_line(&format!("[embed:{}] creating child webview at physical ({}, {}) size ({}, {}) url={}", label, x, y, width, height, url));
-    let mut builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
-        .on_page_load(move |_webview, payload| {
-            match payload.event() {
-                PageLoadEvent::Started => log_line(&format!("[embed:{}] page load started: {}", log_label, payload.url())),
-                PageLoadEvent::Finished => log_line(&format!("[embed:{}] page load finished: {}", log_label, payload.url())),
-            }
-        });
-    if let Some(script) = init_script {
-        builder = builder.initialization_script(&script);
+    let in_flight = app.state::<EmbedsInFlight>();
+    if !in_flight.0.lock().unwrap().insert(label.clone()) {
+        return Ok(());
     }
-    let webview = window
-        .add_child(builder, position, size)
-        .map_err(|e| { log_line(&format!("[embed:{}] add_child failed: {}", label, e)); e.to_string() })?;
 
-    if let Some(state) = app.try_state::<EmbeddedWebviews>() {
-        state.0.lock().unwrap().insert(label, webview);
+    let result = (|| -> Result<(), String> {
+        // add_child lives on the raw Window, not WebviewWindow (which
+        // doesn't Deref to it) - hence get_window, not get_webview_window.
+        let window = app.get_window(MAIN_WINDOW_LABEL).ok_or("main window not found")?;
+        let parsed_url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
+        let log_label = label.clone();
+        log_line(&format!("[embed:{}] creating at physical ({}, {}) size ({}, {}) url={}", label, x, y, width, height, url));
+        let mut builder = tauri::webview::WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
+            .on_page_load(move |_webview, payload| match payload.event() {
+                PageLoadEvent::Started => log_line(&format!("[embed:{}] load started: {}", log_label, payload.url())),
+                PageLoadEvent::Finished => log_line(&format!("[embed:{}] load finished: {}", log_label, payload.url())),
+            });
+        if let Some(script) = init_script {
+            builder = builder.initialization_script(&script);
+        }
+        window.add_child(builder, position, size).map_err(|e| e.to_string())?;
+        log_line(&format!("[embed:{}] created", label));
+        Ok(())
+    })();
+
+    in_flight.0.lock().unwrap().remove(&label);
+    if let Err(e) = &result {
+        log_line(&format!("[embed:{}] failed: {}", label, e));
     }
-    Ok(())
+    result
 }
 
-// Moves an embed off-screen and shrinks it to near-zero rather than
-// destroying it - keeps its login session/localStorage alive (it's still
-// the same webview, just not visible) for when the person switches back.
+// Moves an embed off-screen rather than destroying it, so its login
+// session stays alive for when the person switches back.
 #[tauri::command]
-pub fn hide_embedded_webview(app: AppHandle, label: String) -> Result<(), String> {
+pub async fn hide_embedded_webview(app: AppHandle, label: String) -> Result<(), String> {
     if let Some(webview) = app.get_webview(&label) {
         webview.set_position(PhysicalPosition::new(-10000.0, -10000.0)).map_err(|e| e.to_string())?;
         webview.set_size(PhysicalSize::new(1.0, 1.0)).map_err(|e| e.to_string())?;
     }
     Ok(())
-}
-
-// Called from main.rs's main-window CloseRequested handler - explicitly
-// closes every embedded child webview before the app is allowed to exit,
-// in case a genuinely stuck one would otherwise hang the whole app's
-// shutdown.
-pub fn close_all_embedded(app: &AppHandle) {
-    if let Some(state) = app.try_state::<EmbeddedWebviews>() {
-        let mut map = state.0.lock().unwrap();
-        for (label, webview) in map.drain() {
-            log_line(&format!("[embed:{}] closing on app shutdown", label));
-            let _ = webview.close();
-        }
-    }
 }
