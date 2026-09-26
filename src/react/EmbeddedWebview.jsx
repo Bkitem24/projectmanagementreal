@@ -22,14 +22,22 @@ export default function EmbeddedWebview({ label, url, initScript }) {
       if (!el) return;
       const rect = el.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
+      // Physical pixels, not logical - passed straight through to Rust's
+      // PhysicalPosition/PhysicalSize (src-tauri/src/embedded_webview.rs).
+      // This machine's multi-monitor setup has an unusual virtual-desktop
+      // layout, and Tauri's own logical<->physical conversion for this
+      // "unstable" child-webview API is exactly the kind of thing that
+      // could get it wrong there - computing physical pixels ourselves
+      // removes that ambiguity entirely.
+      const dpr = window.devicePixelRatio || 1;
       const { invoke } = await import('@tauri-apps/api/core');
       invoke('embed_webview', {
         label,
         url,
-        x: rect.left,
-        y: rect.top,
-        width: rect.width,
-        height: rect.height,
+        x: rect.left * dpr,
+        y: rect.top * dpr,
+        width: rect.width * dpr,
+        height: rect.height * dpr,
         initScript: initScript || null,
       }).catch(() => {});
     }
