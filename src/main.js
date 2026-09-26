@@ -942,6 +942,7 @@ function route(){
   }
   else if(hash==='/meetings') renderMeetingsList();
   else if(hash==='/comms') renderComms();
+  else if(hash==='/messaging') renderMessaging();
   else if(mClient) renderClient(mClient[1]);
   else if(mEpisode) renderEpisode(mEpisode[1]);
   else if(mMeeting) renderMeetingRoom(mMeeting[1]);
@@ -5099,6 +5100,18 @@ function renderComms(){
     var root = createRoot(document.getElementById('reactRoot'));
     activeReactRoot = root;
     root.render(React.createElement(CommsPage, { myUid: myUid, isAdmin: isAdmin() }));
+  });
+}
+// Messaging (Phase B) - same mount/unmount pattern as renderComms() above.
+function renderMessaging(){
+  paint('<div id="reactRoot" style="height:calc(100vh - 0px);"></div>');
+  Promise.all([import('react'), import('react-dom/client'), import('./react/MessagingPage.jsx')]).then(function(mods){
+    var React = mods[0];
+    var createRoot = mods[1].createRoot;
+    var MessagingPage = mods[2].default;
+    var root = createRoot(document.getElementById('reactRoot'));
+    activeReactRoot = root;
+    root.render(React.createElement(MessagingPage, { myUid: myUid, myTeamId: myTeamId, canManage: canManage() }));
   });
 }
 function renderMeetingsList(){
