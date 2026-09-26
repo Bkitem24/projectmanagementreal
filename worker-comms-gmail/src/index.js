@@ -144,6 +144,26 @@ async function smtpSendMail(user, appPassword, { to, subject, body, inReplyTo })
 }
 
 // ---- Supabase (service role) - same sbFetch pattern as worker-r2 ----
+// Verifies the caller is a real logged-in user AND that they're actually
+// allowed to use this specific account (admin, or granted - reuses the
+// same has_comms_access() SQL function the database's own RLS uses, called
+// here with the CALLER's own JWT so auth.uid() resolves to them, not the
+// service role). Without this, anyone who found this Worker's public URL
+// could send arbitrary email from a connected account.
+async function verifySenderAllowed(env, request, accountId) {
+  const auth = request.headers.get('Authorization') || '';
+  const token = auth.replace(/^Bearer\s+/i, '');
+  if (!token) return 'missing Authorization header';
+  const res = await fetch(env.SUPABASE_URL + '/rest/v1/rpc/has_comms_access', {
+    method: 'POST',
+    headers: { apikey: env.SUPABASE_ANON_KEY, Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ aid: accountId }),
+  });
+  if (!res.ok) return `could not verify access (${res.status})`;
+  const allowed = await res.json();
+  return allowed === true ? null : 'not allowed to use this account';
+}
+
 function sbFetch(env, path, opts) {
   return fetch(env.SUPABASE_URL + path, Object.assign({}, opts, {
     headers: Object.assign({
@@ -238,6 +258,8 @@ export default {
       }
       if (url.pathname === '/send' && request.method === 'POST') {
         const { accountId, threadId, to, subject, body, inReplyTo } = await request.json();
+        const denied = await verifySenderAllowed(env, request, accountId);
+        if (denied) return Response.json({ error: denied }, { status: 403 });
         const [account] = await sbJson(env, `/rest/v1/commsAccounts?id=eq.${accountId}&select=*`);
         if (!account) return Response.json({ error: 'unknown account' }, { status: 404 });
         const appPassword = appPasswordFor(env, accountId);

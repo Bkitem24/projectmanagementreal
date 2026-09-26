@@ -23,3 +23,10 @@ compatibility_flags = ["nodejs_compat"]
 # with several connected inboxes.
 [triggers]
 crons = ["*/2 * * * *"]
+
+# Not a secret - the anon key is already public (shipped in every client
+# build via .env's VITE_SUPABASE_ANON_KEY). Used only to verify a caller's
+# own session JWT against has_comms_access() before letting /send actually
+# send anything - see verifySenderAllowed() in src/index.js.
+[vars]
+SUPABASE_ANON_KEY = "sb_publishable_lOiINkR85fxmA4277wDacw_qOsmPq5c"

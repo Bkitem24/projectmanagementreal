@@ -63,11 +63,14 @@ export default function CommsPage({ myUid, isAdmin }) {
   function handleSend() {
     if (!replyBody.trim() || !selectedThread) return;
     setSending(true);
-    comms.sendReply(selectedThread.id, replyBody.trim(), myUid)
-      .then((row) => {
-        setMessages((prev) => prev.concat([row]));
-        setReplyBody('');
-      })
+    const threadId = selectedThread.id;
+    // sendReply's return shape is whatever the channel's own Worker
+    // responds with (Gmail/WhatsApp API results), not a message row - the
+    // Worker already wrote the real row once the send actually succeeded,
+    // so re-fetch rather than guess at its shape.
+    comms.sendReply(threadId, replyBody.trim(), myUid)
+      .then(() => comms.listMessages(threadId))
+      .then((rows) => { setMessages(rows); setReplyBody(''); })
       .catch((e) => setError(String(e)))
       .finally(() => setSending(false));
   }

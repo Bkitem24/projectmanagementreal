@@ -6,6 +6,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod mp4fix;
+// Client Communications (Phase A) - see src/slack.rs's own module comment
+// for the cookie-capture bug this fixes.
+mod slack;
 mod timelog;
 
 // Launch-on-Windows-startup (Phase 2.5 batch A / A-fix, 2026-09-26/27):

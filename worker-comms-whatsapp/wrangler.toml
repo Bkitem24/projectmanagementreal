@@ -1,0 +1,30 @@
+# Client Communications - WhatsApp Worker. Receives Meta's webhook events
+# (push, not polled - unlike Gmail) and exposes POST /send for the app to
+# send a reply through the Cloud API.
+#
+# The webhook verification/parsing code is copied from spike-wa/ (verified
+# live: Meta's real handshake succeeded against this deployed - see
+# docs/superpowers/specs/2026-09-25-phase-a-spike-results.md, Spike 4).
+#
+# STATUS (2026-09-25/26): the dedicated WhatsApp number this points at has
+# NOT finished registering on Meta's side yet ("Registration failed",
+# unresolved - likely a recycled-number cooldown, retry after 24h+ or
+# contact Meta support). This Worker is built and ready, but cannot be
+# proven end-to-end until that clears - see docs/phase-3-punch-list.md.
+#
+# Deploy: cd worker-comms-whatsapp && npx wrangler deploy
+# Secrets:
+#   npx wrangler secret put VERIFY_TOKEN            (any string you choose - paste the SAME one into Meta's webhook config)
+#   npx wrangler secret put SUPABASE_URL
+#   npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
+#   npx wrangler secret put WHATSAPP_ACCESS_TOKEN    (Meta's permanent/system-user token for this number)
+#   npx wrangler secret put WHATSAPP_PHONE_NUMBER_ID (from the Meta dashboard's "Register your WhatsApp phone number" screen)
+#   npx wrangler secret put WHATSAPP_ACCOUNT_ID      (this channel's row id in commsAccounts - find it in Supabase's Table Editor after adding the account through the app's admin screen)
+name = "blue-kite-ops-comms-whatsapp"
+main = "src/index.js"
+compatibility_date = "2026-01-01"
+
+# Not a secret - see worker-comms-gmail/wrangler.toml's own comment on this
+# same var for why.
+[vars]
+SUPABASE_ANON_KEY = "sb_publishable_lOiINkR85fxmA4277wDacw_qOsmPq5c"
