@@ -51,8 +51,13 @@ pub fn embed_webview(
         return Ok(());
     }
 
+    // add_child is defined on the raw Window, not WebviewWindow (which
+    // wraps a Window + its own default Webview but doesn't Deref to it) -
+    // get_window (not get_webview_window) is the one that actually exposes
+    // it, confirmed against docs.rs for this exact pinned version after
+    // the previous build's error named the wrong type.
     let window = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
+        .get_window(MAIN_WINDOW_LABEL)
         .ok_or("main window not found")?;
     let parsed_url = url.parse().map_err(|e: url::ParseError| e.to_string())?;
     let log_label = label.clone();
