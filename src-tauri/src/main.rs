@@ -13,6 +13,9 @@ mod timelog;
 // Client Communications - WhatsApp, unofficial route (Phase B follow-up,
 // 2026-09-26) - see src/whatsapp_web.rs's own module comment.
 mod whatsapp_web;
+// Client Communications - Gmail, real inbox (Phase B follow-up, 2026-09-26)
+// - see src/gmail_web.rs's own module comment.
+mod gmail_web;
 
 // Launch-on-Windows-startup (Phase 2.5 batch A / A-fix, 2026-09-26/27):
 // history kept here since it explains why autostart setup does NOT live in
@@ -78,6 +81,8 @@ fn main() {
             // Phase B follow-up: WhatsApp, unofficial route (src/whatsapp_web.rs)
             whatsapp_web::open_whatsapp_web,
             whatsapp_web::whatsapp_web_status,
+            // Phase B follow-up: Gmail, real inbox (src/gmail_web.rs)
+            gmail_web::open_gmail_web,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");

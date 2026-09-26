@@ -113,6 +113,18 @@ export async function openWhatsAppWeb() {
   return invoke('open_whatsapp_web', { allowedContacts: identifiers });
 }
 
+// Gmail - real inbox (2026-09-26 follow-up). The IMAP-poll/three-pane
+// reader below (listThreads/listMessages/sendReply's gmail branch) is the
+// original build - kept working, not removed - but Humayun asked for the
+// actual, full gmail.com inbox instead of a custom rebuild of one. Same
+// approach as WhatsApp: a real, live, logged-in window, nothing scraped or
+// filtered (a full inbox is the point here, unlike WhatsApp's contact
+// filter).
+export async function openGmailWeb() {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke('open_gmail_web');
+}
+
 export async function hasAnyCommsGrant(myUid) {
   if (!myUid) return false;
   const snap = await db.collection('commsAccountGrants').where('userId', '==', myUid).limit(1).get();

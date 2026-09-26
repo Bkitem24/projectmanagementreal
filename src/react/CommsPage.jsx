@@ -32,11 +32,15 @@ export default function CommsPage({ myUid, isAdmin }) {
   const [replyBody, setReplyBody] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
-  const [waOpening, setWaOpening] = useState(false);
+  const [windowOpening, setWindowOpening] = useState(false);
 
-  function handleOpenWhatsApp() {
-    setWaOpening(true);
-    comms.openWhatsAppWeb().catch((e) => setError((e && e.message) || String(e))).finally(() => setWaOpening(false));
+  // Gmail and WhatsApp both open the real, live logged-in web page in its
+  // own window rather than being rebuilt inside this page (Slack still
+  // uses commsThreads/commsMessages below, pending its own live re-test).
+  function handleOpenRealInbox(channel) {
+    setWindowOpening(true);
+    const open = channel === 'gmail' ? comms.openGmailWeb() : comms.openWhatsAppWeb();
+    open.catch((e) => setError((e && e.message) || String(e))).finally(() => setWindowOpening(false));
   }
 
   useEffect(() => {
@@ -133,8 +137,13 @@ export default function CommsPage({ myUid, isAdmin }) {
               WhatsApp opens in its own window - real chats, filtered to your connected contacts.
             </div>
           )}
-          {selectedAccount && selectedAccount.channel !== 'whatsapp' && threads.length === 0 && <div className="p-3 text-muted-foreground text-xs">No conversations yet.</div>}
-          {selectedAccount && selectedAccount.channel !== 'whatsapp' && threads.map((t) => (
+          {selectedAccount && selectedAccount.channel === 'gmail' && (
+            <div className="p-3 text-xs text-muted-foreground">
+              Gmail opens in its own window - your real, full inbox.
+            </div>
+          )}
+          {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail' && threads.length === 0 && <div className="p-3 text-muted-foreground text-xs">No conversations yet.</div>}
+          {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail' && threads.map((t) => (
             <button
               key={t.id}
               onClick={() => setSelectedThread(t)}
@@ -152,20 +161,22 @@ export default function CommsPage({ myUid, isAdmin }) {
 
       {/* Messages */}
       <div className="flex-1 flex flex-col">
-        {selectedAccount && selectedAccount.channel === 'whatsapp' && (
+        {selectedAccount && (selectedAccount.channel === 'whatsapp' || selectedAccount.channel === 'gmail') && (
           <div className="flex-1 flex flex-col items-center justify-center gap-3">
             <p className="text-muted-foreground text-sm max-w-xs text-center">
-              Real WhatsApp Web, in its own window - filtered to only the contacts connected to this account.
+              {selectedAccount.channel === 'gmail'
+                ? 'The real, full Gmail inbox, in its own window.'
+                : 'Real WhatsApp Web, in its own window - filtered to only the contacts connected to this account.'}
             </p>
-            <Button className="bg-[var(--blue)] hover:opacity-90" disabled={waOpening} onClick={handleOpenWhatsApp}>
-              {waOpening ? 'Opening…' : 'Open WhatsApp'}
+            <Button className="bg-[var(--blue)] hover:opacity-90" disabled={windowOpening} onClick={() => handleOpenRealInbox(selectedAccount.channel)}>
+              {windowOpening ? 'Opening…' : 'Open ' + (selectedAccount.channel === 'gmail' ? 'Gmail' : 'WhatsApp')}
             </Button>
           </div>
         )}
-        {(!selectedAccount || selectedAccount.channel !== 'whatsapp') && !selectedThread && (
+        {(!selectedAccount || (selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail')) && !selectedThread && (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">Select a conversation</div>
         )}
-        {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedThread && (
+        {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail' && selectedThread && (
           <React.Fragment>
             <ScrollArea className="flex-1 p-4 space-y-3">
               {messages.map((m) => (
