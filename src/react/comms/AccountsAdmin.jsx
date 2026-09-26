@@ -81,7 +81,13 @@ export default function AccountsAdmin({ myUid, onClose }) {
         {accounts && accounts.map((acc) => (
           <div key={acc.id} className="border border-border rounded-lg p-3 mb-3">
             <div className="font-medium">{acc.label} <span className="text-xs uppercase text-muted-foreground">({acc.channel})</span></div>
-            <div className="text-xs text-muted-foreground mb-2">{acc.externalId}</div>
+            <div className="text-xs text-muted-foreground">{acc.externalId}</div>
+            <div className="text-xs text-muted-foreground mb-2">
+              Worker secret name for this account:{' '}
+              <code className="bg-muted px-1 rounded">
+                {acc.channel === 'gmail' ? 'GMAIL_APP_PASSWORD_' + acc.id.toUpperCase() : 'id: ' + acc.id}
+              </code>
+            </div>
             <div className="text-xs font-semibold mb-1">Grant access to:</div>
             <div className="flex flex-wrap gap-2">
               {profiles.map((p) => {
