@@ -55,12 +55,18 @@ export async function sendMessage({ conversationId, senderId, body, file, quoted
     attachmentKey,
     attachmentType,
     quotedMessageId: quotedMessageId || null,
-    createdAt: new Date().toISOString(),
   };
-  const { error } = await supabase.from('messagingMessages').insert(row);
+  // createdAt is deliberately NOT set client-side - two people's clocks can
+  // disagree, but Postgres's own now() (the column default) is a single
+  // authoritative clock, which is what real ordering between two different
+  // senders actually needs. .select().single() is safe here (unlike the
+  // "insert for someone else" trap documented in CLAUDE.md) because the
+  // sender is always a participant of their own conversation, so the
+  // SELECT-policy re-check on the returned row passes.
+  const { data, error } = await supabase.from('messagingMessages').insert(row).select().single();
   if (error) throw error;
-  await supabase.from('messagingConversations').update({ lastMessageAt: row.createdAt }).eq('id', conversationId);
-  return row;
+  await supabase.from('messagingConversations').update({ lastMessageAt: data.createdAt }).eq('id', conversationId);
+  return data;
 }
 
 export async function markRead(conversationId, userId, messageId) {
