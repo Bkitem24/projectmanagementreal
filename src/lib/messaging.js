@@ -13,12 +13,65 @@ import { uploadFile, fileUrl } from './r2.js';
 
 export { fileUrl };
 
+// PostgREST errors are plain objects (no .toString() override), so a bare
+// String(e) renders "[object Object]" instead of the real reason - found
+// live while testing (a real RLS rejection showed as this instead of its
+// message). Every catch in the Messaging UI should use this, not String().
+export function errMsg(e) {
+  if (!e) return 'Unknown error';
+  return e.message || e.error_description || e.error || JSON.stringify(e);
+}
+
 export async function listMyConversations(myUid) {
-  const snap = await db.collection('messagingParticipants').where('userId', '==', myUid).get();
-  const convIds = snap.docs.map((d) => d.data().conversationId);
+  const partSnap = await db.collection('messagingParticipants').where('userId', '==', myUid).get();
+  const myParts = partSnap.docs.map((d) => d.data());
+  const convIds = myParts.map((p) => p.conversationId);
   if (!convIds.length) return [];
   const convSnap = await db.collection('messagingConversations').where('id', 'in', convIds).orderBy('lastMessageAt', 'desc').get();
-  return convSnap.docs.map((d) => d.data());
+  const convs = convSnap.docs.map((d) => d.data());
+
+  // Unread + last-message preview, in one extra query (not one per
+  // conversation): fetch every message across all of these conversations
+  // ordered newest-first, then keep the first (newest) row seen per
+  // conversationId in JS - cheap at this app's real scale (a handful of
+  // conversations, a small Team), avoids an N+1 query per row in the list.
+  const msgSnap = await db.collection('messagingMessages').where('conversationId', 'in', convIds).orderBy('createdAt', 'desc').get();
+  const latestByConv = {};
+  msgSnap.docs.forEach((d) => {
+    const m = d.data();
+    if (!latestByConv[m.conversationId]) latestByConv[m.conversationId] = m;
+  });
+  const partByConv = {};
+  myParts.forEach((p) => { partByConv[p.conversationId] = p; });
+
+  return convs.map((c) => {
+    const latest = latestByConv[c.id] || null;
+    const myPart = partByConv[c.id];
+    const unread = !!latest && latest.senderId !== myUid && (!myPart || myPart.lastReadMessageId !== latest.id);
+    return Object.assign({}, c, { unread, latestMessage: latest });
+  });
+}
+
+// Everyone on the Team (or, for admin - who has no Team of their own -
+// everyone in the company) except yourself. Used for both "New group chat"
+// and "New direct message" pickers.
+export async function listOtherTeamMembers(myUid, myTeamId) {
+  const query = myTeamId ? db.collection('profiles').where('teamId', '==', myTeamId) : db.collection('profiles');
+  const snap = await query.get();
+  return snap.docs.map((d) => d.data()).filter((p) => p.id !== myUid);
+}
+
+export async function deleteMessage(messageId) {
+  const { error } = await supabase.from('messagingMessages').delete().eq('id', messageId);
+  if (error) throw error;
+}
+
+// RLS only allows this for kind='group' conversations, by admin/manager -
+// never the per-Team default chat or someone's 1:1 (schema_v38.sql).
+// Participants/messages/reactions cascade-delete for free.
+export async function deleteConversation(conversationId) {
+  const { error } = await supabase.from('messagingConversations').delete().eq('id', conversationId);
+  if (error) throw error;
 }
 
 export async function getMyParticipantRow(conversationId, myUid) {

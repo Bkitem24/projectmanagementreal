@@ -62,6 +62,16 @@ fn main() {
             timelog::timelog_seconds_idle,
             // Round 39: Meetings recordings -> regular MP4 (src/mp4fix.rs)
             mp4fix::mp4_defragment,
+            // Phase A / Phase A Round 2: Slack Client Comms (src/slack.rs)
+            slack::open_slack_login,
+            slack::report_slack_tokens,
+            slack::capture_slack_cookie,
+            slack::list_stored_slack_workspaces,
+            slack::remember_known_team,
+            slack::slack_list_conversations,
+            slack::slack_get_history,
+            slack::slack_send_message,
+            slack::slack_auth_test,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");

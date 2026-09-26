@@ -7,7 +7,6 @@ import { useEffect, useState } from 'react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog.jsx';
 import { Button } from '../../components/ui/button.jsx';
 import { Input } from '../../components/ui/input.jsx';
-import { db } from '../../lib/db.js';
 import * as messaging from '../../lib/messaging.js';
 
 export default function NewGroupChatDialog({ open, onOpenChange, myUid, myTeamId, onCreated }) {
@@ -19,9 +18,7 @@ export default function NewGroupChatDialog({ open, onOpenChange, myUid, myTeamId
 
   useEffect(() => {
     if (!open) return;
-    db.collection('profiles').where('teamId', '==', myTeamId).get()
-      .then((snap) => setProfiles(snap.docs.map((d) => d.data()).filter((p) => p.id !== myUid)))
-      .catch((e) => setError(String(e)));
+    messaging.listOtherTeamMembers(myUid, myTeamId).then(setProfiles).catch((e) => setError(messaging.errMsg(e)));
   }, [open, myTeamId, myUid]);
 
   function toggle(id) { setSelected((prev) => Object.assign({}, prev, { [id]: !prev[id] })); }
@@ -32,7 +29,7 @@ export default function NewGroupChatDialog({ open, onOpenChange, myUid, myTeamId
     setBusy(true);
     messaging.createGroupChat(name.trim(), participantIds, myUid, myTeamId)
       .then((conversationId) => { onCreated(conversationId); onOpenChange(false); setName(''); setSelected({}); })
-      .catch((e) => setError(String(e)))
+      .catch((e) => setError(messaging.errMsg(e)))
       .finally(() => setBusy(false));
   }
 

@@ -11,6 +11,7 @@ import { ScrollArea } from '../components/ui/scroll-area.jsx';
 import { db } from '../lib/db.js';
 import * as messaging from '../lib/messaging.js';
 import NewGroupChatDialog from './messaging/NewGroupChatDialog.jsx';
+import NewDirectChatDialog from './messaging/NewDirectChatDialog.jsx';
 
 const EMOJI_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
@@ -25,13 +26,14 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
   const [quoted, setQuoted] = useState(null);
   const [typingUsers, setTypingUsers] = useState([]);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
+  const [directDialogOpen, setDirectDialogOpen] = useState(false);
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
   const typingRef = useRef(null);
   const typingTimeoutRef = useRef(null);
 
   function refreshConversations() {
-    messaging.listMyConversations(myUid).then(setConversations).catch((e) => setError(String(e)));
+    messaging.listMyConversations(myUid).then(setConversations).catch((e) => setError(messaging.errMsg(e)));
   }
   useEffect(refreshConversations, [myUid]);
 
@@ -49,8 +51,8 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
   useEffect(() => {
     if (!selected) { setMessages([]); setParticipants([]); return; }
     let unsub = null;
-    messaging.listMessages(selected.id).then(setMessages).catch((e) => setError(String(e)));
-    messaging.listParticipants(selected.id).then(setParticipants).catch((e) => setError(String(e)));
+    messaging.listMessages(selected.id).then(setMessages).catch((e) => setError(messaging.errMsg(e)));
+    messaging.listParticipants(selected.id).then(setParticipants).catch((e) => setError(messaging.errMsg(e)));
     unsub = messaging.subscribeToMessages(selected.id, setMessages);
     typingRef.current = messaging.startTypingIndicator(selected.id, myUid, setTypingUsers);
     return () => { if (unsub) unsub(); if (typingRef.current) typingRef.current.stop(); };
@@ -83,7 +85,7 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
     if (!selected || (!body.trim() && !file)) return;
     messaging.sendMessage({ conversationId: selected.id, senderId: myUid, body: body.trim(), file, quotedMessageId: quoted ? quoted.id : null })
       .then(() => { setBody(''); setQuoted(null); refreshConversations(); })
-      .catch((e) => setError(String(e)));
+      .catch((e) => setError(messaging.errMsg(e)));
   }
 
   function handleFilePick(e) {
@@ -97,6 +99,27 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
     return (p && (p.displayName || p.email)) || 'Someone';
   }
 
+  function handleDirectStarted(conversationId) {
+    messaging.listMyConversations(myUid).then((convs) => {
+      setConversations(convs);
+      const found = convs.find((c) => c.id === conversationId);
+      if (found) setSelected(found);
+    }).catch((e) => setError(messaging.errMsg(e)));
+  }
+
+  function handleDeleteConversation(e, conversationId) {
+    e.stopPropagation();
+    if (!window.confirm('Delete this group chat for everyone? This cannot be undone.')) return;
+    messaging.deleteConversation(conversationId)
+      .then(() => { if (selected && selected.id === conversationId) setSelected(null); refreshConversations(); })
+      .catch((e2) => setError(messaging.errMsg(e2)));
+  }
+
+  function handleDeleteMessage(messageId) {
+    if (!window.confirm('Delete this message?')) return;
+    messaging.deleteMessage(messageId).catch((e) => setError(messaging.errMsg(e)));
+  }
+
   if (conversations === null && !error) {
     return <div className="p-6 text-sm text-muted-foreground">Loading…</div>;
   }
@@ -104,25 +127,45 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
   return (
     <div className="flex h-[calc(100vh-1px)] text-sm">
       <div className="w-64 border-r border-border flex flex-col">
-        <div className="p-3 flex items-center justify-between border-b border-border">
+        <div className="p-3 flex items-center justify-between border-b border-border gap-1">
           <h2 className="font-semibold">Chats</h2>
-          {canManage && (
-            <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => setGroupDialogOpen(true)}>+ Group</Button>
-          )}
+          <div className="flex gap-1">
+            <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => setDirectDialogOpen(true)}>New chat</Button>
+            {canManage && (
+              <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => setGroupDialogOpen(true)}>+ Group</Button>
+            )}
+          </div>
         </div>
         <ScrollArea className="flex-1">
-          {conversations && conversations.map((c) => (
-            <button
-              key={c.id}
-              onClick={() => setSelected(c)}
-              className={'w-full text-left px-3 py-2 border-b border-border hover:bg-muted transition-colors ' + (selected && selected.id === c.id ? 'bg-muted' : '')}
-            >
-              <div className="font-medium truncate">
-                {c.kind === 'team_default' ? 'Team chat' : (c.name || 'Direct message')}
-              </div>
-              <div className="text-xs text-muted-foreground">{new Date(c.lastMessageAt).toLocaleString()}</div>
-            </button>
-          ))}
+          {conversations && conversations.map((c) => {
+            const title = c.kind === 'team_default' ? 'Team chat' : (c.name || 'Direct message');
+            const preview = c.latestMessage ? (c.latestMessage.body || (c.latestMessage.attachmentType ? '📎 Attachment' : '')) : 'No messages yet';
+            return (
+              <button
+                key={c.id}
+                onClick={() => setSelected(c)}
+                className={'w-full text-left px-3 py-2 border-b border-border hover:bg-muted transition-colors flex items-start justify-between gap-2 ' + (selected && selected.id === c.id ? 'bg-muted' : '')}
+              >
+                <div className="min-w-0">
+                  <div className={'truncate flex items-center gap-1.5 ' + (c.unread ? 'font-bold' : 'font-medium')}>
+                    {c.unread && <span className="w-1.5 h-1.5 rounded-full bg-[var(--blue)] shrink-0" />}
+                    {title}
+                  </div>
+                  <div className="text-xs text-muted-foreground truncate">{preview}</div>
+                </div>
+                {c.kind === 'group' && canManage && (
+                  <span
+                    role="button"
+                    className="text-xs text-muted-foreground hover:text-destructive shrink-0"
+                    onClick={(e) => handleDeleteConversation(e, c.id)}
+                    title="Delete group chat"
+                  >
+                    🗑
+                  </span>
+                )}
+              </button>
+            );
+          })}
           {conversations && conversations.length === 0 && <div className="p-3 text-xs text-muted-foreground">No conversations yet.</div>}
         </ScrollArea>
       </div>
@@ -164,6 +207,9 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
                       {EMOJI_CHOICES.map((em) => (
                         <button key={em} className="text-xs" onClick={() => messaging.toggleReaction(m.id, myUid, em).then(() => messaging.listReactions(messages.map((mm) => mm.id)).then(setReactions))}>{em}</button>
                       ))}
+                      {(mine || canManage) && (
+                        <button className="text-xs text-muted-foreground hover:text-destructive" onClick={() => handleDeleteMessage(m.id)}>Delete</button>
+                      )}
                     </div>
                     {myReactions.length > 0 && (
                       <div className="text-xs mt-0.5">{myReactions.map((r) => r.emoji).join(' ')}</div>
@@ -203,6 +249,13 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
         myUid={myUid}
         myTeamId={myTeamId}
         onCreated={() => refreshConversations()}
+      />
+      <NewDirectChatDialog
+        open={directDialogOpen}
+        onOpenChange={setDirectDialogOpen}
+        myUid={myUid}
+        myTeamId={myTeamId}
+        onStarted={handleDirectStarted}
       />
 
       {error && (
