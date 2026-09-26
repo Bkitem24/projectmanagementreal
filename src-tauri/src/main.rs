@@ -53,7 +53,7 @@ mod embedded_webview;
 
 fn main() {
     tauri::Builder::default()
-        .manage(embedded_webview::EmbeddedLabels(std::sync::Mutex::new(Vec::new())))
+        .manage(embedded_webview::EmbeddedWebviews(std::sync::Mutex::new(std::collections::HashMap::new())))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         // Added 2026-09-30 for Meetings recording's "Open folder" button

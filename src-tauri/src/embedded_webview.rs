@@ -29,16 +29,27 @@
 // Diagnostics: on_page_load now writes to a real file (not stdout, which
 // is invisible for a double-clicked GUI app with no attached console) -
 // %TEMP%\bko-embed-log.txt - so a real failure leaves a trace this round,
-// where the previous round's blank screenshot gave no signal at all.
+// where the previous round's blank screenshot gave no signal at all. That
+// log is what caught the real bug below: add_child logged as called, hit
+// no error branch, yet a live Win32 EnumWindows/EnumChildWindows check
+// showed NO trace of any embedded webview at all - `add_child` returns
+// the new `Webview` by value, and this code was discarding it (`?`
+// propagates the Result but the success value was never bound to
+// anything). Nothing else was holding a reference, so it was dropped -
+// and, evidently, torn down - the instant this function returned, before
+// it ever got a chance to load. Fixed by keeping every embedded webview's
+// actual handle alive in app state for as long as the app runs, not just
+// its label.
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Mutex;
 use tauri::webview::PageLoadEvent;
-use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl};
+use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, WebviewUrl, Webview, Wry};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 
-pub struct EmbeddedLabels(pub Mutex<Vec<String>>);
+pub struct EmbeddedWebviews(pub Mutex<HashMap<String, Webview<Wry>>>);
 
 fn log_line(line: &str) {
     let path = std::env::temp_dir().join("bko-embed-log.txt");
@@ -87,12 +98,12 @@ pub fn embed_webview(
     if let Some(script) = init_script {
         builder = builder.initialization_script(&script);
     }
-    window
+    let webview = window
         .add_child(builder, position, size)
         .map_err(|e| { log_line(&format!("[embed:{}] add_child failed: {}", label, e)); e.to_string() })?;
 
-    if let Some(state) = app.try_state::<EmbeddedLabels>() {
-        state.0.lock().unwrap().push(label);
+    if let Some(state) = app.try_state::<EmbeddedWebviews>() {
+        state.0.lock().unwrap().insert(label, webview);
     }
     Ok(())
 }
@@ -114,13 +125,11 @@ pub fn hide_embedded_webview(app: AppHandle, label: String) -> Result<(), String
 // in case a genuinely stuck one would otherwise hang the whole app's
 // shutdown.
 pub fn close_all_embedded(app: &AppHandle) {
-    if let Some(state) = app.try_state::<EmbeddedLabels>() {
-        let labels = state.0.lock().unwrap().clone();
-        for label in labels {
-            if let Some(webview) = app.get_webview(&label) {
-                log_line(&format!("[embed:{}] closing on app shutdown", label));
-                let _ = webview.close();
-            }
+    if let Some(state) = app.try_state::<EmbeddedWebviews>() {
+        let mut map = state.0.lock().unwrap();
+        for (label, webview) in map.drain() {
+            log_line(&format!("[embed:{}] closing on app shutdown", label));
+            let _ = webview.close();
         }
     }
 }
