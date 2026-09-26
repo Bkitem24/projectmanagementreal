@@ -19,8 +19,13 @@ import { Textarea } from '../components/ui/textarea.jsx';
 import { ScrollArea } from '../components/ui/scroll-area.jsx';
 import * as comms from '../lib/comms.js';
 import AccountsAdmin from './comms/AccountsAdmin.jsx';
+import EmbeddedWebview from './EmbeddedWebview.jsx';
 
 const CHANNEL_LABEL = { gmail: 'Gmail', slack: 'Slack', whatsapp: 'WhatsApp' };
+// All three now show the real, live web app embedded in the main window
+// (src/lib/comms.js's EMBED_URL / src-tauri/src/embedded_webview.rs) -
+// none of them use the commsThreads/commsMessages reader below any more.
+const EMBEDDED_CHANNELS = ['gmail', 'whatsapp', 'slack'];
 
 export default function CommsPage({ myUid, isAdmin }) {
   const [adminOpen, setAdminOpen] = useState(false);
@@ -32,16 +37,11 @@ export default function CommsPage({ myUid, isAdmin }) {
   const [replyBody, setReplyBody] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
-  const [windowOpening, setWindowOpening] = useState(false);
+  const [waFilterScript, setWaFilterScript] = useState(null);
 
-  // Gmail and WhatsApp both open the real, live logged-in web page in its
-  // own window rather than being rebuilt inside this page (Slack still
-  // uses commsThreads/commsMessages below, pending its own live re-test).
-  function handleOpenRealInbox(channel) {
-    setWindowOpening(true);
-    const open = channel === 'gmail' ? comms.openGmailWeb() : comms.openWhatsAppWeb();
-    open.catch((e) => setError((e && e.message) || String(e))).finally(() => setWindowOpening(false));
-  }
+  useEffect(() => {
+    comms.buildWhatsAppFilterScript().then(setWaFilterScript).catch(() => setWaFilterScript(null));
+  }, []);
 
   useEffect(() => {
     if (adminOpen) return; // re-fetch when the admin screen closes, so a newly-created account shows up
@@ -127,88 +127,82 @@ export default function CommsPage({ myUid, isAdmin }) {
         </ScrollArea>
       </div>
 
-      {/* Threads */}
-      <div className="w-72 border-r border-border flex flex-col">
-        <div className="p-3 border-b border-border font-semibold">Conversations</div>
-        <ScrollArea className="flex-1">
-          {!selectedAccount && <div className="p-3 text-muted-foreground text-xs">Pick an account on the left.</div>}
-          {selectedAccount && selectedAccount.channel === 'whatsapp' && (
-            <div className="p-3 text-xs text-muted-foreground">
-              WhatsApp opens in its own window - real chats, filtered to your connected contacts.
-            </div>
-          )}
-          {selectedAccount && selectedAccount.channel === 'gmail' && (
-            <div className="p-3 text-xs text-muted-foreground">
-              Gmail opens in its own window - your real, full inbox.
-            </div>
-          )}
-          {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail' && threads.length === 0 && <div className="p-3 text-muted-foreground text-xs">No conversations yet.</div>}
-          {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail' && threads.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => setSelectedThread(t)}
-              className={
-                'w-full text-left px-3 py-2 border-b border-border hover:bg-muted transition-colors ' +
-                (selectedThread && selectedThread.id === t.id ? 'bg-muted' : '')
-              }
-            >
-              <div className="truncate font-medium">{t.subject || '(no subject)'}</div>
-              <div className="text-xs text-muted-foreground">{new Date(t.lastMessageAt).toLocaleString()}</div>
-            </button>
-          ))}
-        </ScrollArea>
-      </div>
-
-      {/* Messages */}
-      <div className="flex-1 flex flex-col">
-        {selectedAccount && (selectedAccount.channel === 'whatsapp' || selectedAccount.channel === 'gmail') && (
-          <div className="flex-1 flex flex-col items-center justify-center gap-3">
-            <p className="text-muted-foreground text-sm max-w-xs text-center">
-              {selectedAccount.channel === 'gmail'
-                ? 'The real, full Gmail inbox, in its own window.'
-                : 'Real WhatsApp Web, in its own window - filtered to only the contacts connected to this account.'}
-            </p>
-            <Button className="bg-[var(--blue)] hover:opacity-90" disabled={windowOpening} onClick={() => handleOpenRealInbox(selectedAccount.channel)}>
-              {windowOpening ? 'Opening…' : 'Open ' + (selectedAccount.channel === 'gmail' ? 'Gmail' : 'WhatsApp')}
-            </Button>
-          </div>
-        )}
-        {(!selectedAccount || (selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail')) && !selectedThread && (
-          <div className="flex-1 flex items-center justify-center text-muted-foreground">Select a conversation</div>
-        )}
-        {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedAccount.channel !== 'gmail' && selectedThread && (
-          <React.Fragment>
-            <ScrollArea className="flex-1 p-4 space-y-3">
-              {messages.map((m) => (
-                <div
-                  key={m.id}
+      {selectedAccount && EMBEDDED_CHANNELS.includes(selectedAccount.channel) ? (
+        // The real web app fills the whole rest of the page - a real
+        // inbox/workspace/chat list needs its own full width, not squeezed
+        // into a narrow third pane.
+        <div className="flex-1 flex flex-col">
+          <EmbeddedWebview
+            key={selectedAccount.id}
+            label={'embed-' + selectedAccount.channel}
+            url={comms.EMBED_URL[selectedAccount.channel]}
+            initScript={selectedAccount.channel === 'whatsapp' ? waFilterScript : null}
+          />
+        </div>
+      ) : (
+        <React.Fragment>
+          {/* Threads */}
+          <div className="w-72 border-r border-border flex flex-col">
+            <div className="p-3 border-b border-border font-semibold">Conversations</div>
+            <ScrollArea className="flex-1">
+              {!selectedAccount && <div className="p-3 text-muted-foreground text-xs">Pick an account on the left.</div>}
+              {selectedAccount && threads.length === 0 && <div className="p-3 text-muted-foreground text-xs">No conversations yet.</div>}
+              {selectedAccount && threads.map((t) => (
+                <button
+                  key={t.id}
+                  onClick={() => setSelectedThread(t)}
                   className={
-                    'max-w-[70%] rounded-lg px-3 py-2 ' +
-                    (m.direction === 'outbound' ? 'ml-auto bg-[var(--blue)] text-white' : 'bg-muted')
+                    'w-full text-left px-3 py-2 border-b border-border hover:bg-muted transition-colors ' +
+                    (selectedThread && selectedThread.id === t.id ? 'bg-muted' : '')
                   }
                 >
-                  <div className="whitespace-pre-wrap">{m.body}</div>
-                  <div className={'text-[10px] mt-1 ' + (m.direction === 'outbound' ? 'text-white/70' : 'text-muted-foreground')}>
-                    {new Date(m.sentAt).toLocaleString()}
-                  </div>
-                </div>
+                  <div className="truncate font-medium">{t.subject || '(no subject)'}</div>
+                  <div className="text-xs text-muted-foreground">{new Date(t.lastMessageAt).toLocaleString()}</div>
+                </button>
               ))}
             </ScrollArea>
-            <div className="border-t border-border p-3 flex gap-2 items-end">
-              <Textarea
-                value={replyBody}
-                onChange={(e) => setReplyBody(e.target.value)}
-                placeholder="Write a reply…"
-                className="flex-1 min-h-[44px] max-h-32"
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-              />
-              <Button className="bg-[var(--blue)] hover:opacity-90" disabled={sending || !replyBody.trim()} onClick={handleSend}>
-                Send
-              </Button>
-            </div>
-          </React.Fragment>
-        )}
-      </div>
+          </div>
+
+          {/* Messages */}
+          <div className="flex-1 flex flex-col">
+            {!selectedThread && (
+              <div className="flex-1 flex items-center justify-center text-muted-foreground">Select a conversation</div>
+            )}
+            {selectedThread && (
+              <React.Fragment>
+                <ScrollArea className="flex-1 p-4 space-y-3">
+                  {messages.map((m) => (
+                    <div
+                      key={m.id}
+                      className={
+                        'max-w-[70%] rounded-lg px-3 py-2 ' +
+                        (m.direction === 'outbound' ? 'ml-auto bg-[var(--blue)] text-white' : 'bg-muted')
+                      }
+                    >
+                      <div className="whitespace-pre-wrap">{m.body}</div>
+                      <div className={'text-[10px] mt-1 ' + (m.direction === 'outbound' ? 'text-white/70' : 'text-muted-foreground')}>
+                        {new Date(m.sentAt).toLocaleString()}
+                      </div>
+                    </div>
+                  ))}
+                </ScrollArea>
+                <div className="border-t border-border p-3 flex gap-2 items-end">
+                  <Textarea
+                    value={replyBody}
+                    onChange={(e) => setReplyBody(e.target.value)}
+                    placeholder="Write a reply…"
+                    className="flex-1 min-h-[44px] max-h-32"
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
+                  />
+                  <Button className="bg-[var(--blue)] hover:opacity-90" disabled={sending || !replyBody.trim()} onClick={handleSend}>
+                    Send
+                  </Button>
+                </div>
+              </React.Fragment>
+            )}
+          </div>
+        </React.Fragment>
+      )}
 
       {error && (
         <div className="fixed bottom-4 right-4 bg-destructive text-white text-xs px-3 py-2 rounded-md shadow-lg max-w-sm">

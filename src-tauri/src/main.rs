@@ -7,15 +7,15 @@
 
 mod mp4fix;
 // Client Communications (Phase A) - see src/slack.rs's own module comment
-// for the cookie-capture bug this fixes.
+// for the cookie-capture bug this fixes. Its own commands stay registered
+// (harmless, unused) - Slack now goes through embedded_webview.rs like
+// Gmail/WhatsApp, see that module's comment for why.
 mod slack;
 mod timelog;
-// Client Communications - WhatsApp, unofficial route (Phase B follow-up,
-// 2026-09-26) - see src/whatsapp_web.rs's own module comment.
-mod whatsapp_web;
-// Client Communications - Gmail, real inbox (Phase B follow-up, 2026-09-26)
-// - see src/gmail_web.rs's own module comment.
-mod gmail_web;
+// Client Communications - real pages embedded inside the main window
+// (Phase B follow-up, 2026-09-26) - see src/embedded_webview.rs's own
+// module comment. Replaces this round's earlier separate-window attempt.
+mod embedded_webview;
 
 // Launch-on-Windows-startup (Phase 2.5 batch A / A-fix, 2026-09-26/27):
 // history kept here since it explains why autostart setup does NOT live in
@@ -78,11 +78,10 @@ fn main() {
             slack::slack_get_history,
             slack::slack_send_message,
             slack::slack_auth_test,
-            // Phase B follow-up: WhatsApp, unofficial route (src/whatsapp_web.rs)
-            whatsapp_web::open_whatsapp_web,
-            whatsapp_web::whatsapp_web_status,
-            // Phase B follow-up: Gmail, real inbox (src/gmail_web.rs)
-            gmail_web::open_gmail_web,
+            // Phase B follow-up: Gmail/WhatsApp/Slack embedded in the main
+            // window (src/embedded_webview.rs)
+            embedded_webview::embed_webview,
+            embedded_webview::hide_embedded_webview,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");

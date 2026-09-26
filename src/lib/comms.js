@@ -83,20 +83,30 @@ export async function sendReply(threadId, body, myUid) {
   throw new Error('Unknown channel: ' + account.channel);
 }
 
-// Whether the current user has ANY comms access at all (admin, or at least
-// one grant) - used to decide whether to show the sidebar nav item at all.
-// Admin/manager get it unconditionally elsewhere (main.js checks
-// isAdmin()/canManage() directly, cheap and synchronous); this only needs
-// to cover the "admin granted a specific employee" case (2026-09-25).
-// WhatsApp - unofficial route (2026-09-26, replaces the Cloud API path,
-// which was blocked on Meta's own business-number-registration failing).
-// Opens the real web.whatsapp.com in a dedicated Tauri window
-// (src-tauri/src/whatsapp_web.rs), filtered to only the chats matching a
-// contact this account is actually allowed to see - same privacy rule every
-// other channel already applies, just enforced by hiding chat rows instead
-// of by never storing them (there's nothing to store - WhatsApp Web is
-// never scraped into commsMessages, only displayed).
-export async function listWhatsAppContactIdentifiers() {
+// Real pages, embedded in the main window (2026-09-26 follow-up, replaces
+// this round's earlier separate-window attempt - see
+// src-tauri/src/embedded_webview.rs's own comment for why). The IMAP-poll/
+// three-pane reader above (listThreads/listMessages/sendReply's gmail
+// branch, and Slack's cookie/token dance in src-tauri/src/slack.rs) is the
+// original build for Gmail/Slack - kept working, not removed - but Humayun
+// asked for the actual real web app for all three channels instead of a
+// custom rebuild of one.
+export const EMBED_URL = {
+  gmail: 'https://mail.google.com/',
+  whatsapp: 'https://web.whatsapp.com/',
+  slack: 'https://app.slack.com/',
+};
+
+// WhatsApp only: filters the real page's own chat list down to contacts
+// actually connected to this account - the same privacy rule every other
+// channel already applies, just enforced by hiding chat rows instead of by
+// never storing them (there's nothing to store here - the real page is
+// only ever displayed, never scraped into commsMessages). Gmail and Slack
+// get no filter - a full, real inbox/workspace is the point for those.
+// Written defensively: if WhatsApp's own markup doesn't match
+// ROW_SELECTOR, or no allow-list is configured, every chat stays visible
+// rather than the filter hiding everything (fails open, never closed).
+export async function buildWhatsAppFilterScript() {
   const snap = await db.collection('commsContacts').where('channel', '==', 'whatsapp').get();
   const identifiers = [];
   snap.docs.forEach((d) => {
@@ -104,27 +114,36 @@ export async function listWhatsAppContactIdentifiers() {
     if (c.externalAddress) identifiers.push(c.externalAddress);
     if (c.name) identifiers.push(c.name);
   });
-  return identifiers;
+  if (!identifiers.length) return null;
+  return `(function () {
+    var ALLOWED = ${JSON.stringify(identifiers)}.map(function (s) { return String(s).toLowerCase(); }).filter(Boolean);
+    var ROW_SELECTOR = '[data-testid="cell-frame-container"]';
+    function applyFilter() {
+      var rows = document.querySelectorAll(ROW_SELECTOR);
+      if (!rows.length) return false;
+      rows.forEach(function (row) {
+        var text = (row.textContent || '').toLowerCase();
+        var match = ALLOWED.some(function (needle) { return text.indexOf(needle) !== -1; });
+        var item = row.closest('[role="listitem"]') || row;
+        item.style.display = match ? '' : 'none';
+      });
+      return true;
+    }
+    var tries = 0;
+    var poll = setInterval(function () {
+      tries++;
+      if (applyFilter() || tries > 40) clearInterval(poll);
+    }, 500);
+    var pane = document.getElementById('pane-side') || document.body;
+    new MutationObserver(function () { applyFilter(); }).observe(pane, { childList: true, subtree: true });
+  })();`;
 }
 
-export async function openWhatsAppWeb() {
-  const identifiers = await listWhatsAppContactIdentifiers();
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke('open_whatsapp_web', { allowedContacts: identifiers });
-}
-
-// Gmail - real inbox (2026-09-26 follow-up). The IMAP-poll/three-pane
-// reader below (listThreads/listMessages/sendReply's gmail branch) is the
-// original build - kept working, not removed - but Humayun asked for the
-// actual, full gmail.com inbox instead of a custom rebuild of one. Same
-// approach as WhatsApp: a real, live, logged-in window, nothing scraped or
-// filtered (a full inbox is the point here, unlike WhatsApp's contact
-// filter).
-export async function openGmailWeb() {
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke('open_gmail_web');
-}
-
+// Whether the current user has ANY comms access at all (admin, or at least
+// one grant) - used to decide whether to show the sidebar nav item at all.
+// Admin/manager get it unconditionally elsewhere (main.js checks
+// isAdmin()/canManage() directly, cheap and synchronous); this only needs
+// to cover the "admin granted a specific employee" case (2026-09-25).
 export async function hasAnyCommsGrant(myUid) {
   if (!myUid) return false;
   const snap = await db.collection('commsAccountGrants').where('userId', '==', myUid).limit(1).get();
