@@ -40,12 +40,9 @@ fn build_script(allowed: &[String]) -> String {
 (function () {{
   var ALLOWED = {allowed_json}.map(function (s) {{ return String(s).toLowerCase(); }}).filter(Boolean);
 
-  // Best-effort: hide WhatsApp's own onboarding/update nag banners so this
-  // reads as part of the app, not a stray browser tab. Never touches the
-  // chat list, the message pane, or anything Humayun needs to actually use.
-  var style = document.createElement('style');
-  style.textContent = '#app > div > header, div[data-testid="chatlist-header"] { -webkit-app-region: no-drag; }';
-  document.documentElement.appendChild(style);
+  // "Doesn't look like a browser page" already comes from this being a
+  // plain chromeless Tauri window (no address bar, no tabs - same as
+  // Slack's login window) - nothing further to inject here for that part.
 
   if (!ALLOWED.length) return; // no allow-list configured - show every chat, unfiltered.
 

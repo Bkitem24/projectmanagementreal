@@ -61,6 +61,18 @@ export async function listOtherTeamMembers(myUid, myTeamId) {
   return snap.docs.map((d) => d.data()).filter((p) => p.id !== myUid);
 }
 
+// Leave a group chat (removes only your own participant row - RLS only
+// allows self-removal, schema_v39.sql). Never used for team_default (you
+// can't opt out of your own Team's default chat) or direct (leaving a 1:1
+// would just orphan the other person's view of it) - MessagingPage.jsx only
+// ever shows the "Leave" action for kind='group'.
+export async function leaveConversation(conversationId, myUid) {
+  const snap = await db.collection('messagingParticipants').where('conversationId', '==', conversationId).where('userId', '==', myUid).get();
+  if (snap.empty) return;
+  const { error } = await supabase.from('messagingParticipants').delete().eq('id', snap.docs[0].id);
+  if (error) throw error;
+}
+
 export async function deleteMessage(messageId) {
   const { error } = await supabase.from('messagingMessages').delete().eq('id', messageId);
   if (error) throw error;

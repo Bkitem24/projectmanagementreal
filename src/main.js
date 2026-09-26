@@ -6753,6 +6753,20 @@ function hideIdleWarningOverlay(){
               .catch(function(){});
           }
         }
+        // Messaging unread dot (checked once at boot, not live - a full
+        // live badge would need its own persistent Realtime listener here
+        // in main.js, same shape as startNotificationsListener() above;
+        // deferred as a real "not yet done" item, not silently skipped).
+        var messagingNav = document.getElementById('navMessaging');
+        if(messagingNav){
+          import('./lib/messaging.js').then(function(messaging){ return messaging.listMyConversations(myUid); })
+            .then(function(convs){
+              if(convs.some(function(c){ return c.unread; })){
+                messagingNav.insertAdjacentHTML('beforeend', '<span id="navMessagingDot" style="display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--blue);margin-left:6px;"></span>');
+              }
+            })
+            .catch(function(){});
+        }
         // Real bug (2026-09-29, "my own role/everyone's role shows as a raw
         // lowercase key, even after reloading"): this render call used to
         // be the ONLY place renderIdentityCard() ever runs, and it fired

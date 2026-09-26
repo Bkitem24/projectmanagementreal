@@ -11,7 +11,6 @@ import { ScrollArea } from '../components/ui/scroll-area.jsx';
 import { db } from '../lib/db.js';
 import * as messaging from '../lib/messaging.js';
 import NewGroupChatDialog from './messaging/NewGroupChatDialog.jsx';
-import NewDirectChatDialog from './messaging/NewDirectChatDialog.jsx';
 
 const EMOJI_CHOICES = ['👍', '❤️', '😂', '😮', '😢', '🙏'];
 
@@ -26,16 +25,22 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
   const [quoted, setQuoted] = useState(null);
   const [typingUsers, setTypingUsers] = useState([]);
   const [groupDialogOpen, setGroupDialogOpen] = useState(false);
-  const [directDialogOpen, setDirectDialogOpen] = useState(false);
+  const [teamMembers, setTeamMembers] = useState([]);
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
   const typingRef = useRef(null);
   const typingTimeoutRef = useRef(null);
+  const recorderRef = useRef(null);
+  const [recording, setRecording] = useState(false);
 
   function refreshConversations() {
     messaging.listMyConversations(myUid).then(setConversations).catch((e) => setError(messaging.errMsg(e)));
   }
   useEffect(refreshConversations, [myUid]);
+
+  useEffect(() => {
+    messaging.listOtherTeamMembers(myUid, myTeamId).then(setTeamMembers).catch(() => {});
+  }, [myUid, myTeamId]);
 
   useEffect(() => {
     if (!myTeamId) return;
@@ -99,11 +104,13 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
     return (p && (p.displayName || p.email)) || 'Someone';
   }
 
-  function handleDirectStarted(conversationId) {
-    messaging.listMyConversations(myUid).then((convs) => {
-      setConversations(convs);
-      const found = convs.find((c) => c.id === conversationId);
-      if (found) setSelected(found);
+  function handleMessagePerson(otherUserId) {
+    messaging.startDirectChat(otherUserId, myUid, myTeamId).then((conversationId) => {
+      messaging.listMyConversations(myUid).then((convs) => {
+        setConversations(convs);
+        const found = convs.find((c) => c.id === conversationId);
+        if (found) setSelected(found);
+      });
     }).catch((e) => setError(messaging.errMsg(e)));
   }
 
@@ -115,9 +122,39 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
       .catch((e2) => setError(messaging.errMsg(e2)));
   }
 
+  function handleLeaveConversation(e, conversationId) {
+    e.stopPropagation();
+    if (!window.confirm('Leave this group chat? You can be re-added by an admin/manager later.')) return;
+    messaging.leaveConversation(conversationId, myUid)
+      .then(() => { if (selected && selected.id === conversationId) setSelected(null); refreshConversations(); })
+      .catch((e2) => setError(messaging.errMsg(e2)));
+  }
+
   function handleDeleteMessage(messageId) {
     if (!window.confirm('Delete this message?')) return;
     messaging.deleteMessage(messageId).catch((e) => setError(messaging.errMsg(e)));
+  }
+
+  function handleToggleRecording() {
+    if (recording) {
+      recorderRef.current && recorderRef.current.stop();
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+      const rec = new MediaRecorder(stream);
+      const chunks = [];
+      rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+      rec.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+        setRecording(false);
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const file = new File([blob], 'voice-note.webm', { type: 'audio/webm' });
+        handleSend(file);
+      };
+      rec.start();
+      recorderRef.current = rec;
+      setRecording(true);
+    }).catch((e) => setError(messaging.errMsg(e)));
   }
 
   if (conversations === null && !error) {
@@ -129,14 +166,28 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
       <div className="w-64 border-r border-border flex flex-col">
         <div className="p-3 flex items-center justify-between border-b border-border gap-1">
           <h2 className="font-semibold">Chats</h2>
-          <div className="flex gap-1">
-            <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => setDirectDialogOpen(true)}>New chat</Button>
-            {canManage && (
-              <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => setGroupDialogOpen(true)}>+ Group</Button>
-            )}
-          </div>
+          {canManage && (
+            <Button variant="ghost" className="h-7 px-2 text-xs" onClick={() => setGroupDialogOpen(true)}>+ Group</Button>
+          )}
         </div>
         <ScrollArea className="flex-1">
+          {teamMembers.length > 0 && (
+            <div className="border-b border-border">
+              <div className="px-3 pt-2 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Team</div>
+              {teamMembers.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => handleMessagePerson(p.id)}
+                  className="w-full text-left px-3 py-1.5 hover:bg-muted transition-colors text-sm truncate"
+                >
+                  {p.displayName || p.email}
+                </button>
+              ))}
+            </div>
+          )}
+          {conversations && conversations.length > 0 && (
+            <div className="px-3 pt-2 pb-1 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Chats</div>
+          )}
           {conversations && conversations.map((c) => {
             const title = c.kind === 'team_default' ? 'Team chat' : (c.name || 'Direct message');
             const preview = c.latestMessage ? (c.latestMessage.body || (c.latestMessage.attachmentType ? '📎 Attachment' : '')) : 'No messages yet';
@@ -153,14 +204,18 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
                   </div>
                   <div className="text-xs text-muted-foreground truncate">{preview}</div>
                 </div>
-                {c.kind === 'group' && canManage && (
-                  <span
-                    role="button"
-                    className="text-xs text-muted-foreground hover:text-destructive shrink-0"
-                    onClick={(e) => handleDeleteConversation(e, c.id)}
-                    title="Delete group chat"
-                  >
-                    🗑
+                {c.kind === 'group' && (
+                  <span className="flex items-center gap-1.5 shrink-0">
+                    {!canManage && (
+                      <span role="button" className="text-xs text-muted-foreground hover:text-destructive" onClick={(e) => handleLeaveConversation(e, c.id)} title="Leave group chat">
+                        Leave
+                      </span>
+                    )}
+                    {canManage && (
+                      <span role="button" className="text-xs text-muted-foreground hover:text-destructive" onClick={(e) => handleDeleteConversation(e, c.id)} title="Delete group chat">
+                        🗑
+                      </span>
+                    )}
                   </span>
                 )}
               </button>
@@ -230,6 +285,9 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
             <div className="border-t border-border p-3 flex gap-2 items-end">
               <input ref={fileInputRef} type="file" className="hidden" onChange={handleFilePick} />
               <Button variant="outline" className="h-9" onClick={() => fileInputRef.current && fileInputRef.current.click()}>📎</Button>
+              <Button variant="outline" className={'h-9 ' + (recording ? 'bg-destructive text-white' : '')} onClick={handleToggleRecording} title={recording ? 'Stop recording' : 'Record a voice note'}>
+                {recording ? '⏹' : '🎙'}
+              </Button>
               <Textarea
                 value={body}
                 onChange={handleBodyChange}
@@ -249,13 +307,6 @@ export default function MessagingPage({ myUid, myTeamId, canManage }) {
         myUid={myUid}
         myTeamId={myTeamId}
         onCreated={() => refreshConversations()}
-      />
-      <NewDirectChatDialog
-        open={directDialogOpen}
-        onOpenChange={setDirectDialogOpen}
-        myUid={myUid}
-        myTeamId={myTeamId}
-        onStarted={handleDirectStarted}
       />
 
       {error && (
