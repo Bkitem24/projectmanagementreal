@@ -10,6 +10,9 @@ mod mp4fix;
 // for the cookie-capture bug this fixes.
 mod slack;
 mod timelog;
+// Client Communications - WhatsApp, unofficial route (Phase B follow-up,
+// 2026-09-26) - see src/whatsapp_web.rs's own module comment.
+mod whatsapp_web;
 
 // Launch-on-Windows-startup (Phase 2.5 batch A / A-fix, 2026-09-26/27):
 // history kept here since it explains why autostart setup does NOT live in
@@ -72,6 +75,9 @@ fn main() {
             slack::slack_get_history,
             slack::slack_send_message,
             slack::slack_auth_test,
+            // Phase B follow-up: WhatsApp, unofficial route (src/whatsapp_web.rs)
+            whatsapp_web::open_whatsapp_web,
+            whatsapp_web::whatsapp_web_status,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Blue Kite Ops");

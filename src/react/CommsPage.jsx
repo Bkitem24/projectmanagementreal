@@ -32,6 +32,12 @@ export default function CommsPage({ myUid, isAdmin }) {
   const [replyBody, setReplyBody] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState(null);
+  const [waOpening, setWaOpening] = useState(false);
+
+  function handleOpenWhatsApp() {
+    setWaOpening(true);
+    comms.openWhatsAppWeb().catch((e) => setError((e && e.message) || String(e))).finally(() => setWaOpening(false));
+  }
 
   useEffect(() => {
     if (adminOpen) return; // re-fetch when the admin screen closes, so a newly-created account shows up
@@ -122,8 +128,13 @@ export default function CommsPage({ myUid, isAdmin }) {
         <div className="p-3 border-b border-border font-semibold">Conversations</div>
         <ScrollArea className="flex-1">
           {!selectedAccount && <div className="p-3 text-muted-foreground text-xs">Pick an account on the left.</div>}
-          {selectedAccount && threads.length === 0 && <div className="p-3 text-muted-foreground text-xs">No conversations yet.</div>}
-          {threads.map((t) => (
+          {selectedAccount && selectedAccount.channel === 'whatsapp' && (
+            <div className="p-3 text-xs text-muted-foreground">
+              WhatsApp opens in its own window - real chats, filtered to your connected contacts.
+            </div>
+          )}
+          {selectedAccount && selectedAccount.channel !== 'whatsapp' && threads.length === 0 && <div className="p-3 text-muted-foreground text-xs">No conversations yet.</div>}
+          {selectedAccount && selectedAccount.channel !== 'whatsapp' && threads.map((t) => (
             <button
               key={t.id}
               onClick={() => setSelectedThread(t)}
@@ -141,10 +152,20 @@ export default function CommsPage({ myUid, isAdmin }) {
 
       {/* Messages */}
       <div className="flex-1 flex flex-col">
-        {!selectedThread && (
+        {selectedAccount && selectedAccount.channel === 'whatsapp' && (
+          <div className="flex-1 flex flex-col items-center justify-center gap-3">
+            <p className="text-muted-foreground text-sm max-w-xs text-center">
+              Real WhatsApp Web, in its own window - filtered to only the contacts connected to this account.
+            </p>
+            <Button className="bg-[var(--blue)] hover:opacity-90" disabled={waOpening} onClick={handleOpenWhatsApp}>
+              {waOpening ? 'Opening…' : 'Open WhatsApp'}
+            </Button>
+          </div>
+        )}
+        {(!selectedAccount || selectedAccount.channel !== 'whatsapp') && !selectedThread && (
           <div className="flex-1 flex items-center justify-center text-muted-foreground">Select a conversation</div>
         )}
-        {selectedThread && (
+        {selectedAccount && selectedAccount.channel !== 'whatsapp' && selectedThread && (
           <React.Fragment>
             <ScrollArea className="flex-1 p-4 space-y-3">
               {messages.map((m) => (

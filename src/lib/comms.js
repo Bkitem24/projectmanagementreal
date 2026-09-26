@@ -88,6 +88,31 @@ export async function sendReply(threadId, body, myUid) {
 // Admin/manager get it unconditionally elsewhere (main.js checks
 // isAdmin()/canManage() directly, cheap and synchronous); this only needs
 // to cover the "admin granted a specific employee" case (2026-09-25).
+// WhatsApp - unofficial route (2026-09-26, replaces the Cloud API path,
+// which was blocked on Meta's own business-number-registration failing).
+// Opens the real web.whatsapp.com in a dedicated Tauri window
+// (src-tauri/src/whatsapp_web.rs), filtered to only the chats matching a
+// contact this account is actually allowed to see - same privacy rule every
+// other channel already applies, just enforced by hiding chat rows instead
+// of by never storing them (there's nothing to store - WhatsApp Web is
+// never scraped into commsMessages, only displayed).
+export async function listWhatsAppContactIdentifiers() {
+  const snap = await db.collection('commsContacts').where('channel', '==', 'whatsapp').get();
+  const identifiers = [];
+  snap.docs.forEach((d) => {
+    const c = d.data();
+    if (c.externalAddress) identifiers.push(c.externalAddress);
+    if (c.name) identifiers.push(c.name);
+  });
+  return identifiers;
+}
+
+export async function openWhatsAppWeb() {
+  const identifiers = await listWhatsAppContactIdentifiers();
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke('open_whatsapp_web', { allowedContacts: identifiers });
+}
+
 export async function hasAnyCommsGrant(myUid) {
   if (!myUid) return false;
   const snap = await db.collection('commsAccountGrants').where('userId', '==', myUid).limit(1).get();
